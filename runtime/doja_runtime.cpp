@@ -7,9 +7,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <thread>
 
@@ -465,6 +467,585 @@ bool decode_gif(const uint8_t* data, size_t size, ImageData& img_out, PaletteDat
     return true;
 }
 
+// ============================================================================
+// MFi2 (.mld) Polyphonic + 4-bit ADPCM Synthesizer & SDL2 Audio Engine
+// ============================================================================
+struct MldSound {
+    std::vector<int16_t> pcm;
+    size_t loop_start_sample = 0;
+    size_t loop_end_sample = 0;
+    bool has_loop = false;
+    int32_t duration_ms = 250;
+};
+
+struct MldAudioEngine {
+    static constexpr int SAMPLE_RATE = 44100;
+    static constexpr int NUM_PORTS = 4;
+
+    struct PortState {
+        int sound_id = -1;
+        size_t sample_pos = 0;
+        int volume = 100;
+        bool playing = false;
+        bool loop = false;
+        Ref active_presenter = 0;
+        int64_t start_time_ms = 0;
+        int32_t duration_ms = 0;
+    };
+
+    SDL_AudioDeviceID dev_id = 0;
+    std::mutex mtx;
+    std::vector<MldSound> sounds;
+    PortState ports[NUM_PORTS];
+
+    void init_sdl_audio() {
+        if (dev_id != 0) return;
+        SDL_AudioSpec want{}, have{};
+        want.freq = SAMPLE_RATE;
+        want.format = AUDIO_S16SYS;
+        want.channels = 1;
+        want.samples = 1024;
+        want.callback = &MldAudioEngine::sdl_audio_callback;
+        want.userdata = this;
+        dev_id = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+        if (dev_id != 0) {
+            SDL_PauseAudioDevice(dev_id, 0);
+        } else {
+            std::cerr << "SDL_OpenAudioDevice warning: " << SDL_GetError() << "\n";
+        }
+    }
+
+    void shutdown_sdl_audio() {
+        if (dev_id != 0) {
+            SDL_CloseAudioDevice(dev_id);
+            dev_id = 0;
+        }
+        std::lock_guard<std::mutex> lk(mtx);
+        for (int i = 0; i < NUM_PORTS; ++i) {
+            ports[i] = PortState{};
+        }
+    }
+
+    static void SDLCALL sdl_audio_callback(void* userdata, Uint8* stream, int len) {
+        auto* self = static_cast<MldAudioEngine*>(userdata);
+        int16_t* out = reinterpret_cast<int16_t*>(stream);
+        int num_samples = len / static_cast<int>(sizeof(int16_t));
+        std::lock_guard<std::mutex> lk(self->mtx);
+
+        for (int i = 0; i < num_samples; ++i) {
+            int32_t mix = 0;
+            for (int p = 0; p < NUM_PORTS; ++p) {
+                PortState& ps = self->ports[p];
+                if (!ps.playing || ps.sound_id < 0 || static_cast<size_t>(ps.sound_id) >= self->sounds.size()) {
+                    continue;
+                }
+                const MldSound& snd = self->sounds[ps.sound_id];
+                if (snd.pcm.empty()) {
+                    ps.playing = false;
+                    continue;
+                }
+                if (ps.loop && snd.has_loop && ps.sample_pos >= snd.loop_end_sample) {
+                    ps.sample_pos = snd.loop_start_sample;
+                } else if (ps.sample_pos >= snd.pcm.size()) {
+                    if (ps.loop) {
+                        ps.sample_pos = snd.has_loop ? snd.loop_start_sample : 0;
+                    } else {
+                        ps.playing = false;
+                        continue;
+                    }
+                }
+                int32_t s = snd.pcm[ps.sample_pos++];
+                mix += (s * ps.volume) / 100;
+            }
+            if (mix > 32767) mix = 32767;
+            if (mix < -32768) mix = -32768;
+            out[i] = static_cast<int16_t>(mix);
+        }
+    }
+
+    static uint16_t read_be16(const uint8_t* p) {
+        return static_cast<uint16_t>((p[0] << 8) | p[1]);
+    }
+
+    static uint32_t read_be32(const uint8_t* p) {
+        return (static_cast<uint32_t>(p[0]) << 24) |
+               (static_cast<uint32_t>(p[1]) << 16) |
+               (static_cast<uint32_t>(p[2]) << 8) |
+               static_cast<uint32_t>(p[3]);
+    }
+
+    static std::vector<int16_t> decode_adpcm_8k(const uint8_t* data, size_t len) {
+        static const int step_table[49] = {
+            16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+            50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143,
+            157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449,
+            494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552
+        };
+        static const int index_table[16] = {
+            -1, -1, -1, -1, 2, 4, 6, 8,
+            -1, -1, -1, -1, 2, 4, 6, 8
+        };
+        std::vector<int16_t> out;
+        out.reserve(len * 2);
+        int predictor = 0;
+        int step_idx = 0;
+        for (size_t i = 0; i < len; ++i) {
+            uint8_t byte = data[i];
+            for (int nib_idx = 0; nib_idx < 2; ++nib_idx) {
+                uint8_t nib = (nib_idx == 0) ? ((byte >> 4) & 0x0F) : (byte & 0x0F);
+                int step = step_table[step_idx];
+                int diff = step >> 3;
+                if (nib & 1) diff += step >> 2;
+                if (nib & 2) diff += step >> 1;
+                if (nib & 4) diff += step;
+                if (nib & 8) predictor -= diff;
+                else predictor += diff;
+                predictor = std::clamp(predictor, -2048, 2047);
+                step_idx = std::clamp(step_idx + index_table[nib], 0, 48);
+                out.push_back(static_cast<int16_t>(predictor * 12));
+            }
+        }
+        return out;
+    }
+
+    int load_mld(const uint8_t* data, size_t size) {
+        MldSound snd;
+        if (size < 10 || std::memcmp(data, "melo", 4) != 0) {
+            std::lock_guard<std::mutex> lk(mtx);
+            int id = static_cast<int>(sounds.size());
+            sounds.push_back(std::move(snd));
+            return id;
+        }
+
+        uint32_t file_len = read_be32(data + 4);
+        uint16_t hdr_len = read_be16(data + 8);
+        size_t p = 10 + hdr_len;
+        size_t end = std::min(size, static_cast<size_t>(8 + file_len));
+
+        std::vector<int16_t> adpcm_8k;
+
+        struct TempoChange {
+            int32_t tick;
+            double sec_per_tick;
+        };
+        struct PitchChange {
+            int32_t tick;
+            int ch;
+            double semitones;
+        };
+        struct NoteEv {
+            int32_t start_tick;
+            int32_t end_tick;
+            int ch;
+            int midi_note;
+            int velocity;
+            int prog;
+            int ch_vol;
+            bool is_drum;
+        };
+        struct AdpcmEv {
+            int32_t tick;
+            bool play;
+            int vol;
+        };
+
+        std::vector<TempoChange> tempos = {{0, 60.0 / (120.0 * 24.0)}};
+        std::vector<PitchChange> pitches;
+        std::vector<NoteEv> notes;
+        std::vector<AdpcmEv> adpcm_evs;
+
+        int32_t loop_start_tick = 0;
+        int32_t loop_end_tick = 0;
+        bool has_loop = false;
+        int32_t max_tick = 0;
+
+        int bank[16] = {0};
+        int prog[16] = {0};
+        int ch_vol[16];
+        int bend_range[16];
+        bool is_drum[16] = {false};
+        for (int i = 0; i < 16; ++i) {
+            ch_vol[i] = 52;
+            bend_range[i] = 2;
+        }
+        is_drum[9] = true; // MFi2 trac 2 voice 1 (ch 9) is standard percussion
+
+        int trac_idx = 0;
+        while (p + 8 <= end) {
+            const uint8_t* tag = data + p;
+            uint32_t clen = read_be32(data + p + 4);
+            p += 8;
+            if (p + clen > end) break;
+
+            if (std::memcmp(tag, "adat", 4) == 0 && clen > 13) {
+                uint16_t ahdr = read_be16(data + p);
+                size_t aoff = std::min<size_t>(clen, 2 + ahdr);
+                adpcm_8k = decode_adpcm_8k(data + p + aoff, clen - aoff);
+            } else if (std::memcmp(tag, "trac", 4) == 0 && trac_idx < 4) {
+                size_t tp = p;
+                size_t tend = p + clen;
+                int32_t ticks = 0;
+                while (tp + 4 <= tend) {
+                    uint8_t dt = data[tp];
+                    uint8_t st = data[tp + 1];
+                    ticks += dt;
+                    if (st == 0xFF) {
+                        uint8_t cmd = data[tp + 2];
+                        if (cmd >= 0xF0) {
+                            if (tp + 5 > tend) break;
+                            uint16_t slen = read_be16(data + tp + 3);
+                            tp += 5 + slen;
+                        } else {
+                            uint8_t arg = data[tp + 3];
+                            if (cmd == 0xDC) {
+                                ticks += static_cast<int32_t>(arg) * 256;
+                            } else if (cmd >= 0xC0 && cmd <= 0xCF) {
+                                int tb = cmd & 0x07;
+                                int tpqn = 12 << std::max(0, tb - 2);
+                                int bpm = std::max<int>(1, arg);
+                                tempos.push_back({ticks, 60.0 / (static_cast<double>(bpm) * tpqn)});
+                            } else if (cmd == 0xDD) {
+                                if (arg == 0) {
+                                    loop_start_tick = ticks;
+                                } else if (arg == 1) {
+                                    loop_end_tick = ticks;
+                                    has_loop = true;
+                                }
+                            } else if (cmd == 0xBA) {
+                                int d_ch = (arg >> 3) & 0x0F;
+                                is_drum[d_ch] = (arg & 1) != 0;
+                            } else if (cmd == 0xE1) {
+                                int v = (arg >> 6) & 3;
+                                int ch = trac_idx * 4 + v;
+                                bank[ch] = (arg & 1) << 6;
+                            } else if (cmd == 0xE0) {
+                                int v = (arg >> 6) & 3;
+                                int ch = trac_idx * 4 + v;
+                                prog[ch] = bank[ch] | (arg & 0x3F);
+                            } else if (cmd == 0xE2) {
+                                int v = (arg >> 6) & 3;
+                                int ch = trac_idx * 4 + v;
+                                ch_vol[ch] = arg & 0x3F;
+                            } else if (cmd == 0xE7) {
+                                int v = (arg >> 6) & 3;
+                                int ch = trac_idx * 4 + v;
+                                bend_range[ch] = std::max(1, static_cast<int>(arg & 0x3F));
+                            } else if (cmd == 0xE4) {
+                                int v = (arg >> 6) & 3;
+                                int ch = trac_idx * 4 + v;
+                                int bend_val = static_cast<int>(arg & 0x3F) - 32;
+                                double semi = (static_cast<double>(bend_val) / 32.0) * bend_range[ch];
+                                pitches.push_back({ticks, ch, semi});
+                            }
+                            tp += 4;
+                        }
+                    } else if ((st & 0x3F) == 0x3F) {
+                        uint8_t cmd = data[tp + 2];
+                        if (cmd == 0x00 && tp + 5 <= tend) {
+                            uint8_t arg1 = data[tp + 3];
+                            uint8_t arg2 = data[tp + 4];
+                            adpcm_evs.push_back({ticks, (arg1 & 0x40) == 0, arg2 & 0x3F});
+                            tp += 5;
+                        } else {
+                            uint8_t arg = data[tp + 3];
+                            adpcm_evs.push_back({ticks, (arg & 0x40) == 0, 60});
+                            tp += 4;
+                        }
+                    } else {
+                        uint8_t gate = data[tp + 2];
+                        uint8_t vel_oct = data[tp + 3];
+                        int v = (st >> 6) & 3;
+                        int ch = trac_idx * 4 + v;
+                        int key_off = st & 0x3F;
+                        int vel = (vel_oct >> 2) & 0x3F;
+                        int ob = vel_oct & 3;
+                        int osh = (ob == 0) ? 0 : (ob == 1 ? 1 : (ob == 2 ? -2 : -1));
+                        int midi_note = 35 + key_off + osh * 12;
+                        if (gate > 0) {
+                            notes.push_back({ticks, ticks + gate, ch, midi_note, vel, prog[ch], ch_vol[ch], is_drum[ch]});
+                            max_tick = std::max(max_tick, ticks + gate);
+                        }
+                        tp += 4;
+                    }
+                }
+                max_tick = std::max(max_tick, ticks);
+                trac_idx++;
+            }
+            p += clen;
+        }
+
+        std::sort(tempos.begin(), tempos.end(), [](const TempoChange& a, const TempoChange& b) {
+            return a.tick < b.tick;
+        });
+
+        auto tick_to_sec = [&](int32_t target_tick) -> double {
+            double sec = 0.0;
+            int32_t cur_tick = 0;
+            double cur_spt = tempos[0].sec_per_tick;
+            for (const auto& tc : tempos) {
+                if (tc.tick >= target_tick) break;
+                if (tc.tick > cur_tick) {
+                    sec += (tc.tick - cur_tick) * cur_spt;
+                    cur_tick = tc.tick;
+                }
+                cur_spt = tc.sec_per_tick;
+            }
+            if (target_tick > cur_tick) {
+                sec += (target_tick - cur_tick) * cur_spt;
+            }
+            return sec;
+        };
+
+        double total_sec = tick_to_sec(max_tick);
+        if (!adpcm_8k.empty()) {
+            double adpcm_sec = static_cast<double>(adpcm_8k.size()) / 8000.0;
+            if (!adpcm_evs.empty()) {
+                for (const auto& ae : adpcm_evs) {
+                    if (ae.play) {
+                        total_sec = std::max(total_sec, tick_to_sec(ae.tick) + adpcm_sec);
+                    }
+                }
+            } else {
+                total_sec = std::max(total_sec, adpcm_sec);
+            }
+        }
+        total_sec = std::clamp(total_sec, 0.08, 300.0);
+
+        size_t total_samples = static_cast<size_t>(total_sec * SAMPLE_RATE) + 1;
+        std::vector<float> mix_buf(total_samples, 0.0f);
+
+        if (has_loop && loop_end_tick > loop_start_tick) {
+            snd.has_loop = true;
+            snd.loop_start_sample = std::min(total_samples - 1, static_cast<size_t>(tick_to_sec(loop_start_tick) * SAMPLE_RATE));
+            snd.loop_end_sample = std::min(total_samples, static_cast<size_t>(tick_to_sec(loop_end_tick) * SAMPLE_RATE));
+        }
+        snd.duration_ms = std::max<int32_t>(80, static_cast<int32_t>(total_sec * 1000.0));
+
+        // Pre-convert pitch bend events to sample indices
+        struct SamplePitch {
+            size_t sample;
+            int ch;
+            double semitones;
+        };
+        std::vector<SamplePitch> sample_pitches;
+        sample_pitches.reserve(pitches.size());
+        for (const auto& pe : pitches) {
+            sample_pitches.push_back({static_cast<size_t>(tick_to_sec(pe.tick) * SAMPLE_RATE), pe.ch, pe.semitones});
+        }
+
+        // Render polyphonic notes
+        uint32_t lfsr = 0xACE1u;
+        for (const auto& n : notes) {
+            size_t s0 = static_cast<size_t>(tick_to_sec(n.start_tick) * SAMPLE_RATE);
+            size_t s1 = static_cast<size_t>(tick_to_sec(n.end_tick) * SAMPLE_RATE);
+            if (s0 >= total_samples) continue;
+            // Allow short release tail
+            size_t rel_samples = n.is_drum ? static_cast<size_t>(0.12 * SAMPLE_RATE) : static_cast<size_t>(0.025 * SAMPLE_RATE);
+            size_t s_end = std::min(total_samples, s1 + rel_samples);
+            if (s_end <= s0) continue;
+
+            float amp = (static_cast<float>(n.velocity) / 63.0f) * (static_cast<float>(n.ch_vol) / 63.0f) * 0.22f;
+            if (amp <= 0.001f) continue;
+
+            double base_freq = 440.0 * std::pow(2.0, (n.midi_note - 69) / 12.0);
+            double phase = 0.0;
+
+            for (size_t s = s0; s < s_end; ++s) {
+                float t_note = static_cast<float>(s - s0) / SAMPLE_RATE;
+                float gate_dur = static_cast<float>(std::max<size_t>(1, s1 - s0)) / SAMPLE_RATE;
+                float sample_val = 0.0f;
+
+                if (n.is_drum) {
+                    lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0xB400u);
+                    float noise = (static_cast<float>(lfsr & 0xFFFF) / 32768.0f) - 1.0f;
+                    if (n.midi_note <= 37) {
+                        // Kick drum: fast pitch drop 150Hz -> 44Hz
+                        float env = std::exp(-t_note * 28.0f);
+                        double k_freq = 44.0 + 115.0 * std::exp(-t_note * 45.0);
+                        phase += k_freq / SAMPLE_RATE;
+                        sample_val = static_cast<float>(std::sin(phase * 6.2831853)) * env * 1.6f;
+                    } else if (n.midi_note == 38 || n.midi_note == 40) {
+                        // Snare drum: body tone + crisp noise decay
+                        float env_n = std::exp(-t_note * 22.0f);
+                        float env_b = std::exp(-t_note * 38.0f);
+                        phase += 185.0 / SAMPLE_RATE;
+                        sample_val = (static_cast<float>(std::sin(phase * 6.2831853)) * env_b * 0.6f + noise * env_n * 0.9f) * 1.2f;
+                    } else if (n.midi_note == 42 || n.midi_note == 44) {
+                        // Closed hi-hat
+                        float env = std::exp(-t_note * 55.0f);
+                        sample_val = noise * env * 0.75f;
+                    } else if (n.midi_note == 46) {
+                        // Open hi-hat
+                        float env = std::exp(-t_note * 12.0f);
+                        sample_val = noise * env * 0.75f;
+                    } else if (n.midi_note >= 49) {
+                        // Crash / Ride cymbal
+                        float env = std::exp(-t_note * 6.5f);
+                        phase += 820.0 / SAMPLE_RATE;
+                        float ring = static_cast<float>(std::sin(phase * 6.2831853) * std::sin(phase * 14.9));
+                        sample_val = (noise * 0.7f + ring * 0.3f) * env * 0.85f;
+                    } else {
+                        // Tom
+                        float env = std::exp(-t_note * 18.0f);
+                        double t_freq = base_freq * (0.7 + 0.6 * std::exp(-t_note * 20.0));
+                        phase += t_freq / SAMPLE_RATE;
+                        sample_val = static_cast<float>(std::sin(phase * 6.2831853)) * env * 1.3f;
+                    }
+                } else {
+                    // Check active pitch bend for this channel
+                    double bend_semi = 0.0;
+                    for (const auto& sp : sample_pitches) {
+                        if (sp.sample > s) break;
+                        if (sp.ch == n.ch) bend_semi = sp.semitones;
+                    }
+                    double freq = base_freq * std::pow(2.0, bend_semi / 12.0);
+                    // Gentle vibrato after 180ms on sustained melody notes
+                    if (t_note > 0.18f) {
+                        freq *= 1.0 + 0.004 * std::sin((t_note - 0.18f) * 36.0);
+                    }
+                    phase += freq / SAMPLE_RATE;
+                    double p_frac = phase - std::floor(phase);
+
+                    // Envelope (ADSR)
+                    float env = 1.0f;
+                    if (t_note < 0.004f) {
+                        env = t_note / 0.004f;
+                    } else if (s < s1) {
+                        env = 0.72f + 0.28f * std::exp(-(t_note - 0.004f) * 5.0f);
+                    } else {
+                        float t_rel = t_note - gate_dur;
+                        env = 0.72f * std::exp(-t_rel * 80.0f);
+                    }
+
+                    // Timbre selection based on GM/MFi2 program
+                    float osc = 0.0f;
+                    if (n.prog == 38 || n.prog == 39 || n.midi_note < 48) {
+                        // Synth Bass: triangle + 25% pulse sub-harmonic
+                        float tri = static_cast<float>(1.0 - 4.0 * std::abs(p_frac - 0.5));
+                        float pls = (p_frac < 0.25) ? 0.6f : -0.6f;
+                        osc = 0.65f * tri + 0.35f * pls;
+                    } else if (n.prog == 80 || n.prog == 16 || (n.prog & 1) == 0) {
+                        // Square / Pulse Lead (classic Rockman EXE lead)
+                        osc = (p_frac < 0.5) ? 0.8f : -0.8f;
+                    } else if (n.prog >= 48 && n.prog <= 55) {
+                        // Strings / Pad: warm saw + triangle
+                        float saw = static_cast<float>(2.0 * p_frac - 1.0);
+                        float tri = static_cast<float>(1.0 - 4.0 * std::abs(p_frac - 0.5));
+                        osc = 0.5f * saw + 0.5f * tri;
+                    } else {
+                        // Sawtooth / Brass Lead (25% pulse + saw)
+                        float saw = static_cast<float>(2.0 * p_frac - 1.0);
+                        float pls = (p_frac < 0.25) ? 0.75f : -0.75f;
+                        osc = 0.5f * saw + 0.5f * pls;
+                    }
+                    sample_val = osc * env;
+                }
+
+                mix_buf[s] += sample_val * amp;
+            }
+        }
+
+        // Mix 8kHz ADPCM stream events (upsampled to 44.1kHz with linear interpolation)
+        if (!adpcm_8k.empty()) {
+            auto mix_adpcm_at = [&](size_t start_sample, size_t stop_sample, float vol_scale) {
+                size_t max_s = std::min(total_samples, stop_sample);
+                for (size_t s = start_sample; s < max_s; ++s) {
+                    double pos_8k = static_cast<double>(s - start_sample) * 8000.0 / SAMPLE_RATE;
+                    size_t idx0 = static_cast<size_t>(pos_8k);
+                    if (idx0 >= adpcm_8k.size()) break;
+                    size_t idx1 = std::min(adpcm_8k.size() - 1, idx0 + 1);
+                    double frac = pos_8k - idx0;
+                    double val = (1.0 - frac) * adpcm_8k[idx0] + frac * adpcm_8k[idx1];
+                    mix_buf[s] += static_cast<float>(val / 32768.0) * vol_scale;
+                }
+            };
+
+            if (adpcm_evs.empty()) {
+                mix_adpcm_at(0, total_samples, 0.85f);
+            } else {
+                for (size_t i = 0; i < adpcm_evs.size(); ++i) {
+                    if (!adpcm_evs[i].play) continue;
+                    size_t s0 = static_cast<size_t>(tick_to_sec(adpcm_evs[i].tick) * SAMPLE_RATE);
+                    size_t s1 = total_samples;
+                    for (size_t j = i + 1; j < adpcm_evs.size(); ++j) {
+                        s1 = static_cast<size_t>(tick_to_sec(adpcm_evs[j].tick) * SAMPLE_RATE);
+                        break;
+                    }
+                    float vscale = (std::max(20, adpcm_evs[i].vol) / 63.0f) * 0.9f;
+                    mix_adpcm_at(s0, s1, vscale);
+                }
+            }
+        }
+
+        // Convert float mix buffer to int16 PCM with soft limiting
+        snd.pcm.resize(total_samples);
+        for (size_t i = 0; i < total_samples; ++i) {
+            float x = mix_buf[i];
+            // Soft tanh-like limiter
+            if (x > 1.0f) x = 1.0f;
+            if (x < -1.0f) x = -1.0f;
+            snd.pcm[i] = static_cast<int16_t>(x * 28000.0f);
+        }
+
+        std::lock_guard<std::mutex> lk(mtx);
+        int id = static_cast<int>(sounds.size());
+        sounds.push_back(std::move(snd));
+        return id;
+    }
+
+    void play_port(int port, int sound_id, int volume, Ref presenter_ref, int64_t now_ms) {
+        if (port < 0 || port >= NUM_PORTS) return;
+        std::lock_guard<std::mutex> lk(mtx);
+        if (sound_id < 0 || static_cast<size_t>(sound_id) >= sounds.size()) return;
+        const MldSound& snd = sounds[sound_id];
+        PortState& ps = ports[port];
+        ps.sound_id = sound_id;
+        ps.sample_pos = 0;
+        ps.volume = std::clamp(volume, 0, 100);
+        ps.playing = true;
+        ps.loop = (port == 0 && snd.has_loop);
+        ps.active_presenter = presenter_ref;
+        ps.start_time_ms = now_ms;
+        ps.duration_ms = snd.duration_ms;
+    }
+
+    void stop_port(int port, Ref presenter_ref) {
+        if (port < 0 || port >= NUM_PORTS) return;
+        std::lock_guard<std::mutex> lk(mtx);
+        PortState& ps = ports[port];
+        if (ps.active_presenter == presenter_ref) {
+            ps.playing = false;
+            ps.sample_pos = 0;
+        }
+    }
+
+    void set_port_volume(int port, Ref presenter_ref, int volume) {
+        if (port < 0 || port >= NUM_PORTS) return;
+        std::lock_guard<std::mutex> lk(mtx);
+        PortState& ps = ports[port];
+        if (ps.active_presenter == presenter_ref) {
+            ps.volume = std::clamp(volume, 0, 100);
+        }
+    }
+
+    int32_t get_current_time(int port, Ref presenter_ref, int64_t now_ms) {
+        if (port < 0 || port >= NUM_PORTS) return 0;
+        std::lock_guard<std::mutex> lk(mtx);
+        PortState& ps = ports[port];
+        if (!ps.playing || ps.active_presenter != presenter_ref) {
+            return 0;
+        }
+        int64_t elapsed = std::max<int64_t>(1, now_ms - ps.start_time_ms);
+        if (!ps.loop && elapsed >= ps.duration_ms) {
+            ps.playing = false;
+            return 0;
+        }
+        return static_cast<int32_t>(elapsed);
+    }
+};
+
+static MldAudioEngine g_audio;
+
 } // namespace
 
 // ============================================================================
@@ -548,6 +1129,7 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
                     );
                 }
             }
+            g_audio.init_sdl_audio();
         }
     }
 
@@ -556,6 +1138,7 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
 }
 
 void DojaRuntime::shutdown() {
+    g_audio.shutdown_sdl_audio();
     if (sdl_texture_) {
         SDL_DestroyTexture(static_cast<SDL_Texture*>(sdl_texture_));
         sdl_texture_ = nullptr;
@@ -964,7 +1547,7 @@ void DojaRuntime::sleep_ms(int64_t ms) {
     }
 }
 
-Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char* desc, Slot* args, int /*num_args*/) {
+Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char* desc, Slot* args, int num_args) {
     std::string c(cls);
     std::string m(name);
     std::string d(desc);
@@ -1564,8 +2147,20 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             return Slot(mi_ref);
         }
         if (m == "getSound") {
+            std::vector<uint8_t> mld_bytes;
+            if (d == "(Ljava/lang/String;)Lcom/nttdocomo/ui/MediaSound;") {
+                std::string url = (args[0].r > 0) ? get(args[0].r).str : "";
+                if (url.rfind("resource:///", 0) == 0) {
+                    mld_bytes = read_jar_Bytes(url.substr(12));
+                }
+            } else if (args[0].r > 0) {
+                HeapObject& barr = get(args[0].r);
+                mld_bytes = barr.bytes;
+            }
+            int snd_id = g_audio.load_mld(mld_bytes.data(), mld_bytes.size());
             HeapObject ms_o{};
             ms_o.kind = ObjKind::MediaSound;
+            ms_o.aux_i32 = snd_id;
             Ref ms_ref = static_cast<Ref>(heap_.size());
             heap_.push_back(std::move(ms_o));
             return Slot(ms_ref);
@@ -1580,14 +2175,46 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
 
     if (c == "com/nttdocomo/ui/AudioPresenter") {
         if (m == "getAudioPresenter") {
+            int port = (num_args >= 1) ? args[0].i : 0;
+            if (port < 0 || port >= 4) {
+                throw JavaException(1);
+            }
             HeapObject ap{};
             ap.kind = ObjKind::AudioPresenter;
+            ap.aux_i32 = port;      // Hardware port (0 = BGM, 1..3 = SE)
+            ap.origin_x = 0;        // Bound MediaSound Ref
+            ap.origin_y = 100;      // Volume (0..100)
             Ref r = static_cast<Ref>(heap_.size());
             heap_.push_back(std::move(ap));
             return Slot(r);
         }
-        if (m == "setSound" || m == "setAttribute" || m == "play" || m == "stop") return Slot(0);
-        if (m == "getCurrentTime") return Slot(100);
+        if (args[0].r <= 0) return Slot(0);
+        HeapObject& ap = get(args[0].r);
+        if (m == "setSound") {
+            ap.origin_x = args[1].r;
+            return Slot(0);
+        }
+        if (m == "setAttribute") {
+            if (args[1].i == 4) {
+                ap.origin_y = std::clamp(args[2].i, 0, 100);
+                g_audio.set_port_volume(ap.aux_i32, args[0].r, ap.origin_y);
+            }
+            return Slot(0);
+        }
+        if (m == "play") {
+            if (ap.origin_x > 0) {
+                int snd_id = get(ap.origin_x).aux_i32;
+                g_audio.play_port(ap.aux_i32, snd_id, ap.origin_y, args[0].r, current_time_millis());
+            }
+            return Slot(0);
+        }
+        if (m == "stop") {
+            g_audio.stop_port(ap.aux_i32, args[0].r);
+            return Slot(0);
+        }
+        if (m == "getCurrentTime") {
+            return Slot(g_audio.get_current_time(ap.aux_i32, args[0].r, current_time_millis()));
+        }
     }
 
     if (c == "com/nttdocomo/ui/Dialog") {
