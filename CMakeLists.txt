@@ -24,6 +24,15 @@ target_link_libraries(doja_runtime PUBLIC
     ${CMAKE_DL_LIBS}
 )
 
+# Unified Capcom i-mode + PvP NetBattle Server (TCP HTTP/1.1 + UDP Relay on single port)
+add_executable(rmexe_server
+    server/rmexe_server.cpp
+)
+target_include_directories(rmexe_server PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+)
+target_compile_options(rmexe_server PRIVATE -O2 -Wall -Wextra)
+
 # Helper macro to register a static recompilation target if its user-supplied JAR is present
 macro(add_doja_recomp_target TARGET_NAME JAR_REL_PATH SP_REL_PATH SAV_REL_PATH WIN_TITLE)
     set(JAR_ABS_PATH "${CMAKE_CURRENT_SOURCE_DIR}/${JAR_REL_PATH}")

@@ -1,4 +1,6 @@
 #include "doja_runtime.hpp"
+#include "net_config.hpp"
+#include "../common/pvp_protocol.hpp"
 
 #include <SDL2/SDL.h>
 #include <zlib.h>
@@ -1084,12 +1086,49 @@ struct ActionBinding {
     bool effective_down = false;
 };
 
+static net::CapcomServiceState g_capcom_local;
+static pvp::PvpClientSession g_pvp;
+
+struct HttpConnState {
+    std::string url;
+    std::string method = "GET";
+    std::unordered_map<std::string, std::string> req_headers;
+    std::shared_ptr<StreamData> req_stream;
+    net::HttpResponse resp;
+    bool connected = false;
+};
+
+static std::unordered_map<Ref, HttpConnState> g_http_conns;
+
+static std::string generate_random_uid() {
+    std::random_device rd;
+    uint32_t v = rd();
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "NV%06X", v & 0xFFFFFFu);
+    return std::string(buf);
+}
+
 struct UiInputManager {
     std::string config_path = "controls.cfg";
     bool show_softkey_bar = true;
     bool is_fullscreen = false;
     std::string soft_label_left;
     std::string soft_label_right;
+
+    // Network & PvP settings (persisted in controls.cfg, overridable via CLI)
+    bool online_mode = false;
+    std::string server_url = "127.0.0.1:8765";
+    std::string player_uid = generate_random_uid();
+    std::string player_name = "ROCKMAN";
+    bool is_lon_game = false;
+    int pvp_menu_choice = 0; // 0 = Create Room, 1 = Join Room
+
+    bool has_cli_net_override = false;
+    bool cli_online_mode = false;
+    std::string cli_server_url;
+    std::string cli_player_uid;
+    std::string cli_player_name;
+    std::string custom_sav_path;
 
     std::string toast_text;
     int toast_frames = 0;
@@ -1227,9 +1266,21 @@ struct UiInputManager {
         return "-";
     }
 
+    void apply_cli_overrides() {
+        if (has_cli_net_override) {
+            online_mode = cli_online_mode;
+            if (!cli_server_url.empty()) server_url = cli_server_url;
+        }
+        if (!cli_player_uid.empty()) player_uid = cli_player_uid;
+        if (!cli_player_name.empty()) player_name = cli_player_name;
+    }
+
     void load_config() {
         std::ifstream f(config_path);
-        if (!f) return;
+        if (!f) {
+            apply_cli_overrides();
+            return;
+        }
         std::string line;
         while (std::getline(f, line)) {
             std::string s = trim(line);
@@ -1247,6 +1298,14 @@ struct UiInputManager {
                 g_audio.muted = (std::atoi(val.c_str()) != 0);
             } else if (key == "show_softkey_bar") {
                 show_softkey_bar = (std::atoi(val.c_str()) != 0);
+            } else if (key == "online_mode") {
+                online_mode = (std::atoi(val.c_str()) != 0);
+            } else if (key == "server_url" && !val.empty()) {
+                server_url = val;
+            } else if (key == "player_uid" && !val.empty()) {
+                player_uid = val;
+            } else if (key == "player_name" && !val.empty()) {
+                player_name = val;
             } else {
                 for (int i = 0; i < ACT_COUNT; ++i) {
                     std::string pfx = std::string(binds[i].cfg_id) + "_";
@@ -1256,18 +1315,23 @@ struct UiInputManager {
                 }
             }
         }
+        apply_cli_overrides();
     }
 
     void save_config() const {
         std::ofstream f(config_path, std::ios::trunc);
         if (!f) return;
-        f << "# rmexe-mobile-recomp keybindings & emulator settings\n";
+        f << "# rmexe-mobile-recomp keybindings, network & emulator settings\n";
         {
             std::lock_guard<std::mutex> lk(g_audio.mtx);
             f << "master_volume=" << g_audio.master_volume << "\n";
             f << "muted=" << (g_audio.muted ? 1 : 0) << "\n";
         }
-        f << "show_softkey_bar=" << (show_softkey_bar ? 1 : 0) << "\n\n";
+        f << "show_softkey_bar=" << (show_softkey_bar ? 1 : 0) << "\n";
+        f << "online_mode=" << (online_mode ? 1 : 0) << "\n";
+        f << "server_url=" << server_url << "\n";
+        f << "player_uid=" << player_uid << "\n";
+        f << "player_name=" << player_name << "\n\n";
         for (int i = 0; i < ACT_COUNT; ++i) {
             f << binds[i].cfg_id << "_key1=" << format_key_cfg(binds[i].keys[0]) << "\n";
             f << binds[i].cfg_id << "_key2=" << format_key_cfg(binds[i].keys[1]) << "\n";
@@ -1435,6 +1499,14 @@ struct UiInputManager {
             std::string c_txt = ">> 倍速";
             int cw = measure_ui_text(c_txt);
             draw_ui_text(display_buf, 240, 260, c_txt, 120 - cw / 2, 254, 0xFFFFD448u);
+        } else if (g_pvp.active()) {
+            std::string c_txt = "#" + std::to_string(g_pvp.room_id());
+            int cw = measure_ui_text(c_txt);
+            draw_ui_text(display_buf, 240, 260, c_txt, 120 - cw / 2, 254, g_pvp.match_started() ? 0xFF68FF9Au : 0xFF74C4FFu);
+        } else if (online_mode) {
+            std::string c_txt = "在线:F1";
+            int cw = measure_ui_text(c_txt);
+            draw_ui_text(display_buf, 240, 260, c_txt, 120 - cw / 2, 254, 0xFF74D8FFu);
         } else {
             std::string c_txt = "F1:设置";
             int cw = measure_ui_text(c_txt);
@@ -1526,7 +1598,7 @@ struct UiInputManager {
         auto pause_t0 = std::chrono::steady_clock::now();
         if (g_audio.dev_id != 0) SDL_PauseAudioDevice(g_audio.dev_id, 1);
 
-        constexpr int TOTAL_ROWS = ACT_COUNT + 5; // 10 binds + Vol + SoftBar + Reset + Resume + Quit
+        constexpr int TOTAL_ROWS = ACT_COUNT + 7; // 10 binds + Vol + SoftBar + NetMode + PvP + Reset + Resume + Quit
         constexpr int VISIBLE_ROWS = 9;
         int sel_row = 0;
         int sel_col = 0; // 0 = Key1, 1 = Key2, 2 = Pad
@@ -1535,7 +1607,51 @@ struct UiInputManager {
         bool menu_open = true;
         bool quit_game = false;
 
+        auto toggle_net_mode = [&]() {
+            online_mode = !online_mode;
+            save_config();
+            if (online_mode) {
+                std::string stat_msg;
+                if (pvp::PvpClientSession::check_server_status(server_url, stat_msg)) {
+                    show_toast("已连接服务器 (" + stat_msg + ")", 120);
+                } else {
+                    show_toast("在线模式已开启 (未连接时自动本地回退)", 120);
+                }
+            } else {
+                g_pvp.close_udp();
+                show_toast("通信模式: 本地离线模拟", 90);
+            }
+        };
+
+        auto exec_pvp_action = [&]() {
+            if (g_pvp.active()) {
+                uint32_t old_rm = g_pvp.room_id();
+                g_pvp.close_udp();
+                show_toast("已退出对战房间 #" + std::to_string(old_rm), 90);
+                return;
+            }
+            online_mode = true;
+            save_config();
+            std::string gm = is_lon_game ? "lon" : "pon";
+            if (pvp_menu_choice == 0) {
+                if (g_pvp.create_room(server_url, player_uid, player_name, gm)) {
+                    show_toast("已创建对战房间 #" + std::to_string(g_pvp.room_id()) + " 等待加入...", 150);
+                } else {
+                    show_toast("创建失败: 无法连接 " + server_url, 120);
+                }
+            } else {
+                if (g_pvp.join_room(server_url, 0, player_uid, player_name, gm)) {
+                    show_toast("已加入 #" + std::to_string(g_pvp.room_id()) + " 对手:" + g_pvp.opponent_name(), 150);
+                } else {
+                    show_toast("暂无等待中的对战房间 (" + server_url + ")", 120);
+                }
+            }
+        };
+
         while (menu_open) {
+            if (g_pvp.poll_udp()) {
+                show_toast("对战配对成功! VS " + g_pvp.opponent_name(), 150);
+            }
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT) {
@@ -1579,6 +1695,10 @@ struct UiInputManager {
                             show_softkey_bar = !show_softkey_bar;
                             apply_softbar_geometry(win, ren, scale);
                             save_config();
+                        } else if (sel_row == ACT_COUNT + 2) {
+                            toggle_net_mode();
+                        } else if (sel_row == ACT_COUNT + 3 && !g_pvp.active()) {
+                            pvp_menu_choice = 1 - pvp_menu_choice;
                         }
                     };
                     auto activate_row = [&]() {
@@ -1595,12 +1715,16 @@ struct UiInputManager {
                             apply_softbar_geometry(win, ren, scale);
                             save_config();
                         } else if (sel_row == ACT_COUNT + 2) {
+                            toggle_net_mode();
+                        } else if (sel_row == ACT_COUNT + 3) {
+                            exec_pvp_action();
+                        } else if (sel_row == ACT_COUNT + 4) {
                             reset_defaults();
                             save_config();
                             show_toast("已恢复默认按键配置");
-                        } else if (sel_row == ACT_COUNT + 3) {
+                        } else if (sel_row == ACT_COUNT + 5) {
                             menu_open = false;
-                        } else if (sel_row == ACT_COUNT + 4) {
+                        } else if (sel_row == ACT_COUNT + 6) {
                             quit_game = true;
                             menu_open = false;
                         }
@@ -1714,12 +1838,29 @@ struct UiInputManager {
                     std::string sstr = show_softkey_bar ? "< 开启 >" : "< 关闭 >";
                     draw_ui_text(display_buf, 240, 260, sstr, 118, ry + 12, show_softkey_bar ? 0xFF88FFAAu : 0xFF98A8C0u);
                 } else if (r == ACT_COUNT + 2) {
+                    draw_ui_text(display_buf, 240, 260, "通信模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                    std::string nstr = online_mode ? "< 在线服务器 >" : "< 本地离线模拟 >";
+                    draw_ui_text(display_buf, 240, 260, nstr, 98, ry + 12, online_mode ? 0xFF74D8FFu : 0xFF88FFAAu);
+                } else if (r == ACT_COUNT + 3) {
+                    draw_ui_text(display_buf, 240, 260, "联机对战", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                    std::string pstr;
+                    uint32_t pcol = 0xFFFFD874u;
+                    if (g_pvp.active()) {
+                        pstr = g_pvp.match_started()
+                            ? ("[ 退出对战 #" + std::to_string(g_pvp.room_id()) + " ]")
+                            : ("[ 取消等待 #" + std::to_string(g_pvp.room_id()) + " ]");
+                        pcol = 0xFF88FFAAu;
+                    } else {
+                        pstr = (pvp_menu_choice == 0) ? "< 创建对战房间 >" : "< 加入对战房间 >";
+                    }
+                    draw_ui_text(display_buf, 240, 260, pstr, 94, ry + 12, pcol);
+                } else if (r == ACT_COUNT + 4) {
                     std::string lbl = "[ 恢复默认按键配置 ]";
                     draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFFD866u : 0xFFC8D8F8u);
-                } else if (r == ACT_COUNT + 3) {
+                } else if (r == ACT_COUNT + 5) {
                     std::string lbl = "[ 返回游戏 (Resume) ]";
                     draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFF88FFAAu : 0xFFC8D8F8u);
-                } else if (r == ACT_COUNT + 4) {
+                } else if (r == ACT_COUNT + 6) {
                     std::string lbl = "[ 保存进度并退出 ]";
                     draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFF8888u : 0xFFE8B8B8u);
                 }
@@ -1788,6 +1929,23 @@ DojaRuntime::~DojaRuntime() {
     shutdown();
 }
 
+void set_network_server(const std::string& host_port, bool enable_online) {
+    g_ui.has_cli_net_override = true;
+    g_ui.cli_online_mode = enable_online;
+    if (!host_port.empty()) {
+        g_ui.cli_server_url = host_port;
+    }
+}
+
+void set_player_identity(const std::string& uid, const std::string& name) {
+    if (!uid.empty()) g_ui.cli_player_uid = uid;
+    if (!name.empty()) g_ui.cli_player_name = name;
+}
+
+void set_custom_sav_path(const std::string& sav_path) {
+    g_ui.custom_sav_path = sav_path;
+}
+
 void DojaRuntime::set_config_path(const std::string& path) {
     if (!path.empty()) {
         g_ui.config_path = path;
@@ -1797,7 +1955,7 @@ void DojaRuntime::set_config_path(const std::string& path) {
 bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, const std::string& /*jam_path*/, int scale) {
     jar_path_ = jar_path;
     sp_path_ = sp_path;
-    sav_path_ = sp_path + ".sav";
+    sav_path_ = g_ui.custom_sav_path.empty() ? (sp_path + ".sav") : g_ui.custom_sav_path;
     window_scale_ = std::max(1, scale);
 
     g_ft.init();
@@ -1811,7 +1969,25 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
     sp_data_.assign(std::istreambuf_iterator<char>(sp_file), std::istreambuf_iterator<char>());
     // Detect 64-byte DoJa SDK header (e.g. 511,964 or 512,064 bytes)
     sp_header_offset_ = (sp_data_.size() % 100 == 64) ? 64 : 0;
+
+    // Detect PoN ("10000") vs LoN ("10001") from ScratchPad AppParam and initialize local Capcom offline DB
+    bool is_lon = (sp_path_.find("LoN") != std::string::npos);
+    if (sp_header_offset_ + 410624 + 5 <= sp_data_.size()) {
+        std::string ver(reinterpret_cast<const char*>(sp_data_.data() + sp_header_offset_ + 410624), 5);
+        if (ver == "10001") is_lon = true;
+    }
+    g_ui.is_lon_game = is_lon;
+    g_capcom_local.set_db_path("capcom_local.db");
+    if (sp_data_.size() > sp_header_offset_) {
+        g_capcom_local.register_sp_image(
+            is_lon,
+            sp_data_.data() + sp_header_offset_,
+            sp_data_.size() - sp_header_offset_
+        );
+    }
+
     load_sav_overlay();
+    g_ui.load_config();
 
     // Allocate screen Graphics object and default Font
     HeapObject gfx{};
@@ -1863,7 +2039,12 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
                 }
             }
             g_audio.init_sdl_audio();
-            g_ui.show_toast("按 F1 / Esc 打开按键与模拟器设置", 120);
+            g_ui.show_toast(
+                g_ui.online_mode
+                    ? ("在线模式 (" + g_ui.server_url + ") | F1:设置")
+                    : "按 F1 / Esc 打开按键、通信与对战设置",
+                120
+            );
         }
     }
 
@@ -1872,6 +2053,7 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
 }
 
 void DojaRuntime::shutdown() {
+    g_pvp.close_udp();
     g_ui.close_controllers();
     g_audio.shutdown_sdl_audio();
     if (sdl_texture_) {
@@ -1892,7 +2074,7 @@ void DojaRuntime::shutdown() {
 void DojaRuntime::load_sav_overlay() {
     std::ifstream sav(sav_path_, std::ios::binary);
     if (!sav) return;
-    // Overlay save header region (first 4096 bytes after sp_header_offset_)
+    // Supports both legacy 4096-byte .sav files and full ScratchPad overlays
     std::vector<uint8_t> buf((std::istreambuf_iterator<char>(sav)), std::istreambuf_iterator<char>());
     if (sp_header_offset_ + buf.size() <= sp_data_.size()) {
         std::memcpy(sp_data_.data() + sp_header_offset_, buf.data(), buf.size());
@@ -1900,8 +2082,10 @@ void DojaRuntime::load_sav_overlay() {
 }
 
 void DojaRuntime::save_sav_overlay() {
-    // Save the mutable save segment (first 4096 bytes of ScratchPad) to .sav
-    size_t save_len = std::min<size_t>(4096, sp_data_.size() - sp_header_offset_);
+    if (sp_data_.size() <= sp_header_offset_) return;
+    // Persist full mutable ScratchPad image (excluding 64-byte SDK header) so local saves,
+    // downloaded quests (QDawn), ranking courses (GetRank), and sys_dat all persist cleanly
+    size_t save_len = sp_data_.size() - sp_header_offset_;
     std::ofstream sav(sav_path_, std::ios::binary | std::ios::trunc);
     if (sav) {
         sav.write(reinterpret_cast<const char*>(sp_data_.data() + sp_header_offset_), save_len);
@@ -2367,6 +2551,16 @@ void DojaRuntime::present_screen() {
         }
     }
     poll_events();
+    if (g_pvp.active()) {
+        if (g_pvp.poll_udp()) {
+            g_ui.show_toast("挑战者已连接! VS " + g_ui.player_name + " <-> " + g_pvp.opponent_name(), 150);
+        }
+        if (g_pvp.match_started()) {
+            g_pvp.send_frame_input(static_cast<uint32_t>(frame_count_), keypad_state_);
+        } else if ((frame_count_ % 120) == 0) {
+            g_pvp.send_ping();
+        }
+    }
     if (sdl_renderer_ && sdl_texture_) {
         SDL_Renderer* ren = static_cast<SDL_Renderer*>(sdl_renderer_);
         SDL_Texture* tex = static_cast<SDL_Texture*>(sdl_texture_);
@@ -2642,6 +2836,11 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             hc.str = url;
             Ref r = static_cast<Ref>(heap_.size());
             heap_.push_back(std::move(hc));
+
+            HttpConnState st{};
+            st.url = url;
+            st.method = "GET";
+            g_http_conns[r] = std::move(st);
             return Slot(r);
         }
     }
@@ -2786,8 +2985,17 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             get(arr).fields_i32[0] = alloc_string(ver);
             return Slot(arr);
         }
-        if (m == "launch") return Slot(0);
+        static int s_browser_launch_frame = -999;
+        if (m == "launch") {
+            s_browser_launch_frame = frame_count_;
+            g_ui.show_toast("已模拟访问卡普空会员站点 (点数已自动补充)", 120);
+            return Slot(0);
+        }
         if (m == "terminate") {
+            if (s_browser_launch_frame == frame_count_) {
+                s_browser_launch_frame = -999;
+                return Slot(0);
+            }
             save_sav_overlay();
             std::exit(0);
         }
@@ -3110,20 +3318,86 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
     }
 
     if (c == "com/nttdocomo/io/HttpConnection") {
-        if (m == "setRequestMethod" || m == "setRequestProperty" || m == "connect" || m == "close") return Slot(0);
-        if (m == "getHeaderField") return Slot(alloc_string("0"));
-        if (m == "openInputStream" || m == "openOutputStream") {
+        Ref hc_ref = args[0].r;
+        if (hc_ref <= 0) return Slot(0);
+        HttpConnState& st = g_http_conns[hc_ref];
+        if (st.url.empty()) {
+            st.url = get(hc_ref).str;
+        }
+
+        auto ensure_connected = [&]() {
+            if (st.connected) return;
+            st.connected = true;
+            st.req_headers["X-RMEXE-UID"] = g_ui.player_uid;
+            st.req_headers["X-RMEXE-NAME"] = net::url_encode(g_ui.player_name);
+            const std::vector<uint8_t> empty_body;
+            const std::vector<uint8_t>& req_body = st.req_stream ? st.req_stream->buffer : empty_body;
+
+            bool handled_online = false;
+            if (g_ui.online_mode && !g_ui.server_url.empty()) {
+                if (net::http_request_tcp(g_ui.server_url, st.method, st.url, st.req_headers, req_body, st.resp, 2500)) {
+                    handled_online = true;
+                } else {
+                    g_ui.show_toast("服务器未连接，已自动回退本地模拟", 90);
+                }
+            }
+            if (!handled_online) {
+                st.resp = g_capcom_local.handle_request(st.method, st.url, st.req_headers, req_body);
+            }
+        };
+
+        if (m == "setRequestMethod") {
+            if (args[1].r > 0) st.method = get(args[1].r).str;
+            return Slot(0);
+        }
+        if (m == "setRequestProperty") {
+            if (args[1].r > 0 && args[2].r > 0) {
+                st.req_headers[get(args[1].r).str] = get(args[2].r).str;
+            }
+            return Slot(0);
+        }
+        if (m == "openOutputStream") {
+            if (!st.req_stream) {
+                st.req_stream = std::make_shared<StreamData>();
+            }
             HeapObject st_obj{};
-            st_obj.kind = ObjKind::InputStream;
-            st_obj.stream = std::make_shared<StreamData>();
+            st_obj.kind = ObjKind::OutputStream;
+            st_obj.stream = st.req_stream;
             Ref r = static_cast<Ref>(heap_.size());
             heap_.push_back(std::move(st_obj));
             return Slot(r);
         }
+        if (m == "connect") {
+            ensure_connected();
+            return Slot(0);
+        }
+        if (m == "getHeaderField") {
+            ensure_connected();
+            std::string key = (args[1].r > 0) ? get(args[1].r).str : "";
+            std::string val = st.resp.get_header(key);
+            if (val.empty()) return Slot(Ref(0));
+            return Slot(alloc_string(val));
+        }
+        if (m == "openInputStream") {
+            ensure_connected();
+            HeapObject st_obj{};
+            st_obj.kind = ObjKind::InputStream;
+            st_obj.stream = std::make_shared<StreamData>();
+            st_obj.stream->buffer = st.resp.body;
+            Ref r = static_cast<Ref>(heap_.size());
+            heap_.push_back(std::move(st_obj));
+            return Slot(r);
+        }
+        if (m == "close") {
+            g_http_conns.erase(hc_ref);
+            return Slot(0);
+        }
+        return Slot(0);
     }
 
     if (c == "com/nttdocomo/net/URLEncoder" && m == "encode") {
-        return Slot(args[0].r);
+        if (args[0].r <= 0) return Slot(Ref(0));
+        return Slot(alloc_string(net::url_encode(get(args[0].r).str)));
     }
 
     return Slot(0);

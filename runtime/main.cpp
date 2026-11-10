@@ -1,4 +1,5 @@
 #include "doja_runtime.hpp"
+#include "net_config.hpp"
 
 #include <cstdlib>
 #include <iostream>
@@ -41,8 +42,17 @@ int main(int argc, char** argv) {
             sp_path = argv[++i];
         } else if (arg == "--sav" && i + 1 < argc) {
             sav_path = argv[++i];
+            rmexe::set_custom_sav_path(sav_path);
         } else if (arg == "--config" && i + 1 < argc) {
             rt.set_config_path(argv[++i]);
+        } else if (arg == "--server" && i + 1 < argc) {
+            rmexe::set_network_server(argv[++i], true);
+        } else if (arg == "--offline") {
+            rmexe::set_network_server("", false);
+        } else if (arg == "--uid" && i + 1 < argc) {
+            rmexe::set_player_identity(argv[++i], "");
+        } else if (arg == "--name" && i + 1 < argc) {
+            rmexe::set_player_identity("", argv[++i]);
         } else if (arg == "--scale" && i + 1 < argc) {
             scale = std::max(1, std::atoi(argv[++i]));
         } else if (arg == "--fps" && i + 1 < argc) {
@@ -67,8 +77,12 @@ int main(int argc, char** argv) {
             std::cout << "Usage: " << argv[0] << " [options]\n"
                       << "  --jar <path>          Path to original .jar file (default: " << DEFAULT_JAR_PATH << ")\n"
                       << "  --sp <path>           Path to original .sp file  (default: " << DEFAULT_SP_PATH << ")\n"
-                      << "  --sav <path>          Path to .sav overlay file  (default: " << DEFAULT_SAV_PATH << ")\n"
+                      << "  --sav <path>          Path to .sav overlay file  (default: <sp>.sav)\n"
                       << "  --config <path>       Path to keybinding config  (default: controls.cfg)\n"
+                      << "  --server <host:port>  Connect to rmexe_server    (e.g. 127.0.0.1:8765)\n"
+                      << "  --offline             Use built-in offline Capcom i-mode simulation\n"
+                      << "  --uid <id>            Override subscriber UID for cloud saves/rankings\n"
+                      << "  --name <nick>         Override player nickname   (up to 12 ASCII chars)\n"
                       << "  --scale <int>         Window scale factor (default: 3 -> 720x780)\n"
                       << "  --fps <int>           Target render FPS (default: 60)\n"
                       << "  --headless            Run without opening an SDL window\n"

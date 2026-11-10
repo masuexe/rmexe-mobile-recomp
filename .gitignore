@@ -17,4 +17,7 @@ out/
 __pycache__/
 *.pyc
 controls.cfg
+capcom_local.db
+*.db
+server_data/
 screenshot_*.bmp

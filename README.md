@@ -20,7 +20,10 @@ Supports both the **original Japanese releases** (`PoN_jp`, `LoN_jp`) and the **
   - **240×240 Software Rasterizer**: Full support for `Graphics.drawImage`, `drawScaledImage`, `setFlipMode`, `setOrigin`, `fillRect`, `drawRect`, offscreen `Image` targets, and color-key transparency.
   - **Hardware-Style Indexed GIF89a & Palette Swapping**: Built-in LZW GIF decoder for `PalettedImage` and `MediaImage`, supporting real-time `Palette.setEntry` / `setPalette` swaps used for enemy element coloring, damage flashes, and battle transitions.
   - **Embedded ZIP / `JarInflater` & ScratchPad Loader**: Stream-based `PK\x03\x04` deflate extractor (`zlib`) with automatic detection of the 64-byte DoJa SDK `.sp` header (`511,964` / `512,064` bytes).
-  - **Copy-on-Write Save Overlay (`.sav`)**: Keeps original `.jar` and `.sp` files strictly read-only while persisting player save data to `.sav` overlays.
+  - **Copy-on-Write Save Overlay (`.sav`)**: Keeps original `.jar` and `.sp` files strictly read-only while persisting player save data, downloaded quests, and seasonal courses to `.sav` overlays.
+  - **Dual-Mode Capcom i-mode Network & Unified PvP Server ([`common/capcom_protocol.hpp`](common/capcom_protocol.hpp), [`common/pvp_protocol.hpp`](common/pvp_protocol.hpp), [`server/rmexe_server.cpp`](server/rmexe_server.cpp))**:
+    - **Built-in Offline Fallback (Zero-Config Single-Player)**: Simulates all original Capcom i-mode endpoints (`buyreg`, server date, `scck` episodic unlocks, `pts` portal points, `DataSave`/`Load` cloud backups, `exesr` Top-10 Virus Busting leaderboard & rival chip folders, and `dataget.php` seasonal 10-wave courses) locally in `capcom_local.db`.
+    - **Standalone Unified Server (`rmexe_server`)**: Multiplexes **TCP HTTP/1.1** (multi-user Capcom cloud saves, live global Virus Busting leaderboard, and PvP room matchmaking) and **UDP** (low-latency real-time PvP NetBattle frame-input lockstep/rollback relay) on a single port (`8765`).
   - **Shift-JIS (`CP932`) $\leftrightarrow$ `UTF-8` & CJK Font Rendering**: Automatic string transcoding via `iconv` and crisp 12px Japanese/English glyph rendering via `libfreetype`.
 
 ---
@@ -30,13 +33,19 @@ Supports both the **original Japanese releases** (`PoN_jp`, `LoN_jp`) and the **
 ```text
 rmexe-mobile-recomp/
 ├── ARCHITECTURE.md          # Full technical specification (60 FPS interpolation & GGPO PvP design)
-├── CMakeLists.txt           # CMake build system for all 4 game variants
+├── CMakeLists.txt           # CMake build system for rmexe_server and all 4 game variants
 ├── assets/                  # Place user-supplied .jar, .sp, and .jam files here (gitignored)
 │   └── README.md            # Directory structure instructions for JP and EN assets
+├── common/
+│   ├── capcom_protocol.hpp  # Capcom i-mode binary protocol & persistent cloud/leaderboard engine
+│   └── pvp_protocol.hpp     # PvP matchmaking REST + 28-byte UDP real-time frame-sync protocol
 ├── runtime/
 │   ├── doja_runtime.hpp     # Deterministic heap, slot types, and DoJaRuntime interface
-│   ├── doja_runtime.cpp     # Clean-room DoJa/CLDC runtime, GIF/ZIP decoders, SDL2 host
+│   ├── doja_runtime.cpp     # Clean-room DoJa/CLDC runtime, MFi2 audio, UI, dual-mode HTTP/PvP
+│   ├── net_config.hpp       # CLI/config network & player identity bridge
 │   └── main.cpp             # CLI entry point, headless smoke-test & frame capture harness
+├── server/
+│   └── rmexe_server.cpp     # Standalone single-port TCP (HTTP/1.1) + UDP unified server
 └── tools/
     ├── survey_doja.py       # Phase 1 bytecode & ScratchPad static analyzer
     └── recomp_jar.py        # Phase 2 JVM .class -> C++20 ahead-of-time static recompiler
@@ -81,6 +90,20 @@ cmake --build build -j$(nproc)
 ./build/pon_en_recomp --scale 3 --fps 60
 ./build/lon_jp_recomp --scale 3 --fps 60
 ./build/lon_en_recomp --scale 3 --fps 60
+```
+
+### Unified Server (`rmexe_server`) & Online / Offline Modes
+
+By default, all four game clients run in **Offline Simulation Mode**, handling Capcom i-mode cloud backups, site points, seasonal ranking courses, and NPC rival leaderboards locally without needing an external server.
+
+To host shared cloud saves, a live multi-player PoN Virus Busting Top-10 leaderboard, and PvP NetBattle rooms on a single port (`8765` TCP + UDP):
+
+```bash
+# Start the unified server (persists data to server_data/capcom_state.db)
+./build/rmexe_server --port 8765 --data-dir server_data
+
+# Connect any JP or EN client to the unified server (or toggle Online Mode in the F1 menu)
+./build/pon_jp_recomp --server 127.0.0.1:8765 --name LAN
 ```
 
 ### Default Controls & In-Game Keybinding Menu

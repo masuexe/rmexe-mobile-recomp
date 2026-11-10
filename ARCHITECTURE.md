@@ -65,7 +65,7 @@ With symbol map files, one static recompiler and one native runtime can support 
 * **Graphics and Input (`SDL3`):** Implements `com.nttdocomo.ui.Canvas` and `Graphics`. Supports integer scaling, widescreen borders, and gamepad button mapping.
 * **Audio Synthesizer (`MLD` Engine):** Decodes MFi / MLD files through a software synthesizer for Yamaha FM and ADPCM channels. The audio layer also supports optional external `.ogg` music tracks.
 * **Copy-on-Write Storage:** Keeps the original `.sp` file in read-only mode. The runtime redirects all save data writes to a separate `.sav` file.
-* **Local Mock Server:** Intercepts `javax.microedition.io.Connector` HTTP requests. A local virtual server unlocks offline event BattleChips, chip traders, and virus battle rankings.
+* **Dual-Mode Network Layer and Unified Server (`rmexe_server`):** Intercepts `javax.microedition.io.Connector` and `com.nttdocomo.io.HttpConnection` calls. In offline mode, a built-in handler simulates all Capcom i-mode endpoints (`isr.php`, `iexe_score.php`, and `dataget.php`) locally. In online mode, the client connects to `rmexe_server`, which serves both HTTP/1.1 cloud/ranking/lobby endpoints over TCP and real-time PvP frame-input packets over UDP on one port (`8765`).
 * **External Font and Text Hook:** Intercepts text draw calls to support UTF-8 external translation tables and custom bitmap fonts.
 
 ---
