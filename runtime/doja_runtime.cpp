@@ -649,7 +649,7 @@ struct MldAudioEngine {
             int vol;
         };
 
-        std::vector<TempoChange> tempos = {{0, 60.0 / (120.0 * 24.0)}};
+        std::vector<TempoChange> tempos = {{0, 60.0 / (120.0 * 48.0)}};
         std::vector<PitchChange> pitches;
         std::vector<NoteEv> notes;
         std::vector<AdpcmEv> adpcm_evs;
@@ -701,7 +701,7 @@ struct MldAudioEngine {
                                 ticks += static_cast<int32_t>(arg) * 256;
                             } else if (cmd >= 0xC0 && cmd <= 0xCF) {
                                 int tb = cmd & 0x07;
-                                int tpqn = 12 << std::max(0, tb - 2);
+                                int tpqn = 24 << std::max(0, tb - 2);
                                 int bpm = std::max<int>(1, arg);
                                 tempos.push_back({ticks, 60.0 / (static_cast<double>(bpm) * tpqn)});
                             } else if (cmd == 0xDD) {
