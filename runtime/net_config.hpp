@@ -13,4 +13,7 @@ void set_player_identity(const std::string& uid, const std::string& name);
 // Override ScratchPad .sav overlay file path if explicitly passed via --sav
 void set_custom_sav_path(const std::string& sav_path);
 
+// Override 60 FPS / 15 FPS presentation mode if explicitly passed via --fps
+void set_cli_fps_override(int fps);
+
 } // namespace rmexe

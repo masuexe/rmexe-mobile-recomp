@@ -57,6 +57,7 @@ int main(int argc, char** argv) {
             scale = std::max(1, std::atoi(argv[++i]));
         } else if (arg == "--fps" && i + 1 < argc) {
             fps = std::max(15, std::atoi(argv[++i]));
+            rmexe::set_cli_fps_override(fps);
         } else if (arg == "--max-frames" && i + 1 < argc) {
             max_frames = std::atoi(argv[++i]);
         } else if (arg == "--dump-ppm" && i + 1 < argc) {

@@ -17,8 +17,9 @@ Supports both the **original Japanese releases** (`PoN_jp`, `LoN_jp`) and the **
 - **Deterministic Handle-Based Memory Arena ([`runtime/doja_runtime.hpp`](runtime/doja_runtime.hpp))**:
   - All objects and arrays are stored in a contiguous handle table (`Ref = int32_t`), enabling fast O(1) state snapshotting for rollback netcode and sub-tick interpolation.
 - **Clean-Room Native DoJa + CLDC 1.1 Runtime ([`runtime/doja_runtime.cpp`](runtime/doja_runtime.cpp))**:
-  - **240×240 Software Rasterizer**: Full support for `Graphics.drawImage`, `drawScaledImage`, `setFlipMode`, `setOrigin`, `fillRect`, `drawRect`, offscreen `Image` targets, and color-key transparency.
+  - **240×240 Software Rasterizer & 60 FPS Motion Interpolator**: Full support for `Graphics.drawImage`, `drawScaledImage`, `setFlipMode`, `setOrigin`, `fillRect`, `drawRect`, offscreen `Image` targets, and color-key transparency. Includes a display-list sub-frame motion interpolator (`FrameInterpolator`) that delivers smooth **60 FPS** isometric map scrolling and sprite movement over the deterministic 15 Hz logic loop without altering game speed, with instant **60 FPS / 15 FPS** switching (`F3`, `F1` menu, `--fps 60|15`, `controls.cfg`).
   - **Hardware-Style Indexed GIF89a & Palette Swapping**: Built-in LZW GIF decoder for `PalettedImage` and `MediaImage`, supporting real-time `Palette.setEntry` / `setPalette` swaps used for enemy element coloring, damage flashes, and battle transitions.
+  - **Authentic Flip-Phone Yamaha MA-3 (`YMU762`) / MA-5 (`YMU765`) Stereo FM Audio ([`common/ymu762_fm.hpp`](common/ymu762_fm.hpp))**: 44.1 kHz stereo MFi2/MFi5 (`.mld`) synthesizer featuring 6-waveform 4-Operator (dual 2-Op stack) phase-modulation FM instrument patches, a 26-note MA-3 drum kit, dedicated *Rockman EXE* battle SE synthesis, panpot/expression/12-bit pitch-bend/vibrato timelines, MA-5 stereo reflection DSP, click-free loop crossfading, and FNV-1a deduplicated on-demand synthesis.
   - **Embedded ZIP / `JarInflater` & ScratchPad Loader**: Stream-based `PK\x03\x04` deflate extractor (`zlib`) with automatic detection of the 64-byte DoJa SDK `.sp` header (`511,964` / `512,064` bytes).
   - **Copy-on-Write Save Overlay (`.sav`)**: Keeps original `.jar` and `.sp` files strictly read-only while persisting player save data, downloaded quests, and seasonal courses to `.sav` overlays.
   - **Dual-Mode Capcom i-mode Network & Unified PvP Server ([`common/capcom_protocol.hpp`](common/capcom_protocol.hpp), [`common/pvp_protocol.hpp`](common/pvp_protocol.hpp), [`server/rmexe_server.cpp`](server/rmexe_server.cpp))**:
@@ -38,11 +39,12 @@ rmexe-mobile-recomp/
 │   └── README.md            # Directory structure instructions for JP and EN assets
 ├── common/
 │   ├── capcom_protocol.hpp  # Capcom i-mode binary protocol & persistent cloud/leaderboard engine
-│   └── pvp_protocol.hpp     # PvP matchmaking REST + 28-byte UDP real-time frame-sync protocol
+│   ├── pvp_protocol.hpp     # PvP matchmaking REST + 28-byte UDP real-time frame-sync protocol
+│   └── ymu762_fm.hpp        # Yamaha MA-3 (YMU762) / MA-5 (YMU765) 6-waveform ROM & 4-Op FM patches
 ├── runtime/
 │   ├── doja_runtime.hpp     # Deterministic heap, slot types, and DoJaRuntime interface
-│   ├── doja_runtime.cpp     # Clean-room DoJa/CLDC runtime, MFi2 audio, UI, dual-mode HTTP/PvP
-│   ├── net_config.hpp       # CLI/config network & player identity bridge
+│   ├── doja_runtime.cpp     # Clean-room DoJa/CLDC runtime, MA-3/MA-5 FM audio, 60 FPS interpolator, UI
+│   ├── net_config.hpp       # CLI/config network, FPS mode & player identity bridge
 │   └── main.cpp             # CLI entry point, headless smoke-test & frame capture harness
 ├── server/
 │   └── rmexe_server.cpp     # Standalone single-port TCP (HTTP/1.1) + UDP unified server
@@ -108,7 +110,7 @@ To host shared cloud saves, a live multi-player PoN Virus Busting Top-10 leaderb
 
 ### Default Controls & In-Game Keybinding Menu
 
-Press **`F1`** or **`Esc`** (or **`Start`** on a Gamepad) at any time during gameplay to open the interactive **Keybinding & Emulator Settings Menu**, where you can remap all keyboard slots and controller buttons, adjust master volume, or toggle the flip-phone Softkey Bar. All settings are automatically saved to `controls.cfg`.
+Press **`F1`** or **`Esc`** (or **`Start`** on a Gamepad) at any time during gameplay to open the interactive **Keybinding & Emulator Settings Menu**, where you can remap all keyboard slots and controller buttons, switch between **60 FPS Smooth Interpolation** and **15 FPS Original Frame Rate**, adjust master volume, configure Online/Offline server settings, or toggle the flip-phone Softkey Bar. All settings are automatically saved to `controls.cfg`.
 
 | Action | DoJa Key | Default Keyboard | Default Gamepad |
 |---|---|---|---|
@@ -128,6 +130,7 @@ Press **`F1`** or **`Esc`** (or **`Start`** on a Gamepad) at any time during gam
 | `F1` / `Esc` / `Start` | Open Pause, Keybinding & Settings Menu (includes Save & Quit) |
 | `Tab` (hold) | Hold for ~3x Fast-Forward |
 | `F2` | Toggle Flip-Phone Bottom Softkey Bar (`240×260` $\leftrightarrow$ `240×240`) |
+| `F3` | Toggle Frame Rate Mode (`60 FPS Smooth Interpolation` $\leftrightarrow$ `15 FPS Original`) |
 | `-` / `=` / `F9` (`M`) | Decrease / Increase Master Volume / Toggle Mute |
 | `F11` / `Alt+Enter` | Toggle Desktop Fullscreen |
 | `F12` | Save 240×240 BMP Screenshot |
@@ -138,6 +141,6 @@ Press **`F1`** or **`Esc`** (or **`Start`** on a Gamepad) at any time during gam
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the complete engineering design, including:
 - **Phase 1**: Static Bytecode & ScratchPad Survey (`tools/survey_doja.py`) — **Completed**
-- **Phase 2**: Ahead-of-Time JVM-to-C++20 Recompiler & SDL2 Native Runtime (`tools/recomp_jar.py`, `runtime/`) — **Completed**
-- **Phase 3**: High-Frame-Rate (60+ FPS) Presentation & Sub-Tick Interpolation Engine
-- **Phase 4**: Real-Time PvP NetBattle Expansion with GGPO Rollback Netcode
+- **Phase 2**: Ahead-of-Time JVM-to-C++20 Recompiler, SDL2 Native Runtime & Yamaha MA-3/MA-5 Stereo FM Audio (`tools/recomp_jar.py`, `runtime/`, `common/ymu762_fm.hpp`) — **Completed**
+- **Phase 3**: High-Frame-Rate (60 FPS) Display-List Motion Interpolation & `60 FPS / 15 FPS` Toggle — **Completed**
+- **Phase 4**: Real-Time PvP NetBattle Expansion with GGPO Rollback Netcode (Unified `rmexe_server` TCP+UDP transport ready; combat engine dual-player hook next)

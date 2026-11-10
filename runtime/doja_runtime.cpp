@@ -1,6 +1,7 @@
 #include "doja_runtime.hpp"
 #include "net_config.hpp"
 #include "../common/pvp_protocol.hpp"
+#include "../common/ymu762_fm.hpp"
 
 #include <SDL2/SDL.h>
 #include <zlib.h>
@@ -473,13 +474,16 @@ bool decode_gif(const uint8_t* data, size_t size, ImageData& img_out, PaletteDat
 }
 
 // ============================================================================
-// MFi2 (.mld) Polyphonic + 4-bit ADPCM Synthesizer & SDL2 Audio Engine
+// Yamaha MA-3 (YMU762) / MA-5 (YMU765) Stereo FM + Drum + SE + ADPCM Engine
 // ============================================================================
 struct MldSound {
-    std::vector<int16_t> pcm;
-    size_t loop_start_sample = 0;
-    size_t loop_end_sample = 0;
+    std::vector<uint8_t> raw_mld;
+    std::vector<int16_t> pcm; // Interleaved Stereo L/R (2 * total_frames)
+    size_t total_frames = 0;
+    size_t loop_start_frame = 0;
+    size_t loop_end_frame = 0;
     bool has_loop = false;
+    bool synthesized = false;
     int32_t duration_ms = 250;
 };
 
@@ -489,7 +493,7 @@ struct MldAudioEngine {
 
     struct PortState {
         int sound_id = -1;
-        size_t sample_pos = 0;
+        size_t frame_pos = 0;
         int volume = 100;
         bool playing = false;
         bool loop = false;
@@ -500,7 +504,8 @@ struct MldAudioEngine {
 
     SDL_AudioDeviceID dev_id = 0;
     std::mutex mtx;
-    std::vector<MldSound> sounds;
+    std::vector<std::shared_ptr<MldSound>> sounds;
+    std::unordered_map<uint64_t, int> mld_cache;
     PortState ports[NUM_PORTS];
     int master_volume = 100;
     bool muted = false;
@@ -510,7 +515,7 @@ struct MldAudioEngine {
         SDL_AudioSpec want{}, have{};
         want.freq = SAMPLE_RATE;
         want.format = AUDIO_S16SYS;
-        want.channels = 1;
+        want.channels = 2; // Hardware Stereo for MFi5 Panpot & MA-5 Chorus/Room DSP
         want.samples = 1024;
         want.callback = &MldAudioEngine::sdl_audio_callback;
         want.userdata = this;
@@ -536,39 +541,42 @@ struct MldAudioEngine {
     static void SDLCALL sdl_audio_callback(void* userdata, Uint8* stream, int len) {
         auto* self = static_cast<MldAudioEngine*>(userdata);
         int16_t* out = reinterpret_cast<int16_t*>(stream);
-        int num_samples = len / static_cast<int>(sizeof(int16_t));
+        int num_frames = len / static_cast<int>(2 * sizeof(int16_t));
         std::lock_guard<std::mutex> lk(self->mtx);
 
-        for (int i = 0; i < num_samples; ++i) {
-            int32_t mix = 0;
+        int eff_vol = self->muted ? 0 : self->master_volume;
+        for (int f = 0; f < num_frames; ++f) {
+            int32_t mix_l = 0;
+            int32_t mix_r = 0;
             for (int p = 0; p < NUM_PORTS; ++p) {
                 PortState& ps = self->ports[p];
                 if (!ps.playing || ps.sound_id < 0 || static_cast<size_t>(ps.sound_id) >= self->sounds.size()) {
                     continue;
                 }
-                const MldSound& snd = self->sounds[ps.sound_id];
-                if (snd.pcm.empty()) {
+                const MldSound& snd = *self->sounds[ps.sound_id];
+                if (!snd.synthesized || snd.total_frames == 0 || snd.pcm.size() < snd.total_frames * 2) {
                     ps.playing = false;
                     continue;
                 }
-                if (ps.loop && snd.has_loop && ps.sample_pos >= snd.loop_end_sample) {
-                    ps.sample_pos = snd.loop_start_sample;
-                } else if (ps.sample_pos >= snd.pcm.size()) {
+                if (ps.loop && snd.has_loop && ps.frame_pos >= snd.loop_end_frame) {
+                    ps.frame_pos = snd.loop_start_frame;
+                } else if (ps.frame_pos >= snd.total_frames) {
                     if (ps.loop) {
-                        ps.sample_pos = snd.has_loop ? snd.loop_start_sample : 0;
+                        ps.frame_pos = snd.has_loop ? snd.loop_start_frame : 0;
                     } else {
                         ps.playing = false;
                         continue;
                     }
                 }
-                int32_t s = snd.pcm[ps.sample_pos++];
-                mix += (s * ps.volume) / 100;
+                size_t idx = ps.frame_pos * 2;
+                ps.frame_pos++;
+                mix_l += (static_cast<int32_t>(snd.pcm[idx]) * ps.volume) / 100;
+                mix_r += (static_cast<int32_t>(snd.pcm[idx + 1]) * ps.volume) / 100;
             }
-            int eff_vol = self->muted ? 0 : self->master_volume;
-            mix = (mix * eff_vol) / 100;
-            if (mix > 32767) mix = 32767;
-            if (mix < -32768) mix = -32768;
-            out[i] = static_cast<int16_t>(mix);
+            mix_l = (mix_l * eff_vol) / 100;
+            mix_r = (mix_r * eff_vol) / 100;
+            out[f * 2]     = static_cast<int16_t>(std::clamp(mix_l, -32768, 32767));
+            out[f * 2 + 1] = static_cast<int16_t>(std::clamp(mix_r, -32768, 32767));
         }
     }
 
@@ -617,14 +625,49 @@ struct MldAudioEngine {
         return out;
     }
 
+    static uint64_t hash_mld_bytes(const uint8_t* data, size_t size) {
+        uint64_t h = 14695981039346656037ULL ^ static_cast<uint64_t>(size);
+        for (size_t i = 0; i < size; ++i) {
+            h ^= static_cast<uint64_t>(data[i]);
+            h *= 1099511628211ULL;
+        }
+        return h;
+    }
+
     int load_mld(const uint8_t* data, size_t size) {
-        MldSound snd;
-        if (size < 10 || std::memcmp(data, "melo", 4) != 0) {
+        if (size >= 10 && std::memcmp(data, "melo", 4) == 0) {
+            uint64_t h = hash_mld_bytes(data, size);
             std::lock_guard<std::mutex> lk(mtx);
+            auto it = mld_cache.find(h);
+            if (it != mld_cache.end()) {
+                return it->second;
+            }
+            auto snd = std::make_shared<MldSound>();
+            snd->raw_mld.assign(data, data + size);
+            // Fast 0.01ms metadata scan for duration_ms & has_loop (PCM synthesized lazily on first play)
+            synthesize_mld_impl(*snd, false);
             int id = static_cast<int>(sounds.size());
             sounds.push_back(std::move(snd));
+            mld_cache[h] = id;
             return id;
         }
+        auto snd = std::make_shared<MldSound>();
+        snd->synthesized = true;
+        std::lock_guard<std::mutex> lk(mtx);
+        int id = static_cast<int>(sounds.size());
+        sounds.push_back(std::move(snd));
+        return id;
+    }
+
+    static void synthesize_mld_impl(MldSound& snd, bool render_pcm) {
+        const uint8_t* data = snd.raw_mld.data();
+        const size_t size = snd.raw_mld.size();
+        if (size < 10 || std::memcmp(data, "melo", 4) != 0) {
+            snd.synthesized = true;
+            return;
+        }
+
+        const auto& rom = audio::ym_rom();
 
         uint32_t file_len = read_be32(data + 4);
         uint16_t hdr_len = read_be16(data + 8);
@@ -637,10 +680,18 @@ struct MldAudioEngine {
             int32_t tick;
             double sec_per_tick;
         };
-        struct PitchChange {
+        struct TickFloatEv {
             int32_t tick;
-            int ch;
-            double semitones;
+            float val;
+        };
+        struct FrameFloatEv {
+            size_t frame;
+            float val;
+        };
+        struct FramePanEv {
+            size_t frame;
+            float pan_l;
+            float pan_r;
         };
         struct NoteEv {
             int32_t start_tick;
@@ -650,6 +701,7 @@ struct MldAudioEngine {
             int velocity;
             int prog;
             int ch_vol;
+            int init_pan;
             bool is_drum;
         };
         struct AdpcmEv {
@@ -659,25 +711,37 @@ struct MldAudioEngine {
         };
 
         std::vector<TempoChange> tempos = {{0, 60.0 / (120.0 * 48.0)}};
-        std::vector<PitchChange> pitches;
+        std::vector<TickFloatEv> ch_pitch_ticks[16];
+        std::vector<TickFloatEv> ch_mod_ticks[16];
+        std::vector<TickFloatEv> ch_vol_ticks[16];
+        std::vector<TickFloatEv> ch_pan_ticks[16];
         std::vector<NoteEv> notes;
         std::vector<AdpcmEv> adpcm_evs;
 
         int32_t loop_start_tick = 0;
         int32_t loop_end_tick = 0;
         bool has_loop = false;
+        bool has_dsp_fx = false;
+        int master_mld_vol = 110; // MFi5 0xB0 master volume (0..127)
         int32_t max_tick = 0;
 
         int bank[16] = {0};
         int prog[16] = {0};
         int ch_vol[16];
+        int ch_pan[16];
         int bend_range[16];
+        int bend_msb[16];
+        int bend_lsb[16];
+        bool has_e9[16] = {false};
         bool is_drum[16] = {false};
         for (int i = 0; i < 16; ++i) {
             ch_vol[i] = 52;
+            ch_pan[i] = 32;
             bend_range[i] = 2;
+            bend_msb[i] = 32;
+            bend_lsb[i] = 0;
         }
-        is_drum[9] = true; // MFi2 trac 2 voice 1 (ch 9) is standard percussion
+        is_drum[9] = true; // MFi2/MFi5 trac 2 voice 1 (ch 9) is standard percussion
 
         int trac_idx = 0;
         while (p + 8 <= end) {
@@ -703,11 +767,17 @@ struct MldAudioEngine {
                         if (cmd >= 0xF0) {
                             if (tp + 5 > tend) break;
                             uint16_t slen = read_be16(data + tp + 3);
+                            if (tp + 5 + slen <= tend && slen >= 3 &&
+                                data[tp + 5] == 0x01 && data[tp + 6] == 0x40) {
+                                has_dsp_fx = true; // Yamaha MA-5 DSP chorus/reverb SysEx
+                            }
                             tp += 5 + slen;
                         } else {
                             uint8_t arg = data[tp + 3];
                             if (cmd == 0xDC) {
                                 ticks += static_cast<int32_t>(arg) * 256;
+                            } else if (cmd == 0xB0) {
+                                master_mld_vol = std::clamp<int>(arg & 0x7F, 24, 127);
                             } else if (cmd >= 0xC0 && cmd <= 0xCF) {
                                 int tb = cmd & 0x07;
                                 int tpqn = 24 << std::max(0, tb - 2);
@@ -735,16 +805,39 @@ struct MldAudioEngine {
                                 int v = (arg >> 6) & 3;
                                 int ch = trac_idx * 4 + v;
                                 ch_vol[ch] = arg & 0x3F;
+                                ch_vol_ticks[ch].push_back({ticks, static_cast<float>(ch_vol[ch]) / 63.0f});
+                            } else if (cmd == 0xE3) {
+                                int v = (arg >> 6) & 3;
+                                int ch = trac_idx * 4 + v;
+                                ch_pan[ch] = arg & 0x3F;
+                                ch_pan_ticks[ch].push_back({ticks, static_cast<float>(ch_pan[ch])});
                             } else if (cmd == 0xE7) {
                                 int v = (arg >> 6) & 3;
                                 int ch = trac_idx * 4 + v;
                                 bend_range[ch] = std::max(1, static_cast<int>(arg & 0x3F));
-                            } else if (cmd == 0xE4) {
+                            } else if (cmd == 0xE4 || cmd == 0xE9) {
                                 int v = (arg >> 6) & 3;
                                 int ch = trac_idx * 4 + v;
-                                int bend_val = static_cast<int>(arg & 0x3F) - 32;
-                                double semi = (static_cast<double>(bend_val) / 32.0) * bend_range[ch];
-                                pitches.push_back({ticks, ch, semi});
+                                if (cmd == 0xE4) {
+                                    bend_msb[ch] = arg & 0x3F;
+                                } else {
+                                    bend_lsb[ch] = arg & 0x3F;
+                                    has_e9[ch] = true;
+                                }
+                                double norm = 0.0;
+                                if (has_e9[ch]) {
+                                    int raw12 = (bend_msb[ch] << 6) | bend_lsb[ch];
+                                    norm = static_cast<double>(raw12 - 2048) / 2048.0;
+                                } else {
+                                    norm = static_cast<double>(bend_msb[ch] - 32) / 32.0;
+                                }
+                                float semi = static_cast<float>(norm * bend_range[ch]);
+                                ch_pitch_ticks[ch].push_back({ticks, semi});
+                            } else if (cmd == 0xEA || cmd == 0xE8) {
+                                int v = (arg >> 6) & 3;
+                                int ch = trac_idx * 4 + v;
+                                float mod_norm = static_cast<float>(arg & 0x3F) / 63.0f;
+                                ch_mod_ticks[ch].push_back({ticks, mod_norm});
                             }
                             tp += 4;
                         }
@@ -771,7 +864,10 @@ struct MldAudioEngine {
                         int osh = (ob == 0) ? 0 : (ob == 1 ? 1 : (ob == 2 ? -2 : -1));
                         int midi_note = 35 + key_off + osh * 12;
                         if (gate > 0) {
-                            notes.push_back({ticks, ticks + gate, ch, midi_note, vel, prog[ch], ch_vol[ch], is_drum[ch]});
+                            notes.push_back({
+                                ticks, ticks + gate, ch, midi_note, vel,
+                                prog[ch], ch_vol[ch], ch_pan[ch], is_drum[ch]
+                            });
                             max_tick = std::max(max_tick, ticks + gate);
                         }
                         tp += 4;
@@ -806,6 +902,10 @@ struct MldAudioEngine {
         };
 
         double total_sec = tick_to_sec(max_tick);
+        if (!has_loop && !notes.empty()) {
+            // Allow natural SE / Jingle release tail so final notes don't cut off abruptly
+            total_sec += 0.16;
+        }
         if (!adpcm_8k.empty()) {
             double adpcm_sec = static_cast<double>(adpcm_8k.size()) / 8000.0;
             if (!adpcm_evs.empty()) {
@@ -820,162 +920,512 @@ struct MldAudioEngine {
         }
         total_sec = std::clamp(total_sec, 0.08, 300.0);
 
-        size_t total_samples = static_cast<size_t>(total_sec * SAMPLE_RATE) + 1;
-        std::vector<float> mix_buf(total_samples, 0.0f);
-
+        size_t total_frames = static_cast<size_t>(total_sec * SAMPLE_RATE) + 1;
+        snd.total_frames = total_frames;
         if (has_loop && loop_end_tick > loop_start_tick) {
             snd.has_loop = true;
-            snd.loop_start_sample = std::min(total_samples - 1, static_cast<size_t>(tick_to_sec(loop_start_tick) * SAMPLE_RATE));
-            snd.loop_end_sample = std::min(total_samples, static_cast<size_t>(tick_to_sec(loop_end_tick) * SAMPLE_RATE));
+            snd.loop_start_frame = std::min(total_frames - 1, static_cast<size_t>(tick_to_sec(loop_start_tick) * SAMPLE_RATE));
+            snd.loop_end_frame = std::min(total_frames, static_cast<size_t>(tick_to_sec(loop_end_tick) * SAMPLE_RATE));
         }
         snd.duration_ms = std::max<int32_t>(80, static_cast<int32_t>(total_sec * 1000.0));
 
-        // Pre-convert pitch bend events to sample indices
-        struct SamplePitch {
-            size_t sample;
-            int ch;
-            double semitones;
-        };
-        std::vector<SamplePitch> sample_pitches;
-        sample_pitches.reserve(pitches.size());
-        for (const auto& pe : pitches) {
-            sample_pitches.push_back({static_cast<size_t>(tick_to_sec(pe.tick) * SAMPLE_RATE), pe.ch, pe.semitones});
+        if (!render_pcm) {
+            return;
         }
 
-        // Render polyphonic notes
-        uint32_t lfsr = 0xACE1u;
-        for (const auto& n : notes) {
-            size_t s0 = static_cast<size_t>(tick_to_sec(n.start_tick) * SAMPLE_RATE);
-            size_t s1 = static_cast<size_t>(tick_to_sec(n.end_tick) * SAMPLE_RATE);
-            if (s0 >= total_samples) continue;
-            // Allow short release tail
-            size_t rel_samples = n.is_drum ? static_cast<size_t>(0.12 * SAMPLE_RATE) : static_cast<size_t>(0.025 * SAMPLE_RATE);
-            size_t s_end = std::min(total_samples, s1 + rel_samples);
-            if (s_end <= s0) continue;
+        std::vector<float> mix_l(total_frames, 0.0f);
+        std::vector<float> mix_r(total_frames, 0.0f);
 
-            float amp = (static_cast<float>(n.velocity) / 63.0f) * (static_cast<float>(n.ch_vol) / 63.0f) * 0.22f;
-            if (amp <= 0.001f) continue;
+        // Convert per-channel parameter events to sorted sample-frame timelines for O(1) cursor lookup
+        auto calc_pan_gains = [](float pan_val, float& out_l, float& out_r) {
+            // Map 0..63 across natural 78% stereo stage (theta in [0.11..0.89] * pi/2)
+            float norm = std::clamp(pan_val / 63.0f, 0.0f, 1.0f);
+            float theta = (0.11f + 0.78f * norm) * 1.5707963268f;
+            out_l = std::cos(theta);
+            out_r = std::sin(theta);
+        };
 
-            double base_freq = 440.0 * std::pow(2.0, (n.midi_note - 69) / 12.0);
-            double phase = 0.0;
-
-            for (size_t s = s0; s < s_end; ++s) {
-                float t_note = static_cast<float>(s - s0) / SAMPLE_RATE;
-                float gate_dur = static_cast<float>(std::max<size_t>(1, s1 - s0)) / SAMPLE_RATE;
-                float sample_val = 0.0f;
-
-                if (n.is_drum) {
-                    lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0xB400u);
-                    float noise = (static_cast<float>(lfsr & 0xFFFF) / 32768.0f) - 1.0f;
-                    if (n.midi_note <= 37) {
-                        // Kick drum: fast pitch drop 150Hz -> 44Hz
-                        float env = std::exp(-t_note * 28.0f);
-                        double k_freq = 44.0 + 115.0 * std::exp(-t_note * 45.0);
-                        phase += k_freq / SAMPLE_RATE;
-                        sample_val = static_cast<float>(std::sin(phase * 6.2831853)) * env * 1.6f;
-                    } else if (n.midi_note == 38 || n.midi_note == 40) {
-                        // Snare drum: body tone + crisp noise decay
-                        float env_n = std::exp(-t_note * 22.0f);
-                        float env_b = std::exp(-t_note * 38.0f);
-                        phase += 185.0 / SAMPLE_RATE;
-                        sample_val = (static_cast<float>(std::sin(phase * 6.2831853)) * env_b * 0.6f + noise * env_n * 0.9f) * 1.2f;
-                    } else if (n.midi_note == 42 || n.midi_note == 44) {
-                        // Closed hi-hat
-                        float env = std::exp(-t_note * 55.0f);
-                        sample_val = noise * env * 0.75f;
-                    } else if (n.midi_note == 46) {
-                        // Open hi-hat
-                        float env = std::exp(-t_note * 12.0f);
-                        sample_val = noise * env * 0.75f;
-                    } else if (n.midi_note >= 49) {
-                        // Crash / Ride cymbal
-                        float env = std::exp(-t_note * 6.5f);
-                        phase += 820.0 / SAMPLE_RATE;
-                        float ring = static_cast<float>(std::sin(phase * 6.2831853) * std::sin(phase * 14.9));
-                        sample_val = (noise * 0.7f + ring * 0.3f) * env * 0.85f;
-                    } else {
-                        // Tom
-                        float env = std::exp(-t_note * 18.0f);
-                        double t_freq = base_freq * (0.7 + 0.6 * std::exp(-t_note * 20.0));
-                        phase += t_freq / SAMPLE_RATE;
-                        sample_val = static_cast<float>(std::sin(phase * 6.2831853)) * env * 1.3f;
-                    }
-                } else {
-                    // Check active pitch bend for this channel
-                    double bend_semi = 0.0;
-                    for (const auto& sp : sample_pitches) {
-                        if (sp.sample > s) break;
-                        if (sp.ch == n.ch) bend_semi = sp.semitones;
-                    }
-                    double freq = base_freq * std::pow(2.0, bend_semi / 12.0);
-                    // Gentle vibrato after 180ms on sustained melody notes
-                    if (t_note > 0.18f) {
-                        freq *= 1.0 + 0.004 * std::sin((t_note - 0.18f) * 36.0);
-                    }
-                    phase += freq / SAMPLE_RATE;
-                    double p_frac = phase - std::floor(phase);
-
-                    // Envelope (ADSR)
-                    float env = 1.0f;
-                    if (t_note < 0.004f) {
-                        env = t_note / 0.004f;
-                    } else if (s < s1) {
-                        env = 0.72f + 0.28f * std::exp(-(t_note - 0.004f) * 5.0f);
-                    } else {
-                        float t_rel = t_note - gate_dur;
-                        env = 0.72f * std::exp(-t_rel * 80.0f);
-                    }
-
-                    // Timbre selection based on GM/MFi2 program
-                    float osc = 0.0f;
-                    if (n.prog == 38 || n.prog == 39 || n.midi_note < 48) {
-                        // Synth Bass: triangle + 25% pulse sub-harmonic
-                        float tri = static_cast<float>(1.0 - 4.0 * std::abs(p_frac - 0.5));
-                        float pls = (p_frac < 0.25) ? 0.6f : -0.6f;
-                        osc = 0.65f * tri + 0.35f * pls;
-                    } else if (n.prog == 80 || n.prog == 16 || (n.prog & 1) == 0) {
-                        // Square / Pulse Lead (classic Rockman EXE lead)
-                        osc = (p_frac < 0.5) ? 0.8f : -0.8f;
-                    } else if (n.prog >= 48 && n.prog <= 55) {
-                        // Strings / Pad: warm saw + triangle
-                        float saw = static_cast<float>(2.0 * p_frac - 1.0);
-                        float tri = static_cast<float>(1.0 - 4.0 * std::abs(p_frac - 0.5));
-                        osc = 0.5f * saw + 0.5f * tri;
-                    } else {
-                        // Sawtooth / Brass Lead (25% pulse + saw)
-                        float saw = static_cast<float>(2.0 * p_frac - 1.0);
-                        float pls = (p_frac < 0.25) ? 0.75f : -0.75f;
-                        osc = 0.5f * saw + 0.5f * pls;
-                    }
-                    sample_val = osc * env;
-                }
-
-                mix_buf[s] += sample_val * amp;
+        std::vector<FrameFloatEv> ch_pitches[16];
+        std::vector<FrameFloatEv> ch_mods[16];
+        std::vector<FrameFloatEv> ch_vols[16];
+        std::vector<FramePanEv>   ch_pans[16];
+        for (int ch = 0; ch < 16; ++ch) {
+            for (const auto& ev : ch_pitch_ticks[ch]) {
+                ch_pitches[ch].push_back({static_cast<size_t>(tick_to_sec(ev.tick) * SAMPLE_RATE), ev.val});
+            }
+            for (const auto& ev : ch_mod_ticks[ch]) {
+                ch_mods[ch].push_back({static_cast<size_t>(tick_to_sec(ev.tick) * SAMPLE_RATE), ev.val});
+            }
+            for (const auto& ev : ch_vol_ticks[ch]) {
+                ch_vols[ch].push_back({static_cast<size_t>(tick_to_sec(ev.tick) * SAMPLE_RATE), ev.val});
+            }
+            for (const auto& ev : ch_pan_ticks[ch]) {
+                float pl = 0.7071f, pr = 0.7071f;
+                calc_pan_gains(ev.val, pl, pr);
+                ch_pans[ch].push_back({static_cast<size_t>(tick_to_sec(ev.tick) * SAMPLE_RATE), pl, pr});
             }
         }
 
-        // Mix 8kHz ADPCM stream events (upsampled to 44.1kHz with linear interpolation)
+        const float inv_sr = 1.0f / static_cast<float>(SAMPLE_RATE);
+        const float master_track_gain = (static_cast<float>(master_mld_vol) / 110.0f) * 0.255f;
+
+        // Per-channel cursors (notes within each channel are monotonically ordered in start_tick)
+        size_t cur_pitch_idx[16] = {0};
+        size_t cur_mod_idx[16]   = {0};
+        size_t cur_vol_idx[16]   = {0};
+        size_t cur_pan_idx[16]   = {0};
+
+        uint32_t lfsr = 0xACE1u;
+
+        for (const auto& n : notes) {
+            size_t s0 = static_cast<size_t>(tick_to_sec(n.start_tick) * SAMPLE_RATE);
+            size_t s1 = static_cast<size_t>(tick_to_sec(n.end_tick) * SAMPLE_RATE);
+            if (s0 >= total_frames) continue;
+
+            const int ch = n.ch & 15;
+            const audio::YmFmPatch patch = (!n.is_drum && n.prog < 118)
+                ? audio::get_ymu762_patch(n.prog)
+                : audio::YmFmPatch{};
+
+            // Determine release tail duration accurately per instrument / drum / SE
+            double rel_sec = 0.08;
+            if (n.is_drum) {
+                if (n.midi_note == 49 || n.midi_note == 52 || n.midi_note == 57 ||
+                    n.midi_note == 51 || n.midi_note == 59) {
+                    rel_sec = 0.55; // Crash / Ride shimmer tail
+                } else if (n.midi_note == 46 || n.midi_note == 53 || n.midi_note == 54 || n.midi_note == 55) {
+                    rel_sec = 0.30; // Open hat / Splash / Tambourine / Bell
+                } else {
+                    rel_sec = 0.16; // Kick / Snare / Tom / Closed Hat
+                }
+            } else if (n.prog == 127) {
+                rel_sec = 0.42; // Explosion rumble tail
+            } else if (n.prog >= 118) {
+                rel_sec = 0.14;
+            } else {
+                rel_sec = std::clamp(3.8 / static_cast<double>(std::max(8.0f, patch.rel_rate)), 0.035, 0.28);
+            }
+
+            size_t s_end = std::min(total_frames, s1 + static_cast<size_t>(rel_sec * SAMPLE_RATE));
+            if (s_end <= s0) continue;
+
+            const float vel_norm = static_cast<float>(n.velocity) / 63.0f;
+            // Slightly gentle velocity curve so soft backing harmonies stay audible & musical
+            const float vel_gain = (0.22f + 0.78f * vel_norm) * master_track_gain;
+            if (vel_gain <= 0.0005f) continue;
+
+            // Advance channel baseline cursors up to s0
+            auto advance_to = [](const auto& vec, size_t& idx, size_t frame) {
+                while (idx > 0 && vec[idx].frame > frame) --idx;
+                while (idx + 1 < vec.size() && vec[idx + 1].frame <= frame) ++idx;
+            };
+            advance_to(ch_pitches[ch], cur_pitch_idx[ch], s0);
+            advance_to(ch_mods[ch],    cur_mod_idx[ch],   s0);
+            advance_to(ch_vols[ch],    cur_vol_idx[ch],   s0);
+            advance_to(ch_pans[ch],    cur_pan_idx[ch],   s0);
+
+            size_t p_idx   = cur_pitch_idx[ch];
+            size_t m_idx   = cur_mod_idx[ch];
+            size_t v_idx   = cur_vol_idx[ch];
+            size_t pan_idx = cur_pan_idx[ch];
+
+            float init_pl = 0.7071f, init_pr = 0.7071f;
+            if (n.is_drum) {
+                // Subtle natural kit stereo placement (hats slightly right, toms across stereo field)
+                float drum_pan = 32.0f;
+                if (n.midi_note == 42 || n.midi_note == 44 || n.midi_note == 46) drum_pan = 41.0f;
+                else if (n.midi_note == 51 || n.midi_note == 53 || n.midi_note == 59) drum_pan = 44.0f;
+                else if (n.midi_note == 49 || n.midi_note == 55) drum_pan = 22.0f;
+                else if (n.midi_note == 50 || n.midi_note == 48) drum_pan = 24.0f;
+                else if (n.midi_note == 45 || n.midi_note == 47) drum_pan = 33.0f;
+                else if (n.midi_note == 41 || n.midi_note == 43) drum_pan = 42.0f;
+                calc_pan_gains(drum_pan, init_pl, init_pr);
+            } else {
+                calc_pan_gains(static_cast<float>(n.init_pan), init_pl, init_pr);
+            }
+
+            const double base_freq = 440.0 * std::pow(2.0, (n.midi_note - 69) / 12.0);
+            const float gate_dur = static_cast<float>(std::max<size_t>(1, s1 - s0)) * inv_sr;
+
+            if (n.is_drum) {
+                // ============================================================
+                // Yamaha MA-3 / DoCoMo Flip-Phone Percussion Kit (Multiplicative Envelopes)
+                // ============================================================
+                double ph1 = 0.0, ph2 = 0.0, ph3 = 0.0;
+                float prev_noise = 0.0f;
+                float bp_state = 0.0f;
+                const float drum_amp = vel_gain * (static_cast<float>(n.ch_vol) / 63.0f);
+                const int dn = n.midi_note;
+
+                float r1 = 18.0f, r2 = 45.0f, r3 = 90.0f;
+                if (dn == 35 || dn == 36) { r1 = (dn == 36) ? 26.0f : 30.0f; r2 = 52.0f; r3 = 95.0f; }
+                else if (dn == 37) { r1 = 62.0f; }
+                else if (dn == 38 || dn == 40) { r1 = (dn == 40) ? 42.0f : 34.0f; r2 = (dn == 40) ? 23.0f : 19.0f; r3 = 55.0f; }
+                else if (dn == 42 || dn == 44 || dn == 46) { r1 = (dn == 46) ? 10.5f : ((dn == 44) ? 42.0f : 56.0f); }
+                else if (dn == 49 || dn == 52 || dn == 55 || dn == 57) { r1 = (dn == 55) ? 9.5f : ((dn == 52) ? 7.5f : 5.6f); }
+                else if (dn == 51 || dn == 53 || dn == 59) { r1 = (dn == 53) ? 9.0f : 7.2f; r2 = 16.0f; }
+                else if (dn == 62 || dn == 67) { r1 = (dn == 67) ? 22.0f : 28.0f; r2 = 45.0f; r3 = 60.0f; }
+                else if (dn == 69 || dn == 70) { r1 = 42.0f; }
+                else if (dn == 79) { r1 = 14.0f; }
+                else { r1 = 17.5f; r2 = 28.0f; r3 = 50.0f; }
+
+                const float m_e1 = std::exp(-r1 * inv_sr);
+                const float m_e2 = std::exp(-r2 * inv_sr);
+                const float m_e3 = std::exp(-r3 * inv_sr);
+                float e1 = 1.0f, e2 = 1.0f, e3 = 1.0f;
+
+                double tom_base = 130.0;
+                if (dn <= 41) tom_base = 86.0;
+                else if (dn <= 43) tom_base = 105.0;
+                else if (dn <= 45) tom_base = 128.0;
+                else if (dn <= 47) tom_base = 152.0;
+                else if (dn <= 48) tom_base = 178.0;
+                else tom_base = 208.0;
+
+                for (size_t s = s0; s < s_end; ++s) {
+                    float t = static_cast<float>(s - s0) * inv_sr;
+                    lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0xB400u);
+                    float noise = (static_cast<float>(lfsr & 0xFFFF) * (1.0f / 32768.0f)) - 1.0f;
+                    float hp_noise = noise - prev_noise;
+                    prev_noise = noise;
+                    bp_state += 0.24f * (noise - bp_state);
+                    float mid_noise = bp_state - 0.35f * prev_noise;
+
+                    float out_s = 0.0f;
+
+                    if (dn == 35 || dn == 36) {
+                        double kf = 47.0 + 138.0 * e2;
+                        ph1 += kf * inv_sr;
+                        ph2 += (kf * 2.4) * inv_sr;
+                        float click_mod = rom.sample_mod(audio::WS_SINE, ph2) * (0.32f * e3);
+                        out_s = rom.sample_car(audio::WS_SINE, ph1 + click_mod) * e1 * 1.75f;
+                    } else if (dn == 37) {
+                        ph1 += 435.0 * inv_sr;
+                        ph2 += 1210.0 * inv_sr;
+                        float mod = rom.sample_mod(audio::WS_PULSE_SINE, ph2) * 0.35f * e1;
+                        out_s = (rom.sample_car(audio::WS_SINE, ph1 + mod) * 0.85f + hp_noise * 0.25f) * e1 * 1.35f;
+                    } else if (dn == 38 || dn == 40) {
+                        bool tight = (dn == 40);
+                        double sf = (tight ? 205.0 : 184.0) + 75.0 * e3;
+                        ph1 += sf * inv_sr;
+                        ph2 += (sf * 1.58) * inv_sr;
+                        float body = rom.sample_car(audio::WS_SINE, ph1 + rom.sample_mod(audio::WS_SINE, ph2) * 0.25f * e1);
+                        out_s = (body * e1 * 0.72f + (0.65f * mid_noise + 0.35f * hp_noise) * e2 * 0.92f) * 1.35f;
+                    } else if (dn == 39) {
+                        float env = 0.0f;
+                        if (t < 0.011f) env = 1.0f - t * 65.0f;
+                        else if (t < 0.022f) env = 1.0f - (t - 0.011f) * 65.0f;
+                        else env = 0.88f * e1;
+                        out_s = mid_noise * std::max(0.0f, env) * 1.45f;
+                    } else if (dn == 42 || dn == 44 || dn == 46) {
+                        ph1 += 508.0 * inv_sr;
+                        ph2 += 819.0 * inv_sr;
+                        ph3 += 1487.0 * inv_sr;
+                        float m1 = rom.sample_mod(audio::WS_PULSE_SINE, ph2 * 1.351);
+                        float m2 = rom.sample_mod(audio::WS_ABS_SINE, ph3);
+                        float metal = rom.sample_car(audio::WS_SINE, ph1 + 0.38f * m1 + 0.28f * m2);
+                        out_s = (0.42f * metal + 0.58f * hp_noise * 0.7f) * e1 * 0.92f;
+                    } else if (dn == 49 || dn == 52 || dn == 55 || dn == 57) {
+                        ph1 += 462.0 * inv_sr;
+                        ph2 += 978.0 * inv_sr;
+                        ph3 += 1690.0 * inv_sr;
+                        float m = rom.sample_mod(audio::WS_ABS_SINE, ph2) * 0.52f +
+                                  rom.sample_mod(audio::WS_PULSE_SINE, ph3) * 0.36f;
+                        float metal = rom.sample_car(audio::WS_SINE, ph1 + m);
+                        out_s = (0.48f * metal + 0.52f * (0.6f * hp_noise + 0.4f * mid_noise)) * e1 * 0.95f;
+                    } else if (dn == 51 || dn == 53 || dn == 59) {
+                        bool bell = (dn == 53);
+                        ph1 += (bell ? 880.0 : 587.0) * inv_sr;
+                        ph2 += (bell ? 2402.0 : 1602.0) * inv_sr;
+                        float ping = rom.sample_car(audio::WS_SINE, ph1 + rom.sample_mod(audio::WS_SINE, ph2) * 0.32f * e1);
+                        out_s = (ping * e1 * (bell ? 0.82f : 0.58f) + hp_noise * e2 * 0.32f) * 1.0f;
+                    } else if (dn == 54) {
+                        float env = (t < 0.015f) ? (1.0f - t * 45.0f) : (0.85f * e1);
+                        ph1 += 2650.0 * inv_sr;
+                        ph2 += 5480.0 * inv_sr;
+                        float jingle = rom.sample_car(audio::WS_SINE, ph1 + rom.sample_mod(audio::WS_SINE, ph2) * 0.4f);
+                        out_s = (0.55f * jingle + 0.45f * hp_noise * 0.7f) * env * 0.92f;
+                    } else if (dn == 62 || dn == 67) {
+                        bool agogo = (dn == 67);
+                        double f0 = agogo ? 698.0 : (295.0 + 45.0 * e2);
+                        ph1 += f0 * inv_sr;
+                        ph2 += (f0 * (agogo ? 1.414 : 2.15)) * inv_sr;
+                        float mod = rom.sample_mod(audio::WS_SINE, ph2) * (agogo ? 0.32f : 0.24f * e3);
+                        out_s = rom.sample_car(audio::WS_SINE, ph1 + mod) * e1 * 1.25f;
+                    } else if (dn == 69 || dn == 70) {
+                        float atk = std::min(1.0f, t * 140.0f);
+                        out_s = hp_noise * (atk * e1) * 0.85f;
+                    } else if (dn == 79) {
+                        float atk = std::min(1.0f, t * 80.0f);
+                        double cf = 740.0 + 180.0 * rom.sample_car(audio::WS_SINE, t * 6.0);
+                        ph1 += cf * inv_sr;
+                        ph2 += (cf * 2.0) * inv_sr;
+                        out_s = rom.sample_car(audio::WS_SINE, ph1 + rom.sample_mod(audio::WS_SINE, ph2) * 0.22f) * (atk * e1) * 1.05f;
+                    } else {
+                        double tf = tom_base * (1.0 + 0.48 * e2);
+                        ph1 += tf * inv_sr;
+                        ph2 += (tf * 1.62) * inv_sr;
+                        float mod = rom.sample_mod(audio::WS_SINE, ph2) * (0.24f * e3);
+                        out_s = rom.sample_car(audio::WS_SINE, ph1 + mod) * e1 * 1.45f;
+                    }
+
+                    e1 *= m_e1;
+                    e2 *= m_e2;
+                    e3 *= m_e3;
+
+                    float v = out_s * drum_amp;
+                    mix_l[s] += v * init_pl;
+                    mix_r[s] += v * init_pr;
+                }
+                continue;
+            }
+
+            if (n.prog >= 118) {
+                // ============================================================
+                // Special Rockman EXE Battle SE Programs (118..127)
+                // ============================================================
+                double ph1 = 0.0, ph2 = 0.0;
+                float prev_noise = 0.0f;
+                float lp_noise = 0.0f;
+                float cur_pl = init_pl, cur_pr = init_pr;
+                float cur_vol = static_cast<float>(n.ch_vol) / 63.0f;
+                float cur_semi = 0.0f;
+
+                for (size_t s = s0; s < s_end; ++s) {
+                    if (((s - s0) & 15) == 0) {
+                        while (p_idx + 1 < ch_pitches[ch].size() && ch_pitches[ch][p_idx + 1].frame <= s) ++p_idx;
+                        if (p_idx < ch_pitches[ch].size() && ch_pitches[ch][p_idx].frame <= s) cur_semi = ch_pitches[ch][p_idx].val;
+                        while (v_idx + 1 < ch_vols[ch].size() && ch_vols[ch][v_idx + 1].frame <= s) ++v_idx;
+                        if (v_idx < ch_vols[ch].size() && ch_vols[ch][v_idx].frame <= s) cur_vol = ch_vols[ch][v_idx].val;
+                        while (pan_idx + 1 < ch_pans[ch].size() && ch_pans[ch][pan_idx + 1].frame <= s) ++pan_idx;
+                        if (pan_idx < ch_pans[ch].size() && ch_pans[ch][pan_idx].frame <= s) {
+                            cur_pl = ch_pans[ch][pan_idx].pan_l;
+                            cur_pr = ch_pans[ch][pan_idx].pan_r;
+                        }
+                    }
+
+                    float t = static_cast<float>(s - s0) * inv_sr;
+                    lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0xB400u);
+                    float noise = (static_cast<float>(lfsr & 0xFFFF) * (1.0f / 32768.0f)) - 1.0f;
+                    float hp_noise = noise - prev_noise;
+                    prev_noise = noise;
+
+                    double f_bent = base_freq * std::pow(2.0, cur_semi / 12.0);
+                    float out_s = 0.0f;
+
+                    if (n.prog == 118) {
+                        // 118: Synth Drum (Buster / Laser / Synth Tom downward FM sweep!)
+                        float env = (s < s1) ? std::exp(-t * 14.0f) : std::exp(-gate_dur * 14.0f) * std::exp(-(t - gate_dur) * 38.0f);
+                        double sf = f_bent * (0.42 + 1.65 * std::exp(-t * 22.0f));
+                        ph1 += sf * inv_sr;
+                        ph2 += (sf * 1.5) * inv_sr;
+                        float mod = rom.sample_mod(audio::WS_SINE, ph2) * (0.36f * std::exp(-t * 25.0f));
+                        out_s = rom.sample_car(audio::WS_SINE, ph1 + mod) * env * 1.35f;
+                    } else if (n.prog == 119) {
+                        // 119: Reverse Cymbal (Battle Start / Chip-In rising metallic shimmer!)
+                        float env = 0.0f;
+                        if (s < s1) {
+                            float u = std::clamp(t / std::max(0.015f, gate_dur), 0.0f, 1.0f);
+                            env = u * u;
+                        } else {
+                            env = std::exp(-(t - gate_dur) * 28.0f);
+                        }
+                        ph1 += (f_bent * 1.45) * inv_sr;
+                        ph2 += (f_bent * 3.17) * inv_sr;
+                        float metal = rom.sample_car(audio::WS_SINE, ph1 + rom.sample_mod(audio::WS_ABS_SINE, ph2) * 0.48f);
+                        out_s = (0.46f * metal + 0.54f * hp_noise * 0.72f) * env * 1.15f;
+                    } else if (n.prog == 127) {
+                        // 127: Gunshot / Explosion (Heavy sub impact + roaring rumble tail!)
+                        float env = std::exp(-t * 8.5f);
+                        lp_noise += 0.14f * (noise - lp_noise);
+                        double ef = 34.0 + 115.0 * std::exp(-t * 32.0f);
+                        ph1 += ef * inv_sr;
+                        ph2 += (ef * 2.1) * inv_sr;
+                        float sub = rom.sample_car(audio::WS_SINE, ph1 + rom.sample_mod(audio::WS_ABS_SINE, ph2) * 0.45f);
+                        out_s = (sub * std::exp(-t * 18.0f) * 0.85f + lp_noise * env * 1.25f) * 1.45f;
+                    } else if (n.prog == 122 || n.prog == 126) {
+                        // 122/126: Seashore / Applause / Wind SE
+                        float atk = std::min(1.0f, t / std::max(0.01f, 0.25f * gate_dur));
+                        float env = (s < s1) ? atk : std::exp(-(t - gate_dur) * 16.0f);
+                        float cutoff = 0.10f + 0.18f * (0.5f + 0.5f * std::sin(t * 9.0f));
+                        lp_noise += cutoff * (noise - lp_noise);
+                        out_s = (lp_noise - 0.3f * hp_noise) * env * 1.05f;
+                    } else {
+                        // 120 (Fret Noise) / 123 (Bird Tweet / PET Chirp) & misc SE
+                        float env = (s < s1) ? std::exp(-t * 10.0f) : std::exp(-(t - gate_dur) * 35.0f);
+                        double cf = f_bent * (1.8 + 0.35 * std::sin(t * 110.0));
+                        ph1 += cf * inv_sr;
+                        ph2 += (cf * 2.5) * inv_sr;
+                        out_s = rom.sample_car(audio::WS_SINE, ph1 + rom.sample_mod(audio::WS_SINE, ph2) * 0.32f) * env * 1.05f;
+                    }
+
+                    float v = out_s * vel_gain * cur_vol;
+                    mix_l[s] += v * cur_pl;
+                    mix_r[s] += v * cur_pr;
+                }
+                continue;
+            }
+
+            // ================================================================
+            // Authentic 4-Operator (Dual 2-Op) Yamaha MA-3 / MA-5 Melodic FM
+            // ================================================================
+            // Key-Scale Level (KSL) softens upper-register FM brightness so high leads sing cleanly
+            float high_oct = std::max(0.0f, static_cast<float>(n.midi_note - 66) / 12.0f);
+            float ksl_scale = 1.0f / (1.0f + patch.ksl * high_oct);
+            // Dynamic velocity sensitivity on FM modulation index (louder notes = brighter harmonics!)
+            float vel_idx_scale = (0.58f + 0.42f * vel_norm) * ksl_scale;
+
+            const float idx1_atk = patch.idx1_atk * vel_idx_scale;
+            const float idx1_sus = patch.idx1_sus * vel_idx_scale;
+            const float idx2_atk = patch.idx2_atk * vel_idx_scale;
+            const float idx2_sus = patch.idx2_sus * vel_idx_scale;
+            const bool use_pair2 = (patch.mix2 > 0.001f);
+            const float detune2_mul = use_pair2 ? std::pow(2.0f, patch.detune2_cents / 1200.0f) : 1.0f;
+            const float pair_norm = 1.0f / (1.0f + patch.mix2 * 0.65f);
+
+            // Multiplicative per-sample envelope coefficients (zero std::exp in inner loop!)
+            const float mod1_mul = std::exp(-patch.mod1_dec * inv_sr);
+            const float mod2_mul = std::exp(-patch.mod2_dec * inv_sr);
+            const float dec1_mul = std::exp(-patch.dec1_rate * inv_sr);
+            const float dec2_mul = (patch.dec2_rate > 0.0f) ? std::exp(-patch.dec2_rate * inv_sr) : 1.0f;
+            const float rel_mul  = std::exp(-patch.rel_rate * inv_sr);
+            const float atk_inc  = 1.0f / std::max(1.0f, patch.atk_sec * SAMPLE_RATE);
+
+            float mod1_env = patch.brass_swell ? (idx1_atk * 0.25f) : idx1_atk;
+            float mod2_env = idx2_atk;
+            const float swell_inc = patch.brass_swell ? ((idx1_atk * 0.75f) / (0.032f * SAMPLE_RATE)) : 0.0f;
+            const size_t swell_end_s = s0 + static_cast<size_t>(0.032f * SAMPLE_RATE);
+
+            float car_env = 0.0f;
+            float sus_cur = patch.sus_level;
+            bool in_attack = true;
+
+            double ph_c1 = 0.0, ph_m1 = 0.0;
+            double ph_c2 = 0.0, ph_m2 = 0.0;
+            float fb1_p0 = 0.0f, fb1_p1 = 0.0f;
+            float fb2_p0 = 0.0f, fb2_p1 = 0.0f;
+            double lfo_ph = 0.0;
+
+            float cur_semi = 0.0f;
+            float cur_mod  = 0.0f;
+            float cur_vol  = static_cast<float>(n.ch_vol) / 63.0f;
+            float cur_pl   = init_pl;
+            float cur_pr   = init_pr;
+            double step_base = base_freq * inv_sr;
+
+            for (size_t s = s0; s < s_end; ++s) {
+                // Control-rate update every 16 samples (2756 Hz) for MFi5 pitch bend, vibrato, vol & pan
+                if (((s - s0) & 15) == 0) {
+                    while (p_idx + 1 < ch_pitches[ch].size() && ch_pitches[ch][p_idx + 1].frame <= s) ++p_idx;
+                    if (p_idx < ch_pitches[ch].size() && ch_pitches[ch][p_idx].frame <= s) cur_semi = ch_pitches[ch][p_idx].val;
+
+                    while (m_idx + 1 < ch_mods[ch].size() && ch_mods[ch][m_idx + 1].frame <= s) ++m_idx;
+                    if (m_idx < ch_mods[ch].size() && ch_mods[ch][m_idx].frame <= s) cur_mod = ch_mods[ch][m_idx].val;
+
+                    while (v_idx + 1 < ch_vols[ch].size() && ch_vols[ch][v_idx + 1].frame <= s) ++v_idx;
+                    if (v_idx < ch_vols[ch].size() && ch_vols[ch][v_idx].frame <= s) cur_vol = ch_vols[ch][v_idx].val;
+
+                    while (pan_idx + 1 < ch_pans[ch].size() && ch_pans[ch][pan_idx + 1].frame <= s) ++pan_idx;
+                    if (pan_idx < ch_pans[ch].size() && ch_pans[ch][pan_idx].frame <= s) {
+                        cur_pl = ch_pans[ch][pan_idx].pan_l;
+                        cur_pr = ch_pans[ch][pan_idx].pan_r;
+                    }
+
+                    // Advance 5.8 Hz Yamaha vibrato LFO over 16 samples
+                    lfo_ph += 5.8 * 16.0 * inv_sr;
+                    float vib_depth_semi = cur_mod * 0.34f; // Up to ~34 cents at MFi5 mod=63
+                    if (vib_depth_semi < 0.02f && (s - s0) > static_cast<size_t>(0.24 * SAMPLE_RATE)) {
+                        vib_depth_semi = 0.035f; // Subtle 3.5-cent warmth on long sustained notes
+                    }
+                    float total_semi = cur_semi + vib_depth_semi * rom.sample_car(audio::WS_SINE, lfo_ph);
+                    step_base = (base_freq * std::pow(2.0, total_semi * (1.0 / 12.0))) * inv_sr;
+                }
+
+                // Carrier ADSR + D2R envelope
+                if (s < s1) {
+                    if (in_attack) {
+                        car_env += atk_inc;
+                        if (car_env >= 1.0f) {
+                            car_env = 1.0f;
+                            in_attack = false;
+                        }
+                    } else {
+                        sus_cur *= dec2_mul;
+                        car_env = sus_cur + (car_env - sus_cur) * dec1_mul;
+                    }
+                } else {
+                    car_env *= rel_mul;
+                }
+
+                // Modulator envelopes (with optional acoustic brass lip-bloom ramp)
+                if (patch.brass_swell && s < swell_end_s) {
+                    mod1_env = std::min(idx1_atk, mod1_env + swell_inc);
+                } else {
+                    mod1_env = idx1_sus + (mod1_env - idx1_sus) * mod1_mul;
+                }
+
+                // Operator Pair 1 (2-sample averaged feedback eliminates Nyquist harshness!)
+                ph_m1 += step_base * patch.ratio_m1;
+                ph_c1 += step_base * patch.ratio_c1;
+                float fb1_sig = 0.5f * (fb1_p0 + fb1_p1) * patch.fb1;
+                float m1_raw = rom.sample_mod(patch.ws_m1, ph_m1 + fb1_sig);
+                fb1_p1 = fb1_p0;
+                fb1_p0 = m1_raw;
+                float out_osc = rom.sample_car(patch.ws_c1, ph_c1 + m1_raw * mod1_env);
+
+                // Operator Pair 2 (4-Op layer when active)
+                if (use_pair2) {
+                    mod2_env = idx2_sus + (mod2_env - idx2_sus) * mod2_mul;
+                    double step2 = step_base * detune2_mul;
+                    ph_m2 += step2 * patch.ratio_m2;
+                    ph_c2 += step2 * patch.ratio_c2;
+                    float fb2_sig = 0.5f * (fb2_p0 + fb2_p1) * patch.fb2;
+                    float m2_raw = rom.sample_mod(patch.ws_m2, ph_m2 + fb2_sig);
+                    fb2_p1 = fb2_p0;
+                    fb2_p0 = m2_raw;
+                    float c2_out = rom.sample_car(patch.ws_c2, ph_c2 + m2_raw * mod2_env);
+                    out_osc = (out_osc + c2_out * patch.mix2) * pair_norm;
+                }
+
+                // Optional woodwind/flute attack breath chiff (first 22ms)
+                if (patch.breath_chiff > 0.0f && (s - s0) < static_cast<size_t>(0.022 * SAMPLE_RATE)) {
+                    lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0xB400u);
+                    float nval = (static_cast<float>(lfsr & 0xFFFF) * (1.0f / 32768.0f)) - 1.0f;
+                    float c_env = 1.0f - static_cast<float>(s - s0) / (0.022f * SAMPLE_RATE);
+                    out_osc += nval * patch.breath_chiff * c_env;
+                }
+
+                float v = out_osc * car_env * patch.gain * vel_gain * cur_vol;
+                mix_l[s] += v * cur_pl;
+                mix_r[s] += v * cur_pr;
+            }
+        }
+
+        // Mix 8kHz ADPCM stream events (upsampled to 44.1kHz stereo center)
         if (!adpcm_8k.empty()) {
-            auto mix_adpcm_at = [&](size_t start_sample, size_t stop_sample, float vol_scale) {
-                size_t max_s = std::min(total_samples, stop_sample);
-                for (size_t s = start_sample; s < max_s; ++s) {
-                    double pos_8k = static_cast<double>(s - start_sample) * 8000.0 / SAMPLE_RATE;
+            auto mix_adpcm_at = [&](size_t start_frame, size_t stop_frame, float vol_scale) {
+                size_t max_f = std::min(total_frames, stop_frame);
+                const float center_gain = vol_scale * 0.7071f;
+                for (size_t f = start_frame; f < max_f; ++f) {
+                    double pos_8k = static_cast<double>(f - start_frame) * 8000.0 / SAMPLE_RATE;
                     size_t idx0 = static_cast<size_t>(pos_8k);
                     if (idx0 >= adpcm_8k.size()) break;
                     size_t idx1 = std::min(adpcm_8k.size() - 1, idx0 + 1);
                     double frac = pos_8k - idx0;
                     double val = (1.0 - frac) * adpcm_8k[idx0] + frac * adpcm_8k[idx1];
-                    mix_buf[s] += static_cast<float>(val / 32768.0) * vol_scale;
+                    float sv = static_cast<float>(val / 32768.0) * center_gain;
+                    mix_l[f] += sv;
+                    mix_r[f] += sv;
                 }
             };
 
             if (adpcm_evs.empty()) {
-                mix_adpcm_at(0, total_samples, 0.85f);
+                mix_adpcm_at(0, total_frames, 0.85f);
             } else {
                 for (size_t i = 0; i < adpcm_evs.size(); ++i) {
                     if (!adpcm_evs[i].play) continue;
                     size_t s0 = static_cast<size_t>(tick_to_sec(adpcm_evs[i].tick) * SAMPLE_RATE);
-                    size_t s1 = total_samples;
+                    size_t s1 = total_frames;
                     for (size_t j = i + 1; j < adpcm_evs.size(); ++j) {
                         s1 = static_cast<size_t>(tick_to_sec(adpcm_evs[j].tick) * SAMPLE_RATE);
                         break;
@@ -986,30 +1436,98 @@ struct MldAudioEngine {
             }
         }
 
-        // Convert float mix buffer to int16 PCM with soft limiting
-        snd.pcm.resize(total_samples);
-        for (size_t i = 0; i < total_samples; ++i) {
-            float x = mix_buf[i];
-            // Soft tanh-like limiter
-            if (x > 1.0f) x = 1.0f;
-            if (x < -1.0f) x = -1.0f;
-            snd.pcm[i] = static_cast<int16_t>(x * 28000.0f);
+        // Yamaha MA-5 Stereo Early-Reflection / Micro-Chorus DSP for BGM tracks
+        if ((snd.has_loop || has_dsp_fx) && total_frames > 1200) {
+            constexpr size_t kDelayL = 582; // ~13.2 ms
+            constexpr size_t kDelayR = 869; // ~19.7 ms
+            constexpr float kWet = 0.115f;
+            float lp_l = 0.0f, lp_r = 0.0f;
+
+            // Pre-warm filter state from end of loop so loop-back reflection is seamless
+            if (snd.has_loop && snd.loop_end_frame > snd.loop_start_frame + kDelayR) {
+                for (size_t f = snd.loop_end_frame - kDelayR; f < snd.loop_end_frame; ++f) {
+                    lp_l += 0.42f * (mix_l[f] - lp_l);
+                    lp_r += 0.42f * (mix_r[f] - lp_r);
+                }
+            }
+
+            std::vector<float> wet_l(total_frames, 0.0f);
+            std::vector<float> wet_r(total_frames, 0.0f);
+            for (size_t f = 0; f < total_frames; ++f) {
+                size_t src_l = (f >= kDelayL) ? (f - kDelayL)
+                    : (snd.has_loop && snd.loop_end_frame > kDelayL ? (snd.loop_end_frame - (kDelayL - f)) : 0);
+                size_t src_r = (f >= kDelayR) ? (f - kDelayR)
+                    : (snd.has_loop && snd.loop_end_frame > kDelayR ? (snd.loop_end_frame - (kDelayR - f)) : 0);
+                lp_l += 0.42f * (mix_l[src_l] - lp_l);
+                lp_r += 0.42f * (mix_r[src_r] - lp_r);
+                // Cross-coupled stereo reflection adds flip-phone MA-5 spaciousness
+                wet_l[f] = lp_r * kWet;
+                wet_r[f] = lp_l * kWet;
+            }
+            for (size_t f = 0; f < total_frames; ++f) {
+                mix_l[f] += wet_l[f];
+                mix_r[f] += wet_r[f];
+            }
         }
 
-        std::lock_guard<std::mutex> lk(mtx);
-        int id = static_cast<int>(sounds.size());
-        sounds.push_back(std::move(snd));
-        return id;
+        // Click-free 64-frame micro-crossfade right before loop_end_frame
+        if (snd.has_loop && snd.loop_end_frame > snd.loop_start_frame + 128 && snd.loop_start_frame >= 64) {
+            constexpr size_t kXf = 64;
+            for (size_t k = 0; k < kXf; ++k) {
+                float a = static_cast<float>(k) / static_cast<float>(kXf);
+                size_t fe = snd.loop_end_frame - kXf + k;
+                size_t fs = snd.loop_start_frame - kXf + k;
+                mix_l[fe] = (1.0f - a) * mix_l[fe] + a * mix_l[fs];
+                mix_r[fe] = (1.0f - a) * mix_r[fe] + a * mix_r[fs];
+            }
+        }
+
+        // Convert stereo float mix to interleaved int16 PCM with warm soft-knee saturation
+        snd.pcm.resize(total_frames * 2);
+        auto soft_sat = [](float x) -> int16_t {
+            // Smooth Padé tanh-like curve: linear at normal levels, zero hard-clipping on peaks
+            float y = x / (1.0f + 0.28f * std::abs(x));
+            y = std::clamp(y * 1.24f, -1.0f, 1.0f);
+            return static_cast<int16_t>(y * 30500.0f);
+        };
+        for (size_t f = 0; f < total_frames; ++f) {
+            snd.pcm[f * 2]     = soft_sat(mix_l[f]);
+            snd.pcm[f * 2 + 1] = soft_sat(mix_r[f]);
+        }
+        snd.synthesized = true;
     }
 
     void play_port(int port, int sound_id, int volume, Ref presenter_ref, int64_t now_ms) {
         if (port < 0 || port >= NUM_PORTS) return;
+        std::shared_ptr<MldSound> snd_ptr;
+        bool need_synth = false;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            if (sound_id < 0 || static_cast<size_t>(sound_id) >= sounds.size()) return;
+            snd_ptr = sounds[sound_id];
+            need_synth = (dev_id != 0 && !snd_ptr->synthesized);
+        }
+        if (need_synth && snd_ptr) {
+            // Synthesize outside audio callback lock so active ports never stutter
+            MldSound tmp;
+            tmp.raw_mld = snd_ptr->raw_mld;
+            synthesize_mld_impl(tmp, true);
+            std::lock_guard<std::mutex> lk(mtx);
+            if (!snd_ptr->synthesized) {
+                snd_ptr->pcm = std::move(tmp.pcm);
+                snd_ptr->total_frames = tmp.total_frames;
+                snd_ptr->loop_start_frame = tmp.loop_start_frame;
+                snd_ptr->loop_end_frame = tmp.loop_end_frame;
+                snd_ptr->has_loop = tmp.has_loop;
+                snd_ptr->duration_ms = tmp.duration_ms;
+                snd_ptr->synthesized = true;
+            }
+        }
         std::lock_guard<std::mutex> lk(mtx);
-        if (sound_id < 0 || static_cast<size_t>(sound_id) >= sounds.size()) return;
-        const MldSound& snd = sounds[sound_id];
+        const MldSound& snd = *snd_ptr;
         PortState& ps = ports[port];
         ps.sound_id = sound_id;
-        ps.sample_pos = 0;
+        ps.frame_pos = 0;
         ps.volume = std::clamp(volume, 0, 100);
         ps.playing = true;
         ps.loop = (port == 0 && snd.has_loop);
@@ -1024,7 +1542,7 @@ struct MldAudioEngine {
         PortState& ps = ports[port];
         if (ps.active_presenter == presenter_ref) {
             ps.playing = false;
-            ps.sample_pos = 0;
+            ps.frame_pos = 0;
         }
     }
 
@@ -1111,6 +1629,7 @@ static std::string generate_random_uid() {
 struct UiInputManager {
     std::string config_path = "controls.cfg";
     bool show_softkey_bar = true;
+    bool high_fps_mode = true; // true = 60 FPS smooth interpolation, false = 15 FPS original flip-phone rate
     bool is_fullscreen = false;
     std::string soft_label_left;
     std::string soft_label_right;
@@ -1125,6 +1644,8 @@ struct UiInputManager {
 
     bool has_cli_net_override = false;
     bool cli_online_mode = false;
+    bool has_cli_fps_override = false;
+    bool cli_high_fps_mode = true;
     std::string cli_server_url;
     std::string cli_player_uid;
     std::string cli_player_name;
@@ -1271,6 +1792,9 @@ struct UiInputManager {
             online_mode = cli_online_mode;
             if (!cli_server_url.empty()) server_url = cli_server_url;
         }
+        if (has_cli_fps_override) {
+            high_fps_mode = cli_high_fps_mode;
+        }
         if (!cli_player_uid.empty()) player_uid = cli_player_uid;
         if (!cli_player_name.empty()) player_name = cli_player_name;
     }
@@ -1298,6 +1822,8 @@ struct UiInputManager {
                 g_audio.muted = (std::atoi(val.c_str()) != 0);
             } else if (key == "show_softkey_bar") {
                 show_softkey_bar = (std::atoi(val.c_str()) != 0);
+            } else if (key == "high_fps_mode") {
+                high_fps_mode = (std::atoi(val.c_str()) != 0);
             } else if (key == "online_mode") {
                 online_mode = (std::atoi(val.c_str()) != 0);
             } else if (key == "server_url" && !val.empty()) {
@@ -1321,12 +1847,13 @@ struct UiInputManager {
     void save_config() const {
         std::ofstream f(config_path, std::ios::trunc);
         if (!f) return;
-        f << "# rmexe-mobile-recomp keybindings, network & emulator settings\n";
+        f << "# rmexe-mobile-recomp keybindings, frame rate, network & emulator settings\n";
         {
             std::lock_guard<std::mutex> lk(g_audio.mtx);
             f << "master_volume=" << g_audio.master_volume << "\n";
             f << "muted=" << (g_audio.muted ? 1 : 0) << "\n";
         }
+        f << "high_fps_mode=" << (high_fps_mode ? 1 : 0) << "\n";
         f << "show_softkey_bar=" << (show_softkey_bar ? 1 : 0) << "\n";
         f << "online_mode=" << (online_mode ? 1 : 0) << "\n";
         f << "server_url=" << server_url << "\n";
@@ -1598,7 +2125,7 @@ struct UiInputManager {
         auto pause_t0 = std::chrono::steady_clock::now();
         if (g_audio.dev_id != 0) SDL_PauseAudioDevice(g_audio.dev_id, 1);
 
-        constexpr int TOTAL_ROWS = ACT_COUNT + 7; // 10 binds + Vol + SoftBar + NetMode + PvP + Reset + Resume + Quit
+        constexpr int TOTAL_ROWS = ACT_COUNT + 8; // 10 binds + Vol + FPS + SoftBar + NetMode + PvP + Reset + Resume + Quit
         constexpr int VISIBLE_ROWS = 9;
         int sel_row = 0;
         int sel_col = 0; // 0 = Key1, 1 = Key2, 2 = Pad
@@ -1606,6 +2133,12 @@ struct UiInputManager {
         bool waiting_bind = false;
         bool menu_open = true;
         bool quit_game = false;
+
+        auto toggle_fps_mode = [&]() {
+            high_fps_mode = !high_fps_mode;
+            save_config();
+            show_toast(high_fps_mode ? "帧率模式: 60 FPS (丝滑插值)" : "帧率模式: 15 FPS (原版帧率)", 90);
+        };
 
         auto toggle_net_mode = [&]() {
             online_mode = !online_mode;
@@ -1692,12 +2225,14 @@ struct UiInputManager {
                             g_audio.master_volume = std::clamp(g_audio.master_volume + dir * 5, 0, 100);
                             save_config();
                         } else if (sel_row == ACT_COUNT + 1) {
+                            toggle_fps_mode();
+                        } else if (sel_row == ACT_COUNT + 2) {
                             show_softkey_bar = !show_softkey_bar;
                             apply_softbar_geometry(win, ren, scale);
                             save_config();
-                        } else if (sel_row == ACT_COUNT + 2) {
+                        } else if (sel_row == ACT_COUNT + 3) {
                             toggle_net_mode();
-                        } else if (sel_row == ACT_COUNT + 3 && !g_pvp.active()) {
+                        } else if (sel_row == ACT_COUNT + 4 && !g_pvp.active()) {
                             pvp_menu_choice = 1 - pvp_menu_choice;
                         }
                     };
@@ -1711,20 +2246,22 @@ struct UiInputManager {
                             }
                             save_config();
                         } else if (sel_row == ACT_COUNT + 1) {
+                            toggle_fps_mode();
+                        } else if (sel_row == ACT_COUNT + 2) {
                             show_softkey_bar = !show_softkey_bar;
                             apply_softbar_geometry(win, ren, scale);
                             save_config();
-                        } else if (sel_row == ACT_COUNT + 2) {
-                            toggle_net_mode();
                         } else if (sel_row == ACT_COUNT + 3) {
-                            exec_pvp_action();
+                            toggle_net_mode();
                         } else if (sel_row == ACT_COUNT + 4) {
+                            exec_pvp_action();
+                        } else if (sel_row == ACT_COUNT + 5) {
                             reset_defaults();
                             save_config();
                             show_toast("已恢复默认按键配置");
-                        } else if (sel_row == ACT_COUNT + 5) {
-                            menu_open = false;
                         } else if (sel_row == ACT_COUNT + 6) {
+                            menu_open = false;
+                        } else if (sel_row == ACT_COUNT + 7) {
                             quit_game = true;
                             menu_open = false;
                         }
@@ -1734,6 +2271,8 @@ struct UiInputManager {
                         SDL_Keycode k = ev.key.keysym.sym;
                         if (k == SDLK_F1 || k == SDLK_ESCAPE) {
                             menu_open = false;
+                        } else if (k == SDLK_F3) {
+                            toggle_fps_mode();
                         } else if (k == SDLK_UP) {
                             sel_row = (sel_row - 1 + TOTAL_ROWS) % TOTAL_ROWS;
                         } else if (k == SDLK_DOWN) {
@@ -1834,14 +2373,18 @@ struct UiInputManager {
                     std::string vstr = muted ? ("< 静音 (" + std::to_string(vol) + "%) >") : ("< " + std::to_string(vol) + "% >");
                     draw_ui_text(display_buf, 240, 260, vstr, 110, ry + 12, muted ? 0xFFFF8888u : 0xFF88FFAAu);
                 } else if (r == ACT_COUNT + 1) {
+                    draw_ui_text(display_buf, 240, 260, "帧率模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                    std::string fstr = high_fps_mode ? "< 60 FPS 丝滑插值 >" : "< 15 FPS 原版帧率 >";
+                    draw_ui_text(display_buf, 240, 260, fstr, 86, ry + 12, high_fps_mode ? 0xFF88FFAAu : 0xFFFFD874u);
+                } else if (r == ACT_COUNT + 2) {
                     draw_ui_text(display_buf, 240, 260, "底部软键栏", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                     std::string sstr = show_softkey_bar ? "< 开启 >" : "< 关闭 >";
                     draw_ui_text(display_buf, 240, 260, sstr, 118, ry + 12, show_softkey_bar ? 0xFF88FFAAu : 0xFF98A8C0u);
-                } else if (r == ACT_COUNT + 2) {
+                } else if (r == ACT_COUNT + 3) {
                     draw_ui_text(display_buf, 240, 260, "通信模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                     std::string nstr = online_mode ? "< 在线服务器 >" : "< 本地离线模拟 >";
                     draw_ui_text(display_buf, 240, 260, nstr, 98, ry + 12, online_mode ? 0xFF74D8FFu : 0xFF88FFAAu);
-                } else if (r == ACT_COUNT + 3) {
+                } else if (r == ACT_COUNT + 4) {
                     draw_ui_text(display_buf, 240, 260, "联机对战", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                     std::string pstr;
                     uint32_t pcol = 0xFFFFD874u;
@@ -1854,13 +2397,13 @@ struct UiInputManager {
                         pstr = (pvp_menu_choice == 0) ? "< 创建对战房间 >" : "< 加入对战房间 >";
                     }
                     draw_ui_text(display_buf, 240, 260, pstr, 94, ry + 12, pcol);
-                } else if (r == ACT_COUNT + 4) {
+                } else if (r == ACT_COUNT + 5) {
                     std::string lbl = "[ 恢复默认按键配置 ]";
                     draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFFD866u : 0xFFC8D8F8u);
-                } else if (r == ACT_COUNT + 5) {
+                } else if (r == ACT_COUNT + 6) {
                     std::string lbl = "[ 返回游戏 (Resume) ]";
                     draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFF88FFAAu : 0xFFC8D8F8u);
-                } else if (r == ACT_COUNT + 6) {
+                } else if (r == ACT_COUNT + 7) {
                     std::string lbl = "[ 保存进度并退出 ]";
                     draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFF8888u : 0xFFE8B8B8u);
                 }
@@ -1875,7 +2418,7 @@ struct UiInputManager {
             // Footer instructions
             fill_rect_alpha(display_buf, 240, 260, 6, 196, 228, 1, 0xFF324672u);
             draw_ui_text(display_buf, 240, 260, "↑↓←→:选择  Enter:改键  Del:清空", 8, 211, 0xFFA4BCE4u);
-            draw_ui_text(display_buf, 240, 260, "F2:软键栏  F11:全屏  F12:保存截图", 8, 227, 0xFF849AC0u);
+            draw_ui_text(display_buf, 240, 260, "F2:软键栏 F3:60/15帧 F11:全屏 F12:截图", 6, 227, 0xFF849AC0u);
 
             // Waiting for key modal popup
             if (waiting_bind && sel_row < ACT_COUNT) {
@@ -1907,6 +2450,382 @@ struct UiInputManager {
 };
 
 static UiInputManager g_ui;
+
+// ============================================================================
+// 60 FPS Display-List Sub-Frame Motion Interpolator (with 60/15 FPS Switch)
+// ============================================================================
+static void blit_rect_buf(uint32_t* dst_buf, int dst_w, int dst_h, bool fill,
+                          int rx, int ry, int rw, int rh, uint32_t col) {
+    if (rw <= 0 || rh <= 0) return;
+    if (fill) {
+        int y0 = std::max(0, ry), y1 = std::min(dst_h, ry + rh);
+        int x0 = std::max(0, rx), x1 = std::min(dst_w, rx + rw);
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                dst_buf[y * dst_w + x] = col;
+            }
+        }
+    } else {
+        int x0 = std::max(0, rx), x1 = std::min(dst_w - 1, rx + rw);
+        for (int x = x0; x <= x1; ++x) {
+            if (ry >= 0 && ry < dst_h) dst_buf[ry * dst_w + x] = col;
+            if (ry + rh >= 0 && ry + rh < dst_h) dst_buf[(ry + rh) * dst_w + x] = col;
+        }
+        int y0 = std::max(0, ry), y1 = std::min(dst_h - 1, ry + rh);
+        for (int y = y0; y <= y1; ++y) {
+            if (rx >= 0 && rx < dst_w) dst_buf[y * dst_w + rx] = col;
+            if (rx + rw >= 0 && rx + rw < dst_w) dst_buf[y * dst_w + (rx + rw)] = col;
+        }
+    }
+}
+
+static void blit_image_buf(DojaRuntime& rt, uint32_t* dst_buf, int dst_w, int dst_h,
+                           Ref img_ref, int base_dx, int base_dy,
+                           int sx, int sy, int sw, int sh, int dw, int dh, int flip_mode) {
+    if (img_ref <= 0 || dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
+    HeapObject& img_obj = rt.get(img_ref);
+    if (!img_obj.img) return;
+    ImageData& img = *img_obj.img;
+
+    const PaletteData* pal = nullptr;
+    if (img.is_paletted && img.palette_ref > 0) {
+        pal = rt.get(img.palette_ref).pal.get();
+    }
+
+    bool flip_h = (flip_mode == 1 || flip_mode == 3);
+    bool flip_v = (flip_mode == 2 || flip_mode == 3);
+
+    for (int py = 0; py < dh; ++py) {
+        int out_y = base_dy + py;
+        if (out_y < 0 || out_y >= dst_h) continue;
+        int rel_sy = (py * sh) / dh;
+        if (flip_v) rel_sy = sh - 1 - rel_sy;
+        int src_y = sy + rel_sy;
+        if (src_y < 0 || src_y >= img.height) continue;
+
+        for (int px = 0; px < dw; ++px) {
+            int out_x = base_dx + px;
+            if (out_x < 0 || out_x >= dst_w) continue;
+            int rel_sx = (px * sw) / dw;
+            if (flip_h) rel_sx = sw - 1 - rel_sx;
+            int src_x = sx + rel_sx;
+            if (src_x < 0 || src_x >= img.width) continue;
+
+            if (img.is_paletted) {
+                uint8_t idx = img.indices[src_y * img.width + src_x];
+                if (img.transparent_enabled && idx == img.transparent_index) continue;
+                uint32_t col = pal ? pal->entries[idx] : 0xFFFF00FFu;
+                dst_buf[out_y * dst_w + out_x] = col | 0xFF000000u;
+            } else {
+                uint32_t col = img.argb[src_y * img.width + src_x];
+                if ((col >> 24) == 0) continue;
+                if (img.transparent_enabled && ((col & 0xFFFFFFu) == (img.transparent_color & 0xFFFFFFu))) {
+                    continue;
+                }
+                dst_buf[out_y * dst_w + out_x] = col | 0xFF000000u;
+            }
+        }
+    }
+}
+
+static void blit_text_buf(uint32_t* dst_buf, int dst_w, int dst_h,
+                          const std::string& text, int pen_x, int baseline_y, uint32_t color) {
+    auto cps = utf8_to_codepoints(text);
+    uint8_t sr = (color >> 16) & 0xFF;
+    uint8_t sg = (color >> 8) & 0xFF;
+    uint8_t sb = color & 0xFF;
+
+    for (uint32_t cp : cps) {
+        bool rendered_ft = false;
+        if (g_ft.ft_face && g_ft.load_char) {
+            if (g_ft.load_char(g_ft.ft_face, cp, 4) == 0) {
+                const uint8_t* face_bytes = reinterpret_cast<const uint8_t*>(g_ft.ft_face);
+                const uint8_t* glyph_ptr = *reinterpret_cast<const uint8_t* const*>(face_bytes + 0x98);
+                if (glyph_ptr) {
+                    int32_t adv_x = *reinterpret_cast<const int32_t*>(glyph_ptr + 0x80) >> 6;
+                    uint32_t rows = *reinterpret_cast<const uint32_t*>(glyph_ptr + 0x98);
+                    uint32_t width = *reinterpret_cast<const uint32_t*>(glyph_ptr + 0x9c);
+                    int32_t pitch = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xa0);
+                    const uint8_t* buf = *reinterpret_cast<const uint8_t* const*>(glyph_ptr + 0xa8);
+                    int32_t bmp_left = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xc0);
+                    int32_t bmp_top = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xc4);
+
+                    if (buf && rows < 64 && width < 64) {
+                        for (uint32_t ry = 0; ry < rows; ++ry) {
+                            int dy = baseline_y - bmp_top + static_cast<int>(ry);
+                            if (dy < 0 || dy >= dst_h) continue;
+                            for (uint32_t rx = 0; rx < width; ++rx) {
+                                int dx = pen_x + bmp_left + static_cast<int>(rx);
+                                if (dx < 0 || dx >= dst_w) continue;
+                                uint8_t alpha = buf[ry * pitch + rx];
+                                if (alpha > 96) {
+                                    dst_buf[dy * dst_w + dx] = 0xFF000000u | (sr << 16) | (sg << 8) | sb;
+                                }
+                            }
+                        }
+                    }
+                    pen_x += (adv_x > 0) ? adv_x : ((cp < 0x80) ? 6 : 12);
+                    rendered_ft = true;
+                }
+            }
+        }
+        if (!rendered_ft) {
+            int adv = (cp < 0x80) ? 6 : 12;
+            if (cp > 0x20) {
+                for (int gy = 0; gy < 10; ++gy) {
+                    int dy = baseline_y - 9 + gy;
+                    if (dy < 0 || dy >= dst_h) continue;
+                    for (int gx = 0; gx < adv - 1; ++gx) {
+                        int dx = pen_x + gx;
+                        if (dx < 0 || dx >= dst_w) continue;
+                        bool on = ((cp >> ((gx + gy) % 7)) & 1) != 0;
+                        if (on) dst_buf[dy * dst_w + dx] = color;
+                    }
+                }
+            }
+            pen_x += adv;
+        }
+    }
+}
+
+struct FrameInterpolator {
+    enum class CmdKind : uint8_t { FillRect, DrawRect, Image, Text };
+
+    struct DrawCmd {
+        CmdKind kind = CmdKind::Image;
+        Ref img_ref = 0;
+        uint32_t img_gen = 0;
+        int dx = 0, dy = 0;
+        int sx = 0, sy = 0;
+        int sw = 0, sh = 0;
+        int dw = 0, dh = 0;
+        int flip_mode = 0;
+        uint32_t color = 0;
+        std::string text;
+        int prev_dx = 0, prev_dy = 0;
+        bool has_match = false;
+    };
+
+    std::unordered_map<Ref, uint32_t> img_gen;
+    uint32_t lock_base_fb[240 * 240] = {0};
+    uint32_t interp_fb[240 * 240] = {0};
+
+    std::vector<DrawCmd> prev_cmds;
+    std::vector<DrawCmd> curr_cmds;
+    std::vector<DrawCmd> building_cmds;
+    int building_coverage = 0;
+
+    bool can_interpolate = false;
+    bool any_motion = false;
+    int subframes_presented = 4; // 1..4 across ~62.5 ms 15Hz logic tick
+    std::chrono::steady_clock::time_point tick_unlock_tp = std::chrono::steady_clock::now();
+
+    void reset() {
+        prev_cmds.clear();
+        curr_cmds.clear();
+        building_cmds.clear();
+        building_coverage = 0;
+        can_interpolate = false;
+        any_motion = false;
+        subframes_presented = 4;
+    }
+
+    void mark_offscreen_dirty(Ref target_img) {
+        if (target_img > 0) {
+            img_gen[target_img]++;
+        }
+    }
+
+    uint32_t get_img_gen(Ref r) const {
+        auto it = img_gen.find(r);
+        return (it != img_gen.end()) ? it->second : 0u;
+    }
+
+    void on_screen_lock(const uint32_t* current_fb) {
+        std::memcpy(lock_base_fb, current_fb, 240 * 240 * sizeof(uint32_t));
+        building_cmds.clear();
+        building_coverage = 0;
+    }
+
+    void add_coverage(int dx, int dy, int dw, int dh) {
+        int x0 = std::clamp(dx, 0, 240), x1 = std::clamp(dx + dw, 0, 240);
+        int y0 = std::clamp(dy, 0, 240), y1 = std::clamp(dy + dh, 0, 240);
+        if (x1 > x0 && y1 > y0) {
+            building_coverage += (x1 - x0) * (y1 - y0);
+        }
+    }
+
+    void record_rect(bool fill, int rx, int ry, int rw, int rh, uint32_t col) {
+        if (building_cmds.size() >= 2048) return;
+        DrawCmd c{};
+        c.kind = fill ? CmdKind::FillRect : CmdKind::DrawRect;
+        c.dx = rx; c.dy = ry; c.dw = rw; c.dh = rh; c.color = col;
+        building_cmds.push_back(std::move(c));
+        if (fill) add_coverage(rx, ry, rw, rh);
+    }
+
+    void record_image(Ref img_ref, int dx, int dy, int sx, int sy, int sw, int sh, int dw, int dh, int flip) {
+        if (building_cmds.size() >= 2048) return;
+        DrawCmd c{};
+        c.kind = CmdKind::Image;
+        c.img_ref = img_ref;
+        c.img_gen = get_img_gen(img_ref);
+        c.dx = dx; c.dy = dy;
+        c.sx = sx; c.sy = sy; c.sw = sw; c.sh = sh;
+        c.dw = dw; c.dh = dh;
+        c.flip_mode = flip;
+        building_cmds.push_back(std::move(c));
+        add_coverage(dx, dy, dw, dh);
+    }
+
+    void record_text(const std::string& txt, int px, int py, uint32_t col) {
+        if (building_cmds.size() >= 2048) return;
+        DrawCmd c{};
+        c.kind = CmdKind::Text;
+        c.dx = px; c.dy = py; c.color = col; c.text = txt;
+        building_cmds.push_back(std::move(c));
+    }
+
+    void on_screen_unlock(const uint32_t* final_fb, bool enable_interp) {
+        prev_cmds = std::move(curr_cmds);
+        curr_cmds = std::move(building_cmds);
+        building_cmds.clear();
+        int cov = building_coverage;
+        building_coverage = 0;
+
+        tick_unlock_tp = std::chrono::steady_clock::now();
+        can_interpolate = false;
+        any_motion = false;
+        subframes_presented = 4;
+
+        if (!enable_interp || prev_cmds.empty() || curr_cmds.empty()) {
+            std::memcpy(lock_base_fb, final_fb, 240 * 240 * sizeof(uint32_t));
+            return;
+        }
+        // Only interpolate full-viewport scenes (Overworld, Battle, Menus, Title) so tiny
+        // incremental wipe patches never leave trails on uncleared backgrounds
+        if (cov < 240 * 160) {
+            std::memcpy(lock_base_fb, final_fb, 240 * 240 * sizeof(uint32_t));
+            return;
+        }
+        int n_prev = static_cast<int>(prev_cmds.size());
+        int n_curr = static_cast<int>(curr_cmds.size());
+        if (std::abs(n_curr - n_prev) > std::max(16, (n_curr * 3) / 5)) {
+            std::memcpy(lock_base_fb, final_fb, 240 * 240 * sizeof(uint32_t));
+            return;
+        }
+
+        std::vector<uint8_t> used_prev(static_cast<size_t>(n_prev), 0);
+        int matched_count = 0;
+
+        // Pass 1: Exact visual match (tiles, static-frame sprites, UI bars, strings) within 36 px
+        for (int i = 0; i < n_curr; ++i) {
+            DrawCmd& c = curr_cmds[i];
+            int best_j = -1;
+            int best_score = 999999;
+            for (int j = 0; j < n_prev; ++j) {
+                if (used_prev[j]) continue;
+                const DrawCmd& p = prev_cmds[j];
+                if (c.kind != p.kind) continue;
+                if (c.kind == CmdKind::Image) {
+                    if (c.img_ref != p.img_ref || c.img_gen != p.img_gen ||
+                        c.sx != p.sx || c.sy != p.sy || c.sw != p.sw || c.sh != p.sh ||
+                        c.dw != p.dw || c.dh != p.dh || c.flip_mode != p.flip_mode) {
+                        continue;
+                    }
+                } else if (c.kind == CmdKind::FillRect || c.kind == CmdKind::DrawRect) {
+                    if (c.dw != p.dw || c.dh != p.dh || c.color != p.color) continue;
+                } else {
+                    if (c.color != p.color || c.text != p.text) continue;
+                }
+                int adx = std::abs(c.dx - p.dx);
+                int ady = std::abs(c.dy - p.dy);
+                if (adx > 36 || ady > 36) continue;
+                int score = (adx + ady) * 16 + std::min(15, std::abs(i - j));
+                if (score < best_score) {
+                    best_score = score;
+                    best_j = j;
+                    if (score == 0) break;
+                }
+            }
+            if (best_j >= 0) {
+                used_prev[best_j] = 1;
+                c.prev_dx = prev_cmds[best_j].dx;
+                c.prev_dy = prev_cmds[best_j].dy;
+                c.has_match = true;
+                matched_count++;
+                if (c.prev_dx != c.dx || c.prev_dy != c.dy) any_motion = true;
+            }
+        }
+
+        // Pass 2: Animated character/projectile walk & attack cel match (same sheet & size, <= 18 px)
+        for (int i = 0; i < n_curr; ++i) {
+            DrawCmd& c = curr_cmds[i];
+            if (c.has_match || c.kind != CmdKind::Image || c.dw > 96 || c.dh > 96) continue;
+            int best_j = -1;
+            int best_score = 999999;
+            for (int j = 0; j < n_prev; ++j) {
+                if (used_prev[j]) continue;
+                const DrawCmd& p = prev_cmds[j];
+                if (p.kind != CmdKind::Image || c.img_ref != p.img_ref || c.img_gen != p.img_gen ||
+                    c.sw != p.sw || c.sh != p.sh || c.dw != p.dw || c.dh != p.dh) {
+                    continue;
+                }
+                int adx = std::abs(c.dx - p.dx);
+                int ady = std::abs(c.dy - p.dy);
+                if (adx > 18 || ady > 18) continue;
+                int score = (adx + ady) * 16 + std::min(15, std::abs(i - j));
+                if (score < best_score) {
+                    best_score = score;
+                    best_j = j;
+                }
+            }
+            if (best_j >= 0) {
+                used_prev[best_j] = 1;
+                c.prev_dx = prev_cmds[best_j].dx;
+                c.prev_dy = prev_cmds[best_j].dy;
+                c.has_match = true;
+                matched_count++;
+                if (c.prev_dx != c.dx || c.prev_dy != c.dy) any_motion = true;
+            }
+        }
+
+        if (matched_count * 5 >= n_curr * 2) {
+            can_interpolate = true;
+            subframes_presented = 1; // Sub-frame 1 (alpha = 0.25) presented on unlock
+        }
+    }
+
+    void rasterize_subframe(DojaRuntime& rt, float alpha) {
+        std::memcpy(interp_fb, lock_base_fb, 240 * 240 * sizeof(uint32_t));
+        for (const DrawCmd& c : curr_cmds) {
+            int dx = c.dx;
+            int dy = c.dy;
+            if (c.has_match && (c.prev_dx != c.dx || c.prev_dy != c.dy)) {
+                // Shift-invariant rounding prevents 1px seams across scrolling tile quadrants
+                dx = c.prev_dx + static_cast<int>(std::floor(static_cast<float>(c.dx - c.prev_dx) * alpha + 0.5f));
+                dy = c.prev_dy + static_cast<int>(std::floor(static_cast<float>(c.dy - c.prev_dy) * alpha + 0.5f));
+            }
+            switch (c.kind) {
+                case CmdKind::FillRect:
+                    blit_rect_buf(interp_fb, 240, 240, true, dx, dy, c.dw, c.dh, c.color);
+                    break;
+                case CmdKind::DrawRect:
+                    blit_rect_buf(interp_fb, 240, 240, false, dx, dy, c.dw, c.dh, c.color);
+                    break;
+                case CmdKind::Image:
+                    blit_image_buf(rt, interp_fb, 240, 240, c.img_ref, dx, dy,
+                                   c.sx, c.sy, c.sw, c.sh, c.dw, c.dh, c.flip_mode);
+                    break;
+                case CmdKind::Text:
+                    blit_text_buf(interp_fb, 240, 240, c.text, dx, dy, c.color);
+                    break;
+            }
+        }
+    }
+};
+
+static FrameInterpolator g_interp;
 
 } // namespace
 
@@ -1944,6 +2863,11 @@ void set_player_identity(const std::string& uid, const std::string& name) {
 
 void set_custom_sav_path(const std::string& sav_path) {
     g_ui.custom_sav_path = sav_path;
+}
+
+void set_cli_fps_override(int fps) {
+    g_ui.has_cli_fps_override = true;
+    g_ui.cli_high_fps_mode = (fps >= 30);
 }
 
 void DojaRuntime::set_config_path(const std::string& path) {
@@ -2039,10 +2963,11 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
                 }
             }
             g_audio.init_sdl_audio();
+            std::string fps_tag = g_ui.high_fps_mode ? "60FPS" : "15FPS";
             g_ui.show_toast(
                 g_ui.online_mode
-                    ? ("在线模式 (" + g_ui.server_url + ") | F1:设置")
-                    : "按 F1 / Esc 打开按键、通信与对战设置",
+                    ? ("在线 (" + g_ui.server_url + ") | " + fps_tag + " | F1:设置 F3:帧率")
+                    : ("当前: " + fps_tag + " | F1:设置  F3:切换60/15帧"),
                 120
             );
         }
@@ -2212,14 +3137,6 @@ std::vector<uint8_t> DojaRuntime::read_jar_Bytes(const std::string& entry_path) 
 
 void DojaRuntime::draw_image_internal(HeapObject& gfx, Ref img_ref, int dx, int dy, int sx, int sy, int sw, int sh, int dw, int dh) {
     if (img_ref <= 0 || dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
-    HeapObject& img_obj = get(img_ref);
-    if (!img_obj.img) return;
-    ImageData& img = *img_obj.img;
-
-    const PaletteData* pal = nullptr;
-    if (img.is_paletted && img.palette_ref > 0) {
-        pal = get(img.palette_ref).pal.get();
-    }
 
     uint32_t* dst_buf = framebuffer_;
     int dst_w = 240;
@@ -2231,43 +3148,15 @@ void DojaRuntime::draw_image_internal(HeapObject& gfx, Ref img_ref, int dx, int 
             dst_w = t_obj.img->width;
             dst_h = t_obj.img->height;
         }
+        g_interp.mark_offscreen_dirty(gfx.target_image);
     }
 
     int base_dx = dx + gfx.origin_x;
     int base_dy = dy + gfx.origin_y;
-    bool flip_h = (gfx.flip_mode == 1 || gfx.flip_mode == 3);
-    bool flip_v = (gfx.flip_mode == 2 || gfx.flip_mode == 3);
+    blit_image_buf(*this, dst_buf, dst_w, dst_h, img_ref, base_dx, base_dy, sx, sy, sw, sh, dw, dh, gfx.flip_mode);
 
-    for (int py = 0; py < dh; ++py) {
-        int out_y = base_dy + py;
-        if (out_y < 0 || out_y >= dst_h) continue;
-        int rel_sy = (py * sh) / dh;
-        if (flip_v) rel_sy = sh - 1 - rel_sy;
-        int src_y = sy + rel_sy;
-        if (src_y < 0 || src_y >= img.height) continue;
-
-        for (int px = 0; px < dw; ++px) {
-            int out_x = base_dx + px;
-            if (out_x < 0 || out_x >= dst_w) continue;
-            int rel_sx = (px * sw) / dw;
-            if (flip_h) rel_sx = sw - 1 - rel_sx;
-            int src_x = sx + rel_sx;
-            if (src_x < 0 || src_x >= img.width) continue;
-
-            if (img.is_paletted) {
-                uint8_t idx = img.indices[src_y * img.width + src_x];
-                if (img.transparent_enabled && idx == img.transparent_index) continue;
-                uint32_t col = pal ? pal->entries[idx] : 0xFFFF00FFu;
-                dst_buf[out_y * dst_w + out_x] = col | 0xFF000000u;
-            } else {
-                uint32_t col = img.argb[src_y * img.width + src_x];
-                if ((col >> 24) == 0) continue;
-                if (img.transparent_enabled && ((col & 0xFFFFFFu) == (img.transparent_color & 0xFFFFFFu))) {
-                    continue;
-                }
-                dst_buf[out_y * dst_w + out_x] = col | 0xFF000000u;
-            }
-        }
+    if (gfx.target_image == 0 && g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_) {
+        g_interp.record_image(img_ref, base_dx, base_dy, sx, sy, sw, sh, dw, dh, gfx.flip_mode);
     }
 }
 
@@ -2282,69 +3171,16 @@ void DojaRuntime::draw_text_internal(HeapObject& gfx, const std::string& text, i
             dst_w = t_obj.img->width;
             dst_h = t_obj.img->height;
         }
+        g_interp.mark_offscreen_dirty(gfx.target_image);
     }
 
     uint32_t color = static_cast<uint32_t>(gfx.aux_i32) | 0xFF000000u;
     int pen_x = x + gfx.origin_x;
     int baseline_y = y + gfx.origin_y;
+    blit_text_buf(dst_buf, dst_w, dst_h, text, pen_x, baseline_y, color);
 
-    auto cps = utf8_to_codepoints(text);
-    uint8_t sr = (color >> 16) & 0xFF;
-    uint8_t sg = (color >> 8) & 0xFF;
-    uint8_t sb = color & 0xFF;
-
-    for (uint32_t cp : cps) {
-        bool rendered_ft = false;
-        if (g_ft.ft_face && g_ft.load_char) {
-            // FT_LOAD_RENDER == 4
-            if (g_ft.load_char(g_ft.ft_face, cp, 4) == 0) {
-                const uint8_t* face_bytes = reinterpret_cast<const uint8_t*>(g_ft.ft_face);
-                const uint8_t* glyph_ptr = *reinterpret_cast<const uint8_t* const*>(face_bytes + 0x98);
-                if (glyph_ptr) {
-                    int32_t adv_x = *reinterpret_cast<const int32_t*>(glyph_ptr + 0x80) >> 6;
-                    uint32_t rows = *reinterpret_cast<const uint32_t*>(glyph_ptr + 0x98);
-                    uint32_t width = *reinterpret_cast<const uint32_t*>(glyph_ptr + 0x9c);
-                    int32_t pitch = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xa0);
-                    const uint8_t* buf = *reinterpret_cast<const uint8_t* const*>(glyph_ptr + 0xa8);
-                    int32_t bmp_left = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xc0);
-                    int32_t bmp_top = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xc4);
-
-                    if (buf && rows < 64 && width < 64) {
-                        for (uint32_t ry = 0; ry < rows; ++ry) {
-                            int dy = baseline_y - bmp_top + static_cast<int>(ry);
-                            if (dy < 0 || dy >= dst_h) continue;
-                            for (uint32_t rx = 0; rx < width; ++rx) {
-                                int dx = pen_x + bmp_left + static_cast<int>(rx);
-                                if (dx < 0 || dx >= dst_w) continue;
-                                uint8_t alpha = buf[ry * pitch + rx];
-                                if (alpha > 96) {
-                                    // Crisp pixel-art threshold or alpha blend
-                                    dst_buf[dy * dst_w + dx] = 0xFF000000u | (sr << 16) | (sg << 8) | sb;
-                                }
-                            }
-                        }
-                    }
-                    pen_x += (adv_x > 0) ? adv_x : ((cp < 0x80) ? 6 : 12);
-                    rendered_ft = true;
-                }
-            }
-        }
-        if (!rendered_ft) {
-            int adv = (cp < 0x80) ? 6 : 12;
-            if (cp > 0x20) {
-                for (int gy = 0; gy < 10; ++gy) {
-                    int dy = baseline_y - 9 + gy;
-                    if (dy < 0 || dy >= dst_h) continue;
-                    for (int gx = 0; gx < adv - 1; ++gx) {
-                        int dx = pen_x + gx;
-                        if (dx < 0 || dx >= dst_w) continue;
-                        bool on = ((cp >> ((gx + gy) % 7)) & 1) != 0;
-                        if (on) dst_buf[dy * dst_w + dx] = color;
-                    }
-                }
-            }
-            pen_x += adv;
-        }
+    if (gfx.target_image == 0 && g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_) {
+        g_interp.record_text(text, pen_x, baseline_y, color);
     }
 }
 
@@ -2438,6 +3274,13 @@ void DojaRuntime::poll_events() {
                     );
                     g_ui.save_config();
                     g_ui.show_toast(g_ui.show_softkey_bar ? "底部软键栏: 开启" : "底部软键栏: 关闭");
+                    continue;
+                }
+                if (sym == SDLK_F3) {
+                    g_ui.high_fps_mode = !g_ui.high_fps_mode;
+                    g_interp.reset();
+                    g_ui.save_config();
+                    g_ui.show_toast(g_ui.high_fps_mode ? "帧率模式: 60 FPS (丝滑插值)" : "帧率模式: 15 FPS (原版帧率)");
                     continue;
                 }
                 if (sym == SDLK_F11 || (sym == SDLK_RETURN && (ev.key.keysym.mod & KMOD_ALT))) {
@@ -2564,13 +3407,23 @@ void DojaRuntime::present_screen() {
     if (sdl_renderer_ && sdl_texture_) {
         SDL_Renderer* ren = static_cast<SDL_Renderer*>(sdl_renderer_);
         SDL_Texture* tex = static_cast<SDL_Texture*>(sdl_texture_);
-        g_ui.compose_display_buffer(framebuffer_, keypad_state_, true);
+        bool interp_active = g_ui.high_fps_mode && !fast_forward_ && !g_ui.is_turbo_held();
+        g_interp.on_screen_unlock(framebuffer_, interp_active);
+
+        const uint32_t* present_fb = framebuffer_;
+        if (interp_active && g_interp.can_interpolate && g_interp.any_motion) {
+            g_interp.rasterize_subframe(*this, 0.25f);
+            present_fb = g_interp.interp_fb;
+        }
+        g_ui.compose_display_buffer(present_fb, keypad_state_, true);
         int logical_h = g_ui.show_softkey_bar ? 260 : 240;
         SDL_Rect src_rect{0, 0, 240, logical_h};
         SDL_UpdateTexture(tex, nullptr, g_ui.display_buf, 240 * sizeof(uint32_t));
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, &src_rect, nullptr);
         SDL_RenderPresent(ren);
+    } else {
+        g_interp.reset();
     }
     if (max_frames_ > 0 && frame_count_ >= max_frames_) {
         if (!dump_ppm_path_.empty()) {
@@ -2641,6 +3494,40 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
         }
         if (m == "yield") {
             poll_events();
+            if (fast_forward_) {
+                return Slot(0);
+            }
+            if (g_ui.is_turbo_held()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                return Slot(0);
+            }
+            // During CpCanvas's ~62.5 ms wait between 15 Hz logic ticks, present smooth
+            // 60 FPS interpolated sub-frames (alpha = 0.50, 0.75, 1.00) when 60 FPS mode is active
+            if (g_ui.high_fps_mode && sdl_renderer_ && sdl_texture_ && g_interp.subframes_presented < 4) {
+                auto now_tp = std::chrono::steady_clock::now();
+                double elapsed_ms = std::chrono::duration<double, std::milli>(now_tp - g_interp.tick_unlock_tp).count();
+                static constexpr double kSubTargetsMs[4] = {0.0, 15.5, 31.0, 46.5};
+                int next_sf = g_interp.subframes_presented; // 1 -> 2 -> 3
+                if (elapsed_ms >= kSubTargetsMs[next_sf]) {
+                    g_interp.subframes_presented = next_sf + 1;
+                    const uint32_t* sub_fb = framebuffer_;
+                    if (g_interp.can_interpolate && g_interp.any_motion && next_sf < 3) {
+                        float alpha = std::clamp(static_cast<float>(elapsed_ms / 62.0), 0.25f, 1.0f);
+                        g_interp.rasterize_subframe(*this, alpha);
+                        sub_fb = g_interp.interp_fb;
+                    }
+                    SDL_Renderer* ren = static_cast<SDL_Renderer*>(sdl_renderer_);
+                    SDL_Texture* tex = static_cast<SDL_Texture*>(sdl_texture_);
+                    g_ui.compose_display_buffer(sub_fb, keypad_state_, false);
+                    int logical_h = g_ui.show_softkey_bar ? 260 : 240;
+                    SDL_Rect src_rect{0, 0, 240, logical_h};
+                    SDL_UpdateTexture(tex, nullptr, g_ui.display_buf, 240 * sizeof(uint32_t));
+                    SDL_RenderClear(ren);
+                    SDL_RenderCopy(ren, tex, &src_rect, nullptr);
+                    SDL_RenderPresent(ren);
+                    return Slot(0);
+                }
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             return Slot(0);
         }
@@ -3064,11 +3951,16 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
         if (m == "setFont") return Slot(0);
         if (m == "lock") {
             graphics_locked_ = true;
+            if (gfx.target_image == 0) {
+                g_interp.on_screen_lock(framebuffer_);
+            }
             return Slot(0);
         }
         if (m == "unlock") {
             graphics_locked_ = false;
-            present_screen();
+            if (gfx.target_image == 0) {
+                present_screen();
+            }
             return Slot(0);
         }
         if (m == "fillRect" || m == "drawRect") {
@@ -3088,22 +3980,12 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
                     dst_w = t_obj.img->width;
                     dst_h = t_obj.img->height;
                 }
+                g_interp.mark_offscreen_dirty(gfx.target_image);
             }
-            if (m == "fillRect") {
-                for (int y = std::max(0, ry); y < std::min(dst_h, ry + rh); ++y) {
-                    for (int x = std::max(0, rx); x < std::min(dst_w, rx + rw); ++x) {
-                        dst_buf[y * dst_w + x] = col;
-                    }
-                }
-            } else {
-                for (int x = std::max(0, rx); x <= std::min(dst_w - 1, rx + rw); ++x) {
-                    if (ry >= 0 && ry < dst_h) dst_buf[ry * dst_w + x] = col;
-                    if (ry + rh >= 0 && ry + rh < dst_h) dst_buf[(ry + rh) * dst_w + x] = col;
-                }
-                for (int y = std::max(0, ry); y <= std::min(dst_h - 1, ry + rh); ++y) {
-                    if (rx >= 0 && rx < dst_w) dst_buf[y * dst_w + rx] = col;
-                    if (rx + rw >= 0 && rx + rw < dst_w) dst_buf[y * dst_w + (rx + rw)] = col;
-                }
+            bool is_fill = (m == "fillRect");
+            blit_rect_buf(dst_buf, dst_w, dst_h, is_fill, rx, ry, rw, rh, col);
+            if (gfx.target_image == 0 && g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_) {
+                g_interp.record_rect(is_fill, rx, ry, rw, rh, col);
             }
             return Slot(0);
         }

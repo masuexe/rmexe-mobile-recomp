@@ -62,28 +62,28 @@ With symbol map files, one static recompiler and one native runtime can support 
 
 ### 4.2 Native Runtime Components
 
-* **Graphics and Input (`SDL3`):** Implements `com.nttdocomo.ui.Canvas` and `Graphics`. Supports integer scaling, widescreen borders, and gamepad button mapping.
-* **Audio Synthesizer (`MLD` Engine):** Decodes MFi / MLD files through a software synthesizer for Yamaha FM and ADPCM channels. The audio layer also supports optional external `.ogg` music tracks.
+* **Graphics and Input (`SDL2`):** Implements `com.nttdocomo.ui.Canvas` and `Graphics`. Supports integer scaling, optional flip-phone softkey bar (`240x260`), customizable keyboard bindings, and gamepad button mapping.
+* **Audio Synthesizer (`MLD` Engine):** Decodes MFi2 and MFi5 (`.mld`) streams at 44.1 kHz stereo through a Yamaha MA-3 (`YMU762`) and MA-5 (`YMU765`) software synthesizer (`common/ymu762_fm.hpp` and `runtime/doja_runtime.cpp`). The synthesizer provides 6-waveform 4-operator FM melodic voices, a 26-note FM/noise drum kit, dedicated combat sound effects, stereo panpot, 12-bit pitch bend, vibrato modulation, MA-5 stereo reflection DSP, and FNV-1a cached on-demand PCM generation.
 * **Copy-on-Write Storage:** Keeps the original `.sp` file in read-only mode. The runtime redirects all save data writes to a separate `.sav` file.
 * **Dual-Mode Network Layer and Unified Server (`rmexe_server`):** Intercepts `javax.microedition.io.Connector` and `com.nttdocomo.io.HttpConnection` calls. In offline mode, a built-in handler simulates all Capcom i-mode endpoints (`isr.php`, `iexe_score.php`, and `dataget.php`) locally. In online mode, the client connects to `rmexe_server`, which serves both HTTP/1.1 cloud/ranking/lobby endpoints over TCP and real-time PvP frame-input packets over UDP on one port (`8765`).
-* **External Font and Text Hook:** Intercepts text draw calls to support UTF-8 external translation tables and custom bitmap fonts.
+* **External Font and Text Hook:** Intercepts text draw calls to support Shift-JIS to UTF-8 transcoding and 12 px glyph rendering with `libfreetype`.
 
 ---
 
 ## 5. High Frame Rate Design (15 FPS to 60+ FPS)
 
-The original games use a fixed logic loop at 15 Hz (66.7 ms per tick). The game code adds integer speeds and timers on each tick without a time delta variable. A direct change to the loop timer causes the game to run at four times normal speed.
+The original games use a fixed logic loop in `CpCanvas` at roughly 15–16 Hz (`1000 / 16 = 62 ms` per tick). The game code adds integer speeds and timers on each tick without a time delta variable. A direct change to the loop timer causes the game to run at four times normal speed.
 
-To prevent speed errors, the native runtime separates logic updates from screen draws. The system provides two frame rate modes:
+To prevent speed errors, the native runtime separates logic updates from screen draws and lets the user switch between **60 FPS** interpolated presentation and native **15 FPS** presentation at any time (`F3`, `F1` menu, `--fps 60|15`, or `high_fps_mode` in `controls.cfg`).
 
-### 5.1 Mode A: 15 Hz Logic with 60+ FPS Frame Interpolation (Default)
+### 5.1 Mode A: 15 Hz Logic with 60 FPS Display-List Interpolation (Implemented Default)
 
-1. The game logic continues to run once every 66.7 ms (15 Hz).
-2. The renderer assigns a unique ID tag to each active sprite, projectile, UI panel, and camera view.
-3. The renderer records the previous coordinates `(prevX, prevY)` and current coordinates `(currX, currY)` on each logic tick.
-4. Between two logic ticks, the renderer draws intermediate frames with a time ratio `alpha` (`0.0` to `1.0`).
+1. The game logic continues to run at its native tick interval and waits inside `Thread.yield()`.
+2. Between `Graphics.lock()` and `Graphics.unlock()`, `FrameInterpolator` records all screen draw commands (`FillRect`, `DrawRect`, `Image`, and `Text`) and tracks generation counters on offscreen `Image` surfaces (`imgMap2` isometric map quadrants) so newly baked map tiles never interpolate from stale pixels.
+3. A two-pass greedy motion matcher pairs scrolling map quadrants, projectiles, and animated character cels between the previous and current logic ticks while rejecting full-screen transitions and large menu cursor jumps.
+4. During `Thread.yield()`, the runtime polls SDL input at 60+ Hz and rasterizes intermediate sub-frames (`alpha = 0.25, 0.50, 0.75, 1.00`) with shift-invariant rounding (`prev + floor(delta * alpha + 0.5)`), which prevents 1-pixel seams between adjacent map quadrants.
 
-Mode A produces smooth 60 FPS or 144 FPS camera movement, projectile motion, and menu transitions. Mode A does not change game rules, AI timers, or network synchronization.
+Mode A produces smooth 60 FPS isometric camera scrolling and sprite motion without changing game rules, AI timers, random number generation, or network synchronization. Users who prefer authentic flip-phone cadence can switch to native 15 FPS mode immediately with `F3` or the `F1` settings menu.
 
 ### 5.2 Mode B: 60 Hz Hybrid Sub-Tick Mode (Low Input Latency)
 
@@ -136,8 +136,8 @@ Online matches operate in two synchronized phases:
 
 ## 8. Development Phases
 
-* **Phase 1 — Bytecode Survey:** Analyze `.jar` and `.sp` structures for *PoN* and *LoN*. Map the main loop, DoJa API calls, and combat classes.
-* **Phase 2 — Single-Player Recompiler:** Build the JVM-to-C++ static recompiler, linear arena heap, SDL3 backend, MLD synthesizer, and copy-on-write save layer.
-* **Phase 3 — 60 FPS Upgrade:** Add sprite tagging and 60+ FPS frame interpolation, then build the optional 60 Hz sub-tick mode.
+* **Phase 1 — Bytecode Survey (Completed):** Analyze `.jar` and `.sp` structures for *PoN* and *LoN*. Map the main loop, DoJa API calls, and combat classes.
+* **Phase 2 — Single-Player Recompiler and Authentic FM Audio (Completed):** Build the JVM-to-C++ static recompiler, linear arena heap, SDL2 backend, Yamaha MA-3/MA-5 stereo FM MLD synthesizer, unified Capcom HTTP/UDP server, and copy-on-write save layer.
+* **Phase 3 — 60 FPS Upgrade (Completed):** Add display-list motion matching, 60 FPS sub-frame interpolation, and instant `60 FPS / 15 FPS` switching (`F3`, `F1` menu, `--fps`).
 * **Phase 4 — Local PvP & Symmetry Audit:** Instantiate two local players on one screen and verify symmetric behavior for every BattleChip.
-* **Phase 5 — Online NetBattle:** Integrate GGPO rollback netcode, Custom Screen synchronization, and the NetBattle deck sandbox.
+* **Phase 5 — Online NetBattle:** Connect the dual-player combat engine to `rmexe_server`'s UDP frame-sync relay with GGPO rollback netcode and Custom Screen synchronization.
