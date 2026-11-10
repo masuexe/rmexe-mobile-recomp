@@ -1,0 +1,18 @@
+# Original proprietary DoJa game files (user-supplied)
+assets/**/*.jar
+assets/**/*.sp
+assets/**/*.jam
+assets/**/*.rpz
+assets/**/*.sav
+assets/**/*.zip
+*.jar
+*.sp
+*.jam
+*.sav
+*.zip
+
+# Build and analysis outputs
+build/
+out/
+__pycache__/
+*.pyc
