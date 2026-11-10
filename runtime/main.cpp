@@ -41,6 +41,8 @@ int main(int argc, char** argv) {
             sp_path = argv[++i];
         } else if (arg == "--sav" && i + 1 < argc) {
             sav_path = argv[++i];
+        } else if (arg == "--config" && i + 1 < argc) {
+            rt.set_config_path(argv[++i]);
         } else if (arg == "--scale" && i + 1 < argc) {
             scale = std::max(1, std::atoi(argv[++i]));
         } else if (arg == "--fps" && i + 1 < argc) {
@@ -66,7 +68,8 @@ int main(int argc, char** argv) {
                       << "  --jar <path>          Path to original .jar file (default: " << DEFAULT_JAR_PATH << ")\n"
                       << "  --sp <path>           Path to original .sp file  (default: " << DEFAULT_SP_PATH << ")\n"
                       << "  --sav <path>          Path to .sav overlay file  (default: " << DEFAULT_SAV_PATH << ")\n"
-                      << "  --scale <int>         Window scale factor (default: 3 -> 720x720)\n"
+                      << "  --config <path>       Path to keybinding config  (default: controls.cfg)\n"
+                      << "  --scale <int>         Window scale factor (default: 3 -> 720x780)\n"
                       << "  --fps <int>           Target render FPS (default: 60)\n"
                       << "  --headless            Run without opening an SDL window\n"
                       << "  --fast-forward        Disable frame sleep for rapid testing\n"

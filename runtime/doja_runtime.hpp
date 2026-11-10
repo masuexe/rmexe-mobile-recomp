@@ -159,6 +159,7 @@ public:
         dump_ppm_path_ = dump_ppm_path;
     }
     void set_fast_forward(bool ff) { fast_forward_ = ff; }
+    void set_config_path(const std::string& path);
     void inject_key_at_frame(int frame, int doja_key) {
         injected_keys_.push_back({frame, doja_key});
     }

@@ -16,3 +16,5 @@ build/
 out/
 __pycache__/
 *.pyc
+controls.cfg
+screenshot_*.bmp

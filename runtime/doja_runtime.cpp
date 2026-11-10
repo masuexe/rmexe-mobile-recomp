@@ -52,6 +52,9 @@ struct FreeTypeFont {
         if (init_ft(&ft_library) != 0) return;
         const char* font_paths[] = {
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
         };
@@ -497,6 +500,8 @@ struct MldAudioEngine {
     std::mutex mtx;
     std::vector<MldSound> sounds;
     PortState ports[NUM_PORTS];
+    int master_volume = 100;
+    bool muted = false;
 
     void init_sdl_audio() {
         if (dev_id != 0) return;
@@ -557,6 +562,8 @@ struct MldAudioEngine {
                 int32_t s = snd.pcm[ps.sample_pos++];
                 mix += (s * ps.volume) / 100;
             }
+            int eff_vol = self->muted ? 0 : self->master_volume;
+            mix = (mix * eff_vol) / 100;
             if (mix > 32767) mix = 32767;
             if (mix < -32768) mix = -32768;
             out[i] = static_cast<int16_t>(mix);
@@ -1046,6 +1053,720 @@ struct MldAudioEngine {
 
 static MldAudioEngine g_audio;
 
+// ============================================================================
+// Flip-Phone Softkey Bar, Customizable Keybindings & Pause/Settings Overlay
+// ============================================================================
+enum BindAction : int {
+    ACT_UP = 0,
+    ACT_DOWN,
+    ACT_LEFT,
+    ACT_RIGHT,
+    ACT_SELECT,
+    ACT_CANCEL,
+    ACT_SOFT1,
+    ACT_SOFT2,
+    ACT_POUND,
+    ACT_TURBO,
+    ACT_COUNT
+};
+
+struct ActionBinding {
+    const char* cfg_id;
+    const char* label_zh;
+    int doja_key; // -1 for emulator-only action (e.g. ACT_TURBO)
+    SDL_Keycode keys[2];
+    int pad_btn;  // SDL_GameControllerButton (-1 == unbound)
+
+    // Live physical state tracking
+    bool key_down[2] = {false, false};
+    bool pad_down = false;
+    bool axis_down = false;
+    bool effective_down = false;
+};
+
+struct UiInputManager {
+    std::string config_path = "controls.cfg";
+    bool show_softkey_bar = true;
+    bool is_fullscreen = false;
+    std::string soft_label_left;
+    std::string soft_label_right;
+
+    std::string toast_text;
+    int toast_frames = 0;
+
+    int64_t paused_duration_ms = 0;
+    int64_t turbo_bonus_ms = 0;
+
+    ActionBinding binds[ACT_COUNT];
+    std::vector<SDL_GameController*> controllers;
+    uint32_t display_buf[240 * 260] = {0};
+
+    UiInputManager() {
+        reset_defaults();
+    }
+
+    void reset_defaults() {
+        binds[ACT_UP]     = {"up",     "上移",     0x11, {SDLK_UP,    SDLK_w}, SDL_CONTROLLER_BUTTON_DPAD_UP};
+        binds[ACT_DOWN]   = {"down",   "下移",     0x13, {SDLK_DOWN,  SDLK_s}, SDL_CONTROLLER_BUTTON_DPAD_DOWN};
+        binds[ACT_LEFT]   = {"left",   "左移",     0x10, {SDLK_LEFT,  SDLK_a}, SDL_CONTROLLER_BUTTON_DPAD_LEFT};
+        binds[ACT_RIGHT]  = {"right",  "右移",     0x12, {SDLK_RIGHT, SDLK_d}, SDL_CONTROLLER_BUTTON_DPAD_RIGHT};
+        binds[ACT_SELECT] = {"select", "决定/A",   0x14, {SDLK_z,     SDLK_j}, SDL_CONTROLLER_BUTTON_A};
+        binds[ACT_CANCEL] = {"cancel", "取消/B",   0x0A, {SDLK_x,     SDLK_k}, SDL_CONTROLLER_BUTTON_B};
+        binds[ACT_SOFT1]  = {"soft1",  "左软键/L", 0x15, {SDLK_q,     SDLK_u}, SDL_CONTROLLER_BUTTON_LEFTSHOULDER};
+        binds[ACT_SOFT2]  = {"soft2",  "右软键/R", 0x16, {SDLK_e,     SDLK_i}, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER};
+        binds[ACT_POUND]  = {"pound",  "井号/#",   0x0B, {SDLK_c,     SDLK_l}, SDL_CONTROLLER_BUTTON_X};
+        binds[ACT_TURBO]  = {"turbo",  "按住倍速", -1,   {SDLK_TAB,   SDLK_BACKQUOTE}, SDL_CONTROLLER_BUTTON_Y};
+    }
+
+    void clear_held_states() {
+        for (int i = 0; i < ACT_COUNT; ++i) {
+            binds[i].key_down[0] = false;
+            binds[i].key_down[1] = false;
+            binds[i].pad_down = false;
+            binds[i].axis_down = false;
+            binds[i].effective_down = false;
+        }
+    }
+
+    bool is_turbo_held() const {
+        return binds[ACT_TURBO].effective_down;
+    }
+
+    bool is_keycode_bound(SDL_Keycode k) const {
+        if (k == SDLK_UNKNOWN) return false;
+        for (int i = 0; i < ACT_COUNT; ++i) {
+            if (binds[i].keys[0] == k || binds[i].keys[1] == k) return true;
+        }
+        return false;
+    }
+
+    static std::string trim(const std::string& s) {
+        size_t a = 0;
+        while (a < s.size() && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n')) ++a;
+        size_t b = s.size();
+        while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '\n')) --b;
+        return s.substr(a, b - a);
+    }
+
+    static SDL_Keycode parse_key_str(const std::string& v) {
+        if (v.empty() || v == "None" || v == "none") return SDLK_UNKNOWN;
+        return SDL_GetKeyFromName(v.c_str());
+    }
+
+    static std::string format_key_cfg(SDL_Keycode k) {
+        if (k == SDLK_UNKNOWN) return "None";
+        const char* nm = SDL_GetKeyName(k);
+        return (nm && nm[0]) ? std::string(nm) : "None";
+    }
+
+    static int parse_pad_str(const std::string& v) {
+        if (v.empty() || v == "None" || v == "none") return SDL_CONTROLLER_BUTTON_INVALID;
+        return static_cast<int>(SDL_GameControllerGetButtonFromString(v.c_str()));
+    }
+
+    static std::string format_pad_cfg(int btn) {
+        if (btn < 0) return "None";
+        const char* nm = SDL_GameControllerGetStringForButton(static_cast<SDL_GameControllerButton>(btn));
+        return (nm && nm[0]) ? std::string(nm) : "None";
+    }
+
+    static std::string short_key_name(SDL_Keycode k) {
+        if (k == SDLK_UNKNOWN) return "---";
+        switch (k) {
+            case SDLK_RETURN: case SDLK_KP_ENTER: return "Enter";
+            case SDLK_SPACE:     return "Space";
+            case SDLK_BACKSPACE: return "Bksp";
+            case SDLK_TAB:       return "Tab";
+            case SDLK_LSHIFT:    return "LShf";
+            case SDLK_RSHIFT:    return "RShf";
+            case SDLK_LCTRL:     return "LCtl";
+            case SDLK_RCTRL:     return "RCtl";
+            case SDLK_LALT:      return "LAlt";
+            case SDLK_RALT:      return "RAlt";
+            case SDLK_BACKQUOTE: return "`";
+            case SDLK_UP:        return "Up";
+            case SDLK_DOWN:      return "Down";
+            case SDLK_LEFT:      return "Left";
+            case SDLK_RIGHT:     return "Right";
+            default: break;
+        }
+        const char* nm = SDL_GetKeyName(k);
+        if (!nm || !nm[0]) return "?";
+        std::string s(nm);
+        if (s.rfind("Keypad ", 0) == 0) {
+            s = "KP" + s.substr(7);
+        }
+        if (s.size() > 6) s.resize(6);
+        return s;
+    }
+
+    static std::string short_pad_name(int btn) {
+        switch (btn) {
+            case SDL_CONTROLLER_BUTTON_A:             return "PadA";
+            case SDL_CONTROLLER_BUTTON_B:             return "PadB";
+            case SDL_CONTROLLER_BUTTON_X:             return "PadX";
+            case SDL_CONTROLLER_BUTTON_Y:             return "PadY";
+            case SDL_CONTROLLER_BUTTON_BACK:          return "Back";
+            case SDL_CONTROLLER_BUTTON_START:         return "Start";
+            case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  return "LB";
+            case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return "RB";
+            case SDL_CONTROLLER_BUTTON_LEFTSTICK:     return "L3";
+            case SDL_CONTROLLER_BUTTON_RIGHTSTICK:    return "R3";
+            case SDL_CONTROLLER_BUTTON_DPAD_UP:       return "DpUp";
+            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:     return "DpDn";
+            case SDL_CONTROLLER_BUTTON_DPAD_LEFT:     return "DpLt";
+            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:    return "DpRt";
+            default: return "---";
+        }
+    }
+
+    std::string primary_soft_key_label(int act_idx) const {
+        if (binds[act_idx].keys[0] != SDLK_UNKNOWN) return short_key_name(binds[act_idx].keys[0]);
+        if (binds[act_idx].keys[1] != SDLK_UNKNOWN) return short_key_name(binds[act_idx].keys[1]);
+        if (binds[act_idx].pad_btn >= 0) return short_pad_name(binds[act_idx].pad_btn);
+        return "-";
+    }
+
+    void load_config() {
+        std::ifstream f(config_path);
+        if (!f) return;
+        std::string line;
+        while (std::getline(f, line)) {
+            std::string s = trim(line);
+            if (s.empty() || s[0] == '#') continue;
+            auto eq = s.find('=');
+            if (eq == std::string::npos) continue;
+            std::string key = trim(s.substr(0, eq));
+            std::string val = trim(s.substr(eq + 1));
+
+            if (key == "master_volume") {
+                std::lock_guard<std::mutex> lk(g_audio.mtx);
+                g_audio.master_volume = std::clamp(std::atoi(val.c_str()), 0, 100);
+            } else if (key == "muted") {
+                std::lock_guard<std::mutex> lk(g_audio.mtx);
+                g_audio.muted = (std::atoi(val.c_str()) != 0);
+            } else if (key == "show_softkey_bar") {
+                show_softkey_bar = (std::atoi(val.c_str()) != 0);
+            } else {
+                for (int i = 0; i < ACT_COUNT; ++i) {
+                    std::string pfx = std::string(binds[i].cfg_id) + "_";
+                    if (key == pfx + "key1") binds[i].keys[0] = parse_key_str(val);
+                    else if (key == pfx + "key2") binds[i].keys[1] = parse_key_str(val);
+                    else if (key == pfx + "pad")  binds[i].pad_btn = parse_pad_str(val);
+                }
+            }
+        }
+    }
+
+    void save_config() const {
+        std::ofstream f(config_path, std::ios::trunc);
+        if (!f) return;
+        f << "# rmexe-mobile-recomp keybindings & emulator settings\n";
+        {
+            std::lock_guard<std::mutex> lk(g_audio.mtx);
+            f << "master_volume=" << g_audio.master_volume << "\n";
+            f << "muted=" << (g_audio.muted ? 1 : 0) << "\n";
+        }
+        f << "show_softkey_bar=" << (show_softkey_bar ? 1 : 0) << "\n\n";
+        for (int i = 0; i < ACT_COUNT; ++i) {
+            f << binds[i].cfg_id << "_key1=" << format_key_cfg(binds[i].keys[0]) << "\n";
+            f << binds[i].cfg_id << "_key2=" << format_key_cfg(binds[i].keys[1]) << "\n";
+            f << binds[i].cfg_id << "_pad="  << format_pad_cfg(binds[i].pad_btn) << "\n";
+        }
+    }
+
+    void open_controllers() {
+        close_controllers();
+        int n = SDL_NumJoysticks();
+        for (int i = 0; i < n; ++i) {
+            if (SDL_IsGameController(i)) {
+                SDL_GameController* gc = SDL_GameControllerOpen(i);
+                if (gc) controllers.push_back(gc);
+            }
+        }
+    }
+
+    void close_controllers() {
+        for (SDL_GameController* gc : controllers) {
+            if (gc) SDL_GameControllerClose(gc);
+        }
+        controllers.clear();
+    }
+
+    void show_toast(const std::string& msg, int frames = 90) {
+        toast_text = msg;
+        toast_frames = frames;
+    }
+
+    static void fill_rect_alpha(uint32_t* buf, int bw, int bh, int rx, int ry, int rw, int rh, uint32_t argb) {
+        uint32_t a = (argb >> 24) & 0xFF;
+        if (a == 0) return;
+        uint32_t sr = (argb >> 16) & 0xFF;
+        uint32_t sg = (argb >> 8) & 0xFF;
+        uint32_t sb = argb & 0xFF;
+        int x0 = std::max(0, rx), x1 = std::min(bw, rx + rw);
+        int y0 = std::max(0, ry), y1 = std::min(bh, ry + rh);
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                if (a >= 255) {
+                    buf[y * bw + x] = 0xFF000000u | (sr << 16) | (sg << 8) | sb;
+                } else {
+                    uint32_t dst = buf[y * bw + x];
+                    uint32_t dr = (dst >> 16) & 0xFF;
+                    uint32_t dg = (dst >> 8) & 0xFF;
+                    uint32_t db = dst & 0xFF;
+                    uint32_t nr = (sr * a + dr * (255 - a)) / 255;
+                    uint32_t ng = (sg * a + dg * (255 - a)) / 255;
+                    uint32_t nb = (sb * a + db * (255 - a)) / 255;
+                    buf[y * bw + x] = 0xFF000000u | (nr << 16) | (ng << 8) | nb;
+                }
+            }
+        }
+    }
+
+    static void draw_rect_border(uint32_t* buf, int bw, int bh, int rx, int ry, int rw, int rh, uint32_t argb) {
+        fill_rect_alpha(buf, bw, bh, rx, ry, rw, 1, argb);
+        fill_rect_alpha(buf, bw, bh, rx, ry + rh - 1, rw, 1, argb);
+        fill_rect_alpha(buf, bw, bh, rx, ry, 1, rh, argb);
+        fill_rect_alpha(buf, bw, bh, rx + rw - 1, ry, 1, rh, argb);
+    }
+
+    static int measure_ui_text(const std::string& utf8) {
+        auto cps = utf8_to_codepoints(utf8);
+        int w = 0;
+        for (uint32_t cp : cps) {
+            if (g_ft.ft_face && g_ft.load_char && g_ft.load_char(g_ft.ft_face, cp, 4) == 0) {
+                const uint8_t* face_bytes = reinterpret_cast<const uint8_t*>(g_ft.ft_face);
+                const uint8_t* glyph_ptr = *reinterpret_cast<const uint8_t* const*>(face_bytes + 0x98);
+                if (glyph_ptr) {
+                    int32_t adv_x = *reinterpret_cast<const int32_t*>(glyph_ptr + 0x80) >> 6;
+                    w += (adv_x > 0) ? adv_x : ((cp < 0x80) ? 6 : 12);
+                    continue;
+                }
+            }
+            w += (cp < 0x80) ? 6 : 12;
+        }
+        return w;
+    }
+
+    static void draw_ui_text_raw(uint32_t* buf, int bw, int bh, const std::string& utf8, int x, int baseline_y, uint32_t color) {
+        auto cps = utf8_to_codepoints(utf8);
+        uint32_t a_col = (color >> 24) & 0xFF;
+        if (a_col == 0) a_col = 255;
+        uint8_t sr = (color >> 16) & 0xFF;
+        uint8_t sg = (color >> 8) & 0xFF;
+        uint8_t sb = color & 0xFF;
+        int pen_x = x;
+
+        for (uint32_t cp : cps) {
+            bool ok = false;
+            if (g_ft.ft_face && g_ft.load_char && g_ft.load_char(g_ft.ft_face, cp, 4) == 0) {
+                const uint8_t* face_bytes = reinterpret_cast<const uint8_t*>(g_ft.ft_face);
+                const uint8_t* glyph_ptr = *reinterpret_cast<const uint8_t* const*>(face_bytes + 0x98);
+                if (glyph_ptr) {
+                    int32_t adv_x = *reinterpret_cast<const int32_t*>(glyph_ptr + 0x80) >> 6;
+                    uint32_t rows = *reinterpret_cast<const uint32_t*>(glyph_ptr + 0x98);
+                    uint32_t width = *reinterpret_cast<const uint32_t*>(glyph_ptr + 0x9c);
+                    int32_t pitch = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xa0);
+                    const uint8_t* gbuf = *reinterpret_cast<const uint8_t* const*>(glyph_ptr + 0xa8);
+                    int32_t bmp_left = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xc0);
+                    int32_t bmp_top = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xc4);
+
+                    if (gbuf && rows < 64 && width < 64) {
+                        for (uint32_t ry = 0; ry < rows; ++ry) {
+                            int dy = baseline_y - bmp_top + static_cast<int>(ry);
+                            if (dy < 0 || dy >= bh) continue;
+                            for (uint32_t rx = 0; rx < width; ++rx) {
+                                int dx = pen_x + bmp_left + static_cast<int>(rx);
+                                if (dx < 0 || dx >= bw) continue;
+                                uint32_t ga = (static_cast<uint32_t>(gbuf[ry * pitch + rx]) * a_col) / 255;
+                                if (ga > 32) {
+                                    uint32_t dst = buf[dy * bw + dx];
+                                    uint32_t dr = (dst >> 16) & 0xFF;
+                                    uint32_t dg = (dst >> 8) & 0xFF;
+                                    uint32_t db = dst & 0xFF;
+                                    uint32_t nr = (sr * ga + dr * (255 - ga)) / 255;
+                                    uint32_t ng = (sg * ga + dg * (255 - ga)) / 255;
+                                    uint32_t nb = (sb * ga + db * (255 - ga)) / 255;
+                                    buf[dy * bw + dx] = 0xFF000000u | (nr << 16) | (ng << 8) | nb;
+                                }
+                            }
+                        }
+                    }
+                    pen_x += (adv_x > 0) ? adv_x : ((cp < 0x80) ? 6 : 12);
+                    ok = true;
+                }
+            }
+            if (!ok) {
+                pen_x += (cp < 0x80) ? 6 : 12;
+            }
+        }
+    }
+
+    static void draw_ui_text(uint32_t* buf, int bw, int bh, const std::string& utf8, int x, int baseline_y, uint32_t color, bool shadow = true) {
+        if (shadow) {
+            uint32_t sa = ((color >> 24) & 0xFF);
+            if (sa == 0) sa = 255;
+            draw_ui_text_raw(buf, bw, bh, utf8, x + 1, baseline_y + 1, (sa << 24) | 0x060810u);
+        }
+        draw_ui_text_raw(buf, bw, bh, utf8, x, baseline_y, color);
+    }
+
+    void render_softkey_bar(int32_t keypad_state) {
+        // Metallic flip-phone bottom bar y = 240..259
+        fill_rect_alpha(display_buf, 240, 260, 0, 240, 240, 1, 0xFF445684u);
+        for (int y = 241; y < 260; ++y) {
+            uint32_t r = 26 - (y - 241) * 10 / 19;
+            uint32_t g = 32 - (y - 241) * 12 / 19;
+            uint32_t b = 50 - (y - 241) * 18 / 19;
+            fill_rect_alpha(display_buf, 240, 260, 0, y, 240, 1, 0xFF000000u | (r << 16) | (g << 8) | b);
+        }
+
+        // Left Softkey (SOFT_KEY_1 -> DoJa 0x15)
+        bool s1_held = (keypad_state & (1 << 0x15)) != 0;
+        std::string k1 = primary_soft_key_label(ACT_SOFT1);
+        std::string left_txt = soft_label_left.empty() ? ("[" + k1 + "] ---") : ("[" + k1 + "] " + soft_label_left);
+        fill_rect_alpha(display_buf, 240, 260, 2, 242, 92, 16, s1_held ? 0xFF2B5EA8u : 0xFF202942u);
+        draw_rect_border(display_buf, 240, 260, 2, 242, 92, 16, s1_held ? 0xFF74B2FFu : 0xFF394970u);
+        draw_ui_text(display_buf, 240, 260, left_txt, 5, 254, soft_label_left.empty() ? 0xFF7080A0u : 0xFFF0F6FFu);
+
+        // Center Status / F1 Hint
+        if (is_turbo_held()) {
+            std::string c_txt = ">> 倍速";
+            int cw = measure_ui_text(c_txt);
+            draw_ui_text(display_buf, 240, 260, c_txt, 120 - cw / 2, 254, 0xFFFFD448u);
+        } else {
+            std::string c_txt = "F1:设置";
+            int cw = measure_ui_text(c_txt);
+            draw_ui_text(display_buf, 240, 260, c_txt, 120 - cw / 2, 254, 0xFF8A9CC2u);
+        }
+
+        // Right Softkey (SOFT_KEY_2 -> DoJa 0x16)
+        bool s2_held = (keypad_state & (1 << 0x16)) != 0;
+        std::string k2 = primary_soft_key_label(ACT_SOFT2);
+        std::string right_txt = soft_label_right.empty() ? ("--- [" + k2 + "]") : (soft_label_right + " [" + k2 + "]");
+        fill_rect_alpha(display_buf, 240, 260, 146, 242, 92, 16, s2_held ? 0xFF2B5EA8u : 0xFF202942u);
+        draw_rect_border(display_buf, 240, 260, 146, 242, 92, 16, s2_held ? 0xFF74B2FFu : 0xFF394970u);
+        int rw = measure_ui_text(right_txt);
+        draw_ui_text(display_buf, 240, 260, right_txt, std::max(149, 235 - rw), 254, soft_label_right.empty() ? 0xFF7080A0u : 0xFFF0F6FFu);
+    }
+
+    void compose_display_buffer(const uint32_t* game_fb, int32_t keypad_state, bool tick_toast = true) {
+        std::memcpy(display_buf, game_fb, 240 * 240 * sizeof(uint32_t));
+        if (show_softkey_bar) {
+            render_softkey_bar(keypad_state);
+        }
+        if (toast_frames > 0 && !toast_text.empty()) {
+            uint32_t alpha = (toast_frames < 20) ? static_cast<uint32_t>(toast_frames * 255 / 20) : 235u;
+            int tw = measure_ui_text(toast_text);
+            int bw = std::min(232, tw + 14);
+            int bx = (240 - bw) / 2;
+            fill_rect_alpha(display_buf, 240, 260, bx, 4, bw, 17, ((alpha * 220 / 255) << 24) | 0x10182Cu);
+            draw_rect_border(display_buf, 240, 260, bx, 4, bw, 17, (alpha << 24) | 0x5898E8u);
+            draw_ui_text(display_buf, 240, 260, toast_text, bx + (bw - tw) / 2, 16, (alpha << 24) | 0xFFFFFFu);
+            if (tick_toast) --toast_frames;
+        }
+    }
+
+    void apply_softbar_geometry(SDL_Window* win, SDL_Renderer* ren, int scale) {
+        if (!ren) return;
+        int logical_h = show_softkey_bar ? 260 : 240;
+        SDL_RenderSetLogicalSize(ren, 240, logical_h);
+        if (win && !is_fullscreen && scale > 0) {
+            SDL_SetWindowSize(win, 240 * scale, logical_h * scale);
+        }
+    }
+
+    void toggle_fullscreen(SDL_Window* win) {
+        if (!win) return;
+        is_fullscreen = !is_fullscreen;
+        SDL_SetWindowFullscreen(win, is_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+        show_toast(is_fullscreen ? "全屏模式: 开启" : "全屏模式: 关闭");
+    }
+
+    void save_screenshot_bmp(const uint32_t* game_fb) {
+        SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormatFrom(
+            const_cast<uint32_t*>(game_fb),
+            240, 240, 32, 240 * static_cast<int>(sizeof(uint32_t)),
+            SDL_PIXELFORMAT_ARGB8888
+        );
+        if (!surf) return;
+        std::time_t t = std::time(nullptr);
+        char fname[64];
+        std::snprintf(fname, sizeof(fname), "screenshot_%lld.bmp", static_cast<long long>(t));
+        if (SDL_SaveBMP(surf, fname) == 0) {
+            show_toast(std::string("已保存截图: ") + fname);
+        }
+        SDL_FreeSurface(surf);
+    }
+
+    void assign_key_unique(int act_idx, int slot_idx, SDL_Keycode k) {
+        if (k != SDLK_UNKNOWN) {
+            for (int i = 0; i < ACT_COUNT; ++i) {
+                for (int s = 0; s < 2; ++s) {
+                    if (binds[i].keys[s] == k) binds[i].keys[s] = SDLK_UNKNOWN;
+                }
+            }
+        }
+        binds[act_idx].keys[slot_idx] = k;
+    }
+
+    void assign_pad_unique(int act_idx, int btn) {
+        if (btn >= 0) {
+            for (int i = 0; i < ACT_COUNT; ++i) {
+                if (binds[i].pad_btn == btn) binds[i].pad_btn = SDL_CONTROLLER_BUTTON_INVALID;
+            }
+        }
+        binds[act_idx].pad_btn = btn;
+    }
+
+    // Returns true if user chose "Save & Quit"
+    bool run_pause_config_modal(SDL_Window* win, SDL_Renderer* ren, SDL_Texture* tex, const uint32_t* game_fb, int scale) {
+        if (!win || !ren || !tex) return false;
+        auto pause_t0 = std::chrono::steady_clock::now();
+        if (g_audio.dev_id != 0) SDL_PauseAudioDevice(g_audio.dev_id, 1);
+
+        constexpr int TOTAL_ROWS = ACT_COUNT + 5; // 10 binds + Vol + SoftBar + Reset + Resume + Quit
+        constexpr int VISIBLE_ROWS = 9;
+        int sel_row = 0;
+        int sel_col = 0; // 0 = Key1, 1 = Key2, 2 = Pad
+        int scroll_top = 0;
+        bool waiting_bind = false;
+        bool menu_open = true;
+        bool quit_game = false;
+
+        while (menu_open) {
+            SDL_Event ev;
+            while (SDL_PollEvent(&ev)) {
+                if (ev.type == SDL_QUIT) {
+                    quit_game = true;
+                    menu_open = false;
+                    break;
+                } else if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+                    open_controllers();
+                } else if (waiting_bind) {
+                    if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
+                        SDL_Keycode k = ev.key.keysym.sym;
+                        if (k == SDLK_ESCAPE || k == SDLK_F1) {
+                            waiting_bind = false;
+                        } else if (k == SDLK_BACKSPACE || k == SDLK_DELETE) {
+                            if (sel_col < 2) assign_key_unique(sel_row, sel_col, SDLK_UNKNOWN);
+                            else assign_pad_unique(sel_row, SDL_CONTROLLER_BUTTON_INVALID);
+                            save_config();
+                            waiting_bind = false;
+                        } else {
+                            int target_slot = (sel_col < 2) ? sel_col : 0;
+                            assign_key_unique(sel_row, target_slot, k);
+                            save_config();
+                            waiting_bind = false;
+                        }
+                    } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
+                        assign_pad_unique(sel_row, ev.cbutton.button);
+                        sel_col = 2;
+                        save_config();
+                        waiting_bind = false;
+                    }
+                } else {
+                    auto adjust_row_lr = [&](int dir) {
+                        if (sel_row < ACT_COUNT) {
+                            sel_col = (sel_col + dir + 3) % 3;
+                        } else if (sel_row == ACT_COUNT) {
+                            std::lock_guard<std::mutex> lk(g_audio.mtx);
+                            g_audio.muted = false;
+                            g_audio.master_volume = std::clamp(g_audio.master_volume + dir * 5, 0, 100);
+                            save_config();
+                        } else if (sel_row == ACT_COUNT + 1) {
+                            show_softkey_bar = !show_softkey_bar;
+                            apply_softbar_geometry(win, ren, scale);
+                            save_config();
+                        }
+                    };
+                    auto activate_row = [&]() {
+                        if (sel_row < ACT_COUNT) {
+                            waiting_bind = true;
+                        } else if (sel_row == ACT_COUNT) {
+                            {
+                                std::lock_guard<std::mutex> lk(g_audio.mtx);
+                                g_audio.muted = !g_audio.muted;
+                            }
+                            save_config();
+                        } else if (sel_row == ACT_COUNT + 1) {
+                            show_softkey_bar = !show_softkey_bar;
+                            apply_softbar_geometry(win, ren, scale);
+                            save_config();
+                        } else if (sel_row == ACT_COUNT + 2) {
+                            reset_defaults();
+                            save_config();
+                            show_toast("已恢复默认按键配置");
+                        } else if (sel_row == ACT_COUNT + 3) {
+                            menu_open = false;
+                        } else if (sel_row == ACT_COUNT + 4) {
+                            quit_game = true;
+                            menu_open = false;
+                        }
+                    };
+
+                    if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
+                        SDL_Keycode k = ev.key.keysym.sym;
+                        if (k == SDLK_F1 || k == SDLK_ESCAPE) {
+                            menu_open = false;
+                        } else if (k == SDLK_UP) {
+                            sel_row = (sel_row - 1 + TOTAL_ROWS) % TOTAL_ROWS;
+                        } else if (k == SDLK_DOWN) {
+                            sel_row = (sel_row + 1) % TOTAL_ROWS;
+                        } else if (k == SDLK_LEFT) {
+                            adjust_row_lr(-1);
+                        } else if (k == SDLK_RIGHT) {
+                            adjust_row_lr(1);
+                        } else if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) {
+                            activate_row();
+                        } else if ((k == SDLK_DELETE || k == SDLK_BACKSPACE) && sel_row < ACT_COUNT) {
+                            if (sel_col < 2) assign_key_unique(sel_row, sel_col, SDLK_UNKNOWN);
+                            else assign_pad_unique(sel_row, SDL_CONTROLLER_BUTTON_INVALID);
+                            save_config();
+                        } else if (k == SDLK_F11) {
+                            toggle_fullscreen(win);
+                        }
+                    } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
+                        switch (ev.cbutton.button) {
+                            case SDL_CONTROLLER_BUTTON_DPAD_UP:
+                                sel_row = (sel_row - 1 + TOTAL_ROWS) % TOTAL_ROWS; break;
+                            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+                                sel_row = (sel_row + 1) % TOTAL_ROWS; break;
+                            case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+                                adjust_row_lr(-1); break;
+                            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+                                adjust_row_lr(1); break;
+                            case SDL_CONTROLLER_BUTTON_A:
+                                activate_row(); break;
+                            case SDL_CONTROLLER_BUTTON_B:
+                            case SDL_CONTROLLER_BUTTON_START:
+                                menu_open = false; break;
+                            default: break;
+                        }
+                    }
+                }
+            }
+
+            if (sel_row < scroll_top) scroll_top = sel_row;
+            if (sel_row >= scroll_top + VISIBLE_ROWS) scroll_top = sel_row - VISIBLE_ROWS + 1;
+
+            // Compose background + translucent modal panel
+            compose_display_buffer(game_fb, 0, true);
+            fill_rect_alpha(display_buf, 240, 260, 0, 0, 240, 240, 0xDC080C18u);
+
+            // Title bar
+            fill_rect_alpha(display_buf, 240, 260, 4, 4, 232, 18, 0xFF1A284Au);
+            draw_rect_border(display_buf, 240, 260, 4, 4, 232, 18, 0xFF4F78C8u);
+            std::string title = "按键与模拟器设置 (F1 / Esc)";
+            draw_ui_text(display_buf, 240, 260, title, 120 - measure_ui_text(title) / 2, 17, 0xFFFFFFFFu);
+
+            // Column headers
+            draw_ui_text(display_buf, 240, 260, "动作",  8,   34, 0xFF8EB0E8u);
+            draw_ui_text(display_buf, 240, 260, "键位1", 80,  34, 0xFF8EB0E8u);
+            draw_ui_text(display_buf, 240, 260, "键位2", 136, 34, 0xFF8EB0E8u);
+            draw_ui_text(display_buf, 240, 260, "手柄",  192, 34, 0xFF8EB0E8u);
+            fill_rect_alpha(display_buf, 240, 260, 6, 37, 228, 1, 0xFF324672u);
+
+            // Rows viewport (y = 40 .. 193, 9 rows * 17px)
+            for (int vi = 0; vi < VISIBLE_ROWS; ++vi) {
+                int r = scroll_top + vi;
+                if (r >= TOTAL_ROWS) break;
+                int ry = 40 + vi * 17;
+                bool is_sel = (r == sel_row);
+                if (is_sel) {
+                    fill_rect_alpha(display_buf, 240, 260, 5, ry, 226, 16, 0xFF223A6Au);
+                    draw_rect_border(display_buf, 240, 260, 5, ry, 226, 16, 0xFF5A8AE0u);
+                }
+
+                if (r < ACT_COUNT) {
+                    draw_ui_text(display_buf, 240, 260, binds[r].label_zh, 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                    std::string cols[3] = {
+                        short_key_name(binds[r].keys[0]),
+                        short_key_name(binds[r].keys[1]),
+                        short_pad_name(binds[r].pad_btn)
+                    };
+                    int cx[3] = {74, 130, 186};
+                    int cw[3] = {52, 52, 42};
+                    for (int c = 0; c < 3; ++c) {
+                        bool cell_sel = is_sel && (sel_col == c);
+                        if (cell_sel) {
+                            fill_rect_alpha(display_buf, 240, 260, cx[c], ry + 1, cw[c], 14, 0xFF345898u);
+                            draw_rect_border(display_buf, 240, 260, cx[c], ry + 1, cw[c], 14, 0xFFFFD24Cu);
+                        }
+                        int tw = measure_ui_text(cols[c]);
+                        uint32_t tcol = (cols[c] == "---") ? 0xFF687898u : (cell_sel ? 0xFFFFEC88u : 0xFFE8F0FFu);
+                        draw_ui_text(display_buf, 240, 260, cols[c], cx[c] + (cw[c] - tw) / 2, ry + 12, tcol);
+                    }
+                } else if (r == ACT_COUNT) {
+                    int vol = 100;
+                    bool muted = false;
+                    {
+                        std::lock_guard<std::mutex> lk(g_audio.mtx);
+                        vol = g_audio.master_volume;
+                        muted = g_audio.muted;
+                    }
+                    draw_ui_text(display_buf, 240, 260, "主音量", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                    std::string vstr = muted ? ("< 静音 (" + std::to_string(vol) + "%) >") : ("< " + std::to_string(vol) + "% >");
+                    draw_ui_text(display_buf, 240, 260, vstr, 110, ry + 12, muted ? 0xFFFF8888u : 0xFF88FFAAu);
+                } else if (r == ACT_COUNT + 1) {
+                    draw_ui_text(display_buf, 240, 260, "底部软键栏", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                    std::string sstr = show_softkey_bar ? "< 开启 >" : "< 关闭 >";
+                    draw_ui_text(display_buf, 240, 260, sstr, 118, ry + 12, show_softkey_bar ? 0xFF88FFAAu : 0xFF98A8C0u);
+                } else if (r == ACT_COUNT + 2) {
+                    std::string lbl = "[ 恢复默认按键配置 ]";
+                    draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFFD866u : 0xFFC8D8F8u);
+                } else if (r == ACT_COUNT + 3) {
+                    std::string lbl = "[ 返回游戏 (Resume) ]";
+                    draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFF88FFAAu : 0xFFC8D8F8u);
+                } else if (r == ACT_COUNT + 4) {
+                    std::string lbl = "[ 保存进度并退出 ]";
+                    draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFF8888u : 0xFFE8B8B8u);
+                }
+            }
+
+            // Scrollbar track on right edge
+            fill_rect_alpha(display_buf, 240, 260, 233, 40, 3, VISIBLE_ROWS * 17, 0xFF182238u);
+            int sb_h = std::max(14, (VISIBLE_ROWS * 17 * VISIBLE_ROWS) / TOTAL_ROWS);
+            int sb_y = 40 + ((VISIBLE_ROWS * 17 - sb_h) * scroll_top) / std::max(1, TOTAL_ROWS - VISIBLE_ROWS);
+            fill_rect_alpha(display_buf, 240, 260, 233, sb_y, 3, sb_h, 0xFF6894E0u);
+
+            // Footer instructions
+            fill_rect_alpha(display_buf, 240, 260, 6, 196, 228, 1, 0xFF324672u);
+            draw_ui_text(display_buf, 240, 260, "↑↓←→:选择  Enter:改键  Del:清空", 8, 211, 0xFFA4BCE4u);
+            draw_ui_text(display_buf, 240, 260, "F2:软键栏  F11:全屏  F12:保存截图", 8, 227, 0xFF849AC0u);
+
+            // Waiting for key modal popup
+            if (waiting_bind && sel_row < ACT_COUNT) {
+                fill_rect_alpha(display_buf, 240, 260, 12, 72, 216, 86, 0xF4101830u);
+                draw_rect_border(display_buf, 240, 260, 12, 72, 216, 86, 0xFFFFD24Cu);
+                std::string p1 = std::string("正在设置: ") + binds[sel_row].label_zh;
+                std::string p2 = "请按下键盘按键或手柄按钮...";
+                std::string p3 = "Esc:取消   Backspace:清空槽位";
+                draw_ui_text(display_buf, 240, 260, p1, 120 - measure_ui_text(p1) / 2, 95,  0xFFFFE070u);
+                draw_ui_text(display_buf, 240, 260, p2, 120 - measure_ui_text(p2) / 2, 118, 0xFFFFFFFFu);
+                draw_ui_text(display_buf, 240, 260, p3, 120 - measure_ui_text(p3) / 2, 142, 0xFFA0B8E0u);
+            }
+
+            int logical_h = show_softkey_bar ? 260 : 240;
+            SDL_Rect src_rect{0, 0, 240, logical_h};
+            SDL_UpdateTexture(tex, nullptr, display_buf, 240 * static_cast<int>(sizeof(uint32_t)));
+            SDL_RenderClear(ren);
+            SDL_RenderCopy(ren, tex, &src_rect, nullptr);
+            SDL_RenderPresent(ren);
+            SDL_Delay(16);
+        }
+
+        clear_held_states();
+        if (g_audio.dev_id != 0) SDL_PauseAudioDevice(g_audio.dev_id, 0);
+        auto pause_t1 = std::chrono::steady_clock::now();
+        paused_duration_ms += std::chrono::duration_cast<std::chrono::milliseconds>(pause_t1 - pause_t0).count();
+        return quit_game;
+    }
+};
+
+static UiInputManager g_ui;
+
 } // namespace
 
 // ============================================================================
@@ -1065,6 +1786,12 @@ DojaRuntime::DojaRuntime() {
 
 DojaRuntime::~DojaRuntime() {
     shutdown();
+}
+
+void DojaRuntime::set_config_path(const std::string& path) {
+    if (!path.empty()) {
+        g_ui.config_path = path;
+    }
 }
 
 bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, const std::string& /*jam_path*/, int scale) {
@@ -1103,12 +1830,18 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
             std::cerr << "SDL_Init warning: " << SDL_GetError() << "\n";
         } else {
+            g_ui.load_config();
+            if (!std::ifstream(g_ui.config_path).good()) {
+                g_ui.save_config();
+            }
+            g_ui.open_controllers();
+            int init_h = g_ui.show_softkey_bar ? 260 : 240;
             SDL_Window* win = SDL_CreateWindow(
                 "Rockman EXE Mobile Recomp (PoN / LoN)",
                 SDL_WINDOWPOS_CENTERED,
                 SDL_WINDOWPOS_CENTERED,
                 240 * window_scale_,
-                240 * window_scale_,
+                init_h * window_scale_,
                 SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
             );
             if (win) {
@@ -1119,17 +1852,18 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
                 }
                 sdl_renderer_ = ren;
                 if (ren) {
-                    SDL_RenderSetLogicalSize(ren, 240, 240);
+                    SDL_RenderSetLogicalSize(ren, 240, init_h);
                     sdl_texture_ = SDL_CreateTexture(
                         ren,
                         SDL_PIXELFORMAT_ARGB8888,
                         SDL_TEXTUREACCESS_STREAMING,
                         240,
-                        240
+                        260
                     );
                 }
             }
             g_audio.init_sdl_audio();
+            g_ui.show_toast("按 F1 / Esc 打开按键与模拟器设置", 120);
         }
     }
 
@@ -1138,6 +1872,7 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
 }
 
 void DojaRuntime::shutdown() {
+    g_ui.close_controllers();
     g_audio.shutdown_sdl_audio();
     if (sdl_texture_) {
         SDL_DestroyTexture(static_cast<SDL_Texture*>(sdl_texture_));
@@ -1431,54 +2166,186 @@ void DojaRuntime::draw_text_internal(HeapObject& gfx, const std::string& text, i
 
 void DojaRuntime::poll_events() {
     if (!sdl_window_) return;
+    static bool in_modal = false;
+
+    auto sync_action_edge = [&](int act_idx) {
+        ActionBinding& ab = g_ui.binds[act_idx];
+        bool now_down = ab.key_down[0] || ab.key_down[1] || ab.pad_down || ab.axis_down;
+        if (now_down == ab.effective_down) return;
+        ab.effective_down = now_down;
+        if (ab.doja_key >= 0) {
+            if (now_down) {
+                keypad_state_ |= (1 << ab.doja_key);
+                if (current_canvas_ref_ > 0) {
+                    generated_process_event(*this, current_canvas_ref_, 0, ab.doja_key);
+                }
+            } else {
+                keypad_state_ &= ~(1 << ab.doja_key);
+                if (current_canvas_ref_ > 0) {
+                    generated_process_event(*this, current_canvas_ref_, 1, ab.doja_key);
+                }
+            }
+        }
+    };
+
+    auto trigger_direct_doja_key = [&](int doja_key, bool pressed) {
+        if (doja_key < 0) return;
+        int32_t mask = (1 << doja_key);
+        bool was_down = (keypad_state_ & mask) != 0;
+        if (pressed == was_down) return;
+        if (pressed) {
+            keypad_state_ |= mask;
+            if (current_canvas_ref_ > 0) {
+                generated_process_event(*this, current_canvas_ref_, 0, doja_key);
+            }
+        } else {
+            keypad_state_ &= ~mask;
+            if (current_canvas_ref_ > 0) {
+                generated_process_event(*this, current_canvas_ref_, 1, doja_key);
+            }
+        }
+    };
+
+    auto open_pause_modal = [&]() {
+        if (in_modal) return;
+        in_modal = true;
+        keypad_state_ = 0;
+        g_ui.clear_held_states();
+        bool quit = g_ui.run_pause_config_modal(
+            static_cast<SDL_Window*>(sdl_window_),
+            static_cast<SDL_Renderer*>(sdl_renderer_),
+            static_cast<SDL_Texture*>(sdl_texture_),
+            framebuffer_,
+            window_scale_
+        );
+        in_modal = false;
+        if (quit) {
+            save_sav_overlay();
+            g_ui.save_config();
+            std::exit(0);
+        }
+    };
+
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
         if (ev.type == SDL_QUIT) {
             save_sav_overlay();
+            g_ui.save_config();
             std::exit(0);
+        } else if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+            g_ui.open_controllers();
         } else if (ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP) {
+            if (ev.key.repeat) continue;
             bool pressed = (ev.type == SDL_KEYDOWN);
-            int doja_key = -1;
-            switch (ev.key.keysym.sym) {
-                case SDLK_LEFT:  case SDLK_a: doja_key = 0x10; break; // KEY_LEFT
-                case SDLK_UP:    case SDLK_w: doja_key = 0x11; break; // KEY_UP
-                case SDLK_RIGHT: case SDLK_d: doja_key = 0x12; break; // KEY_RIGHT
-                case SDLK_DOWN:  case SDLK_s: doja_key = 0x13; break; // KEY_DOWN
-                case SDLK_z: case SDLK_j: case SDLK_RETURN: case SDLK_SPACE:
-                    doja_key = 0x14; break; // KEY_SELECT (A button)
-                case SDLK_x: case SDLK_k:
-                    doja_key = 0x0A; break; // KEY_ASTERISK (B button / Buster in battle)
-                case SDLK_q: case SDLK_u: case SDLK_c:
-                    doja_key = 0x15; break; // KEY_SOFT1 (L / Left Softkey / Custom)
-                case SDLK_e: case SDLK_i: case SDLK_v: case SDLK_BACKSPACE:
-                    doja_key = 0x16; break; // KEY_SOFT2 (R / Right Softkey / Menu / Cancel)
-                case SDLK_0: doja_key = 0x00; break;
-                case SDLK_1: doja_key = 0x01; break;
-                case SDLK_2: doja_key = 0x02; break;
-                case SDLK_3: doja_key = 0x03; break;
-                case SDLK_4: doja_key = 0x04; break;
-                case SDLK_5: doja_key = 0x05; break;
-                case SDLK_6: doja_key = 0x06; break;
-                case SDLK_7: doja_key = 0x07; break;
-                case SDLK_8: doja_key = 0x08; break;
-                case SDLK_9: doja_key = 0x09; break;
-                case SDLK_ESCAPE:
-                    save_sav_overlay();
-                    std::exit(0);
-                default: break;
-            }
-            if (doja_key >= 0) {
-                if (pressed) {
-                    keypad_state_ |= (1 << doja_key);
-                    if (current_canvas_ref_ > 0) {
-                        generated_process_event(*this, current_canvas_ref_, 0, doja_key);
+            SDL_Keycode sym = ev.key.keysym.sym;
+
+            // Emulator hotkeys on key-down
+            if (pressed) {
+                if (sym == SDLK_F1 || sym == SDLK_ESCAPE) {
+                    open_pause_modal();
+                    return;
+                }
+                if (sym == SDLK_F2) {
+                    g_ui.show_softkey_bar = !g_ui.show_softkey_bar;
+                    g_ui.apply_softbar_geometry(
+                        static_cast<SDL_Window*>(sdl_window_),
+                        static_cast<SDL_Renderer*>(sdl_renderer_),
+                        window_scale_
+                    );
+                    g_ui.save_config();
+                    g_ui.show_toast(g_ui.show_softkey_bar ? "底部软键栏: 开启" : "底部软键栏: 关闭");
+                    continue;
+                }
+                if (sym == SDLK_F11 || (sym == SDLK_RETURN && (ev.key.keysym.mod & KMOD_ALT))) {
+                    g_ui.toggle_fullscreen(static_cast<SDL_Window*>(sdl_window_));
+                    continue;
+                }
+                if (sym == SDLK_F12) {
+                    g_ui.save_screenshot_bmp(framebuffer_);
+                    continue;
+                }
+                if (sym == SDLK_F9 || (sym == SDLK_m && !g_ui.is_keycode_bound(SDLK_m))) {
+                    bool muted_now = false;
+                    int vol_now = 100;
+                    {
+                        std::lock_guard<std::mutex> lk(g_audio.mtx);
+                        g_audio.muted = !g_audio.muted;
+                        muted_now = g_audio.muted;
+                        vol_now = g_audio.master_volume;
                     }
-                } else {
-                    keypad_state_ &= ~(1 << doja_key);
-                    if (current_canvas_ref_ > 0) {
-                        generated_process_event(*this, current_canvas_ref_, 1, doja_key);
+                    g_ui.save_config();
+                    g_ui.show_toast(muted_now ? "静音: 开启" : ("主音量: " + std::to_string(vol_now) + "%"));
+                    continue;
+                }
+                if ((sym == SDLK_MINUS || sym == SDLK_EQUALS) && !g_ui.is_keycode_bound(sym)) {
+                    int delta = (sym == SDLK_EQUALS) ? 5 : -5;
+                    int vol_now = 100;
+                    {
+                        std::lock_guard<std::mutex> lk(g_audio.mtx);
+                        g_audio.muted = false;
+                        g_audio.master_volume = std::clamp(g_audio.master_volume + delta, 0, 100);
+                        vol_now = g_audio.master_volume;
+                    }
+                    g_ui.save_config();
+                    g_ui.show_toast("主音量: " + std::to_string(vol_now) + "%");
+                    continue;
+                }
+            }
+
+            // Check customizable action bindings
+            bool matched_bind = false;
+            for (int i = 0; i < ACT_COUNT; ++i) {
+                for (int s = 0; s < 2; ++s) {
+                    if (g_ui.binds[i].keys[s] != SDLK_UNKNOWN && g_ui.binds[i].keys[s] == sym) {
+                        g_ui.binds[i].key_down[s] = pressed;
+                        sync_action_edge(i);
+                        matched_bind = true;
                     }
                 }
+            }
+            if (matched_bind) continue;
+
+            // Built-in convenience fallbacks when unbound: 0..9 digits + Enter/Space for Confirm
+            int fallback_doja = -1;
+            if (sym >= SDLK_0 && sym <= SDLK_9) {
+                fallback_doja = sym - SDLK_0;
+            } else if (sym >= SDLK_KP_1 && sym <= SDLK_KP_9) {
+                fallback_doja = 1 + (sym - SDLK_KP_1);
+            } else if (sym == SDLK_KP_0) {
+                fallback_doja = 0;
+            } else if (sym == SDLK_RETURN || sym == SDLK_SPACE) {
+                fallback_doja = 0x14; // KEY_SELECT
+            } else if (sym == SDLK_BACKSPACE) {
+                fallback_doja = 0x16; // KEY_SOFT2
+            }
+            if (fallback_doja >= 0) {
+                trigger_direct_doja_key(fallback_doja, pressed);
+            }
+        } else if (ev.type == SDL_CONTROLLERBUTTONDOWN || ev.type == SDL_CONTROLLERBUTTONUP) {
+            bool pressed = (ev.type == SDL_CONTROLLERBUTTONDOWN);
+            int btn = ev.cbutton.button;
+            if (pressed && btn == SDL_CONTROLLER_BUTTON_START && !in_modal) {
+                open_pause_modal();
+                return;
+            }
+            for (int i = 0; i < ACT_COUNT; ++i) {
+                if (g_ui.binds[i].pad_btn == btn) {
+                    g_ui.binds[i].pad_down = pressed;
+                    sync_action_edge(i);
+                }
+            }
+        } else if (ev.type == SDL_CONTROLLERAXISMOTION) {
+            constexpr int DEADZONE = 10000;
+            if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
+                g_ui.binds[ACT_LEFT].axis_down  = (ev.caxis.value < -DEADZONE);
+                g_ui.binds[ACT_RIGHT].axis_down = (ev.caxis.value >  DEADZONE);
+                sync_action_edge(ACT_LEFT);
+                sync_action_edge(ACT_RIGHT);
+            } else if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+                g_ui.binds[ACT_UP].axis_down   = (ev.caxis.value < -DEADZONE);
+                g_ui.binds[ACT_DOWN].axis_down = (ev.caxis.value >  DEADZONE);
+                sync_action_edge(ACT_UP);
+                sync_action_edge(ACT_DOWN);
             }
         }
     }
@@ -1503,18 +2370,23 @@ void DojaRuntime::present_screen() {
     if (sdl_renderer_ && sdl_texture_) {
         SDL_Renderer* ren = static_cast<SDL_Renderer*>(sdl_renderer_);
         SDL_Texture* tex = static_cast<SDL_Texture*>(sdl_texture_);
-        SDL_UpdateTexture(tex, nullptr, framebuffer_, 240 * sizeof(uint32_t));
+        g_ui.compose_display_buffer(framebuffer_, keypad_state_, true);
+        int logical_h = g_ui.show_softkey_bar ? 260 : 240;
+        SDL_Rect src_rect{0, 0, 240, logical_h};
+        SDL_UpdateTexture(tex, nullptr, g_ui.display_buf, 240 * sizeof(uint32_t));
         SDL_RenderClear(ren);
-        SDL_RenderCopy(ren, tex, nullptr, nullptr);
+        SDL_RenderCopy(ren, tex, &src_rect, nullptr);
         SDL_RenderPresent(ren);
     }
     if (max_frames_ > 0 && frame_count_ >= max_frames_) {
         if (!dump_ppm_path_.empty()) {
+            g_ui.compose_display_buffer(framebuffer_, keypad_state_, false);
+            int dump_h = g_ui.show_softkey_bar ? 260 : 240;
             std::ofstream ppm(dump_ppm_path_, std::ios::binary | std::ios::trunc);
             if (ppm) {
-                ppm << "P6\n240 240\n255\n";
-                for (int i = 0; i < 240 * 240; ++i) {
-                    uint32_t c = framebuffer_[i];
+                ppm << "P6\n240 " << dump_h << "\n255\n";
+                for (int i = 0; i < 240 * dump_h; ++i) {
+                    uint32_t c = g_ui.display_buf[i];
                     uint8_t rgb[3] = {
                         static_cast<uint8_t>((c >> 16) & 0xFF),
                         static_cast<uint8_t>((c >> 8) & 0xFF),
@@ -1535,13 +2407,22 @@ int64_t DojaRuntime::current_time_millis() {
         fake_time_ms_ += 20;
         return fake_time_ms_;
     }
+    if (g_ui.is_turbo_held()) {
+        g_ui.turbo_bonus_ms += 12;
+    }
     auto now = std::chrono::steady_clock::now().time_since_epoch();
-    return std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    int64_t wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    return wall_ms - g_ui.paused_duration_ms + g_ui.turbo_bonus_ms;
 }
 
 void DojaRuntime::sleep_ms(int64_t ms) {
     poll_events();
     if (fast_forward_) return;
+    if (g_ui.is_turbo_held()) {
+        g_ui.turbo_bonus_ms += std::max<int64_t>(0, ms - 12);
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::min<int64_t>(ms, 12)));
+        return;
+    }
     if (ms > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(ms));
     }
@@ -1930,7 +2811,13 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             poll_events();
             return Slot(keypad_state_);
         }
-        if (m == "setSoftLabel") return Slot(0);
+        if (m == "setSoftLabel") {
+            int idx = args[1].i;
+            std::string lbl = (args[2].r > 0) ? get(args[2].r).str : "";
+            if (idx == 0) g_ui.soft_label_left = lbl;
+            else if (idx == 1) g_ui.soft_label_right = lbl;
+            return Slot(0);
+        }
     }
 
     if (c == "com/nttdocomo/ui/Font") {

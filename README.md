@@ -83,17 +83,31 @@ cmake --build build -j$(nproc)
 ./build/lon_en_recomp --scale 3 --fps 60
 ```
 
-### Default Keyboard Controls (GBA-Style Mapping)
+### Default Controls & In-Game Keybinding Menu
 
-| Action | DoJa Key | Keyboard Keys |
-|---|---|---|
-| Move Up / Down / Left / Right | `KEY_UP` / `DOWN` / `LEFT` / `RIGHT` | Arrow Keys or `W` `A` `S` `D` |
-| **A Button** (Confirm / Use BattleChip / Fire Buster) | `KEY_SELECT` (`0x14`) | `Z`, `J`, `Space`, `Enter` |
-| **B Button** (Cancel / Charge & Fire Mega Buster) | `KEY_ASTERISK` (`0x0A`) | `X`, `K` |
-| **L Button** (Left Softkey / Open Custom Screen in Battle) | `KEY_SOFT1` (`0x15`) | `Q`, `U`, `C` |
-| **R Button** (Right Softkey / Open PET Menu) | `KEY_SOFT2` (`0x16`) | `E`, `I`, `V`, `Backspace` |
-| Numeric Keypad (`0`–`9`) | `KEY_0`–`KEY_9` (`0x00`–`0x09`) | `0`–`9` |
-| Save & Quit | — | `Esc` |
+Press **`F1`** or **`Esc`** (or **`Start`** on a Gamepad) at any time during gameplay to open the interactive **Keybinding & Emulator Settings Menu**, where you can remap all keyboard slots and controller buttons, adjust master volume, or toggle the flip-phone Softkey Bar. All settings are automatically saved to `controls.cfg`.
+
+| Action | DoJa Key | Default Keyboard | Default Gamepad |
+|---|---|---|---|
+| Move Up / Down / Left / Right | `KEY_UP` / `DOWN` / `LEFT` / `RIGHT` | Arrow Keys or `W` `A` `S` `D` | D-Pad / Left Stick |
+| **A Button** (Confirm / Use BattleChip) | `KEY_SELECT` (`0x14`) | `Z`, `J` (plus `Enter`, `Space`) | `A` / Cross |
+| **B Button** (Cancel / Mega Buster) | `KEY_ASTERISK` (`0x0A`) | `X`, `K` | `B` / Circle |
+| **L Button** (Left Softkey / Custom) | `KEY_SOFT1` (`0x15`) | `Q`, `U` | `LB` / `L1` |
+| **R Button** (Right Softkey / PET Menu) | `KEY_SOFT2` (`0x16`) | `E`, `I` (plus `Backspace`) | `RB` / `R1` |
+| **Pound / #** | `KEY_POUND` (`0x0B`) | `C`, `L` | `X` / Square |
+| **Hold Fast-Forward (Turbo)** | — | `Tab`, `` ` `` | `Y` / Triangle |
+| Numeric Keypad (`0`–`9`) | `KEY_0`–`KEY_9` (`0x00`–`0x09`) | `0`–`9` / Numpad `0`–`9` | — |
+
+### Emulator Hotkeys
+
+| Hotkey | Function |
+|---|---|
+| `F1` / `Esc` / `Start` | Open Pause, Keybinding & Settings Menu (includes Save & Quit) |
+| `Tab` (hold) | Hold for ~3x Fast-Forward |
+| `F2` | Toggle Flip-Phone Bottom Softkey Bar (`240×260` $\leftrightarrow$ `240×240`) |
+| `-` / `=` / `F9` (`M`) | Decrease / Increase Master Volume / Toggle Mute |
+| `F11` / `Alt+Enter` | Toggle Desktop Fullscreen |
+| `F12` | Save 240×240 BMP Screenshot |
 
 ---
 
