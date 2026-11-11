@@ -2718,62 +2718,69 @@ struct FrameInterpolator {
         std::vector<uint8_t> used_prev(static_cast<size_t>(n_prev), 0);
         int matched_count = 0;
 
-        // Pass 1: Exact visual match (tiles, static-frame sprites, UI bars, strings) within 36 px
+        auto same_primitive = [](const DrawCmd& c, const DrawCmd& p) -> bool {
+            if (c.kind != p.kind) return false;
+            if (c.kind == CmdKind::Image) {
+                return c.img_ref == p.img_ref && c.img_gen == p.img_gen &&
+                       c.sx == p.sx && c.sy == p.sy && c.sw == p.sw && c.sh == p.sh &&
+                       c.dw == p.dw && c.dh == p.dh && c.flip_mode == p.flip_mode;
+            }
+            if (c.kind == CmdKind::FillRect || c.kind == CmdKind::DrawRect) {
+                return c.dw == p.dw && c.dh == p.dh && c.color == p.color;
+            }
+            return c.color == p.color && c.text == p.text;
+        };
+
+        // Detect static full-screen backdrop scenes (e.g. BattleMain 6x3 grid at 240x240)
+        // vs scrolling overworld camera scenes (MapDraw imgMap2 quadrants)
+        const DrawCmd& c0 = curr_cmds[0];
+        const DrawCmd& p0 = prev_cmds[0];
+        bool is_static_backdrop = (c0.kind == CmdKind::Image && p0.kind == CmdKind::Image &&
+                                   c0.img_ref == p0.img_ref && c0.img_gen == p0.img_gen &&
+                                   c0.dx == 0 && c0.dy == 0 && p0.dx == 0 && p0.dy == 0 &&
+                                   c0.dw >= 240 && c0.dh >= 240);
+
+        // Pass 0: Lock stationary primitives first (dx == prev_dx && dy == prev_dy) so newly
+        // spawned battle warp silhouettes (Attack 59) or shots never steal stationary slots
         for (int i = 0; i < n_curr; ++i) {
             DrawCmd& c = curr_cmds[i];
             int best_j = -1;
-            int best_score = 999999;
+            int best_dist = 999999;
             for (int j = 0; j < n_prev; ++j) {
                 if (used_prev[j]) continue;
                 const DrawCmd& p = prev_cmds[j];
-                if (c.kind != p.kind) continue;
-                if (c.kind == CmdKind::Image) {
-                    if (c.img_ref != p.img_ref || c.img_gen != p.img_gen ||
-                        c.sx != p.sx || c.sy != p.sy || c.sw != p.sw || c.sh != p.sh ||
-                        c.dw != p.dw || c.dh != p.dh || c.flip_mode != p.flip_mode) {
-                        continue;
-                    }
-                } else if (c.kind == CmdKind::FillRect || c.kind == CmdKind::DrawRect) {
-                    if (c.dw != p.dw || c.dh != p.dh || c.color != p.color) continue;
-                } else {
-                    if (c.color != p.color || c.text != p.text) continue;
-                }
-                int adx = std::abs(c.dx - p.dx);
-                int ady = std::abs(c.dy - p.dy);
-                if (adx > 36 || ady > 36) continue;
-                int score = (adx + ady) * 16 + std::min(15, std::abs(i - j));
-                if (score < best_score) {
-                    best_score = score;
+                if (c.dx != p.dx || c.dy != p.dy || !same_primitive(c, p)) continue;
+                int idx_dist = std::abs(i - j);
+                if (idx_dist < best_dist) {
+                    best_dist = idx_dist;
                     best_j = j;
-                    if (score == 0) break;
+                    if (idx_dist == 0) break;
                 }
             }
             if (best_j >= 0) {
                 used_prev[best_j] = 1;
-                c.prev_dx = prev_cmds[best_j].dx;
-                c.prev_dy = prev_cmds[best_j].dy;
+                c.prev_dx = c.dx;
+                c.prev_dy = c.dy;
                 c.has_match = true;
                 matched_count++;
-                if (c.prev_dx != c.dx || c.prev_dy != c.dy) any_motion = true;
             }
         }
 
-        // Pass 2: Animated character/projectile walk & attack cel match (same sheet & size, <= 18 px)
+        // Pass 1: Continuous translation match (overworld scrolling 4..8 px, projectiles 3..15 px).
+        // Kept strictly below 6x3 battle grid panel spacing (BT_SIZE_X = 40 px, BT_SIZE_Y = 24 px)
+        // so player & enemy panel warps snap cleanly instead of drifting across panel borders.
         for (int i = 0; i < n_curr; ++i) {
             DrawCmd& c = curr_cmds[i];
-            if (c.has_match || c.kind != CmdKind::Image || c.dw > 96 || c.dh > 96) continue;
+            if (c.has_match) continue;
             int best_j = -1;
             int best_score = 999999;
             for (int j = 0; j < n_prev; ++j) {
                 if (used_prev[j]) continue;
                 const DrawCmd& p = prev_cmds[j];
-                if (p.kind != CmdKind::Image || c.img_ref != p.img_ref || c.img_gen != p.img_gen ||
-                    c.sw != p.sw || c.sh != p.sh || c.dw != p.dw || c.dh != p.dh) {
-                    continue;
-                }
+                if (!same_primitive(c, p)) continue;
                 int adx = std::abs(c.dx - p.dx);
                 int ady = std::abs(c.dy - p.dy);
-                if (adx > 18 || ady > 18) continue;
+                if (adx > 16 || ady > 15) continue;
                 int score = (adx + ady) * 16 + std::min(15, std::abs(i - j));
                 if (score < best_score) {
                     best_score = score;
@@ -2786,7 +2793,73 @@ struct FrameInterpolator {
                 c.prev_dy = prev_cmds[best_j].dy;
                 c.has_match = true;
                 matched_count++;
-                if (c.prev_dx != c.dx || c.prev_dy != c.dy) any_motion = true;
+            }
+        }
+
+        // Pass 2: Overworld camera-scrolling walk cel match ONLY (!is_static_backdrop).
+        // Disabled on static-backdrop battle scenes so multi-tile OAM characters never cross-match
+        // head/leg pieces or smear discrete attack/warp cel transitions.
+        if (!is_static_backdrop) {
+            for (int i = 0; i < n_curr; ++i) {
+                DrawCmd& c = curr_cmds[i];
+                if (c.has_match || c.kind != CmdKind::Image || c.dw > 64 || c.dh > 64) continue;
+                int best_j = -1;
+                int best_score = 999999;
+                for (int j = 0; j < n_prev; ++j) {
+                    if (used_prev[j]) continue;
+                    const DrawCmd& p = prev_cmds[j];
+                    if (p.kind != CmdKind::Image || c.img_ref != p.img_ref || c.img_gen != p.img_gen ||
+                        c.sw != p.sw || c.sh != p.sh || c.dw != p.dw || c.dh != p.dh) {
+                        continue;
+                    }
+                    int adx = std::abs(c.dx - p.dx);
+                    int ady = std::abs(c.dy - p.dy);
+                    if (adx > 10 || ady > 6) continue;
+                    int score = (adx + ady) * 16 + std::min(15, std::abs(i - j));
+                    if (score < best_score) {
+                        best_score = score;
+                        best_j = j;
+                    }
+                }
+                if (best_j >= 0) {
+                    used_prev[best_j] = 1;
+                    c.prev_dx = prev_cmds[best_j].dx;
+                    c.prev_dy = prev_cmds[best_j].dy;
+                    c.has_match = true;
+                    matched_count++;
+                }
+            }
+        }
+
+        // Composite sprite rigidity guard on static-backdrop (battle) scenes:
+        // If one sub-tile of a multi-part character swapped cel/warped (!has_match) or moved by a
+        // different delta, snap reused sub-tiles (e.g. helmet/feet) together so poses stay crisp.
+        if (is_static_backdrop) {
+            for (int i = 0; i < n_curr; ++i) {
+                DrawCmd& c = curr_cmds[i];
+                if (!c.has_match || c.kind != CmdKind::Image || c.dw > 64 || c.dh > 64) continue;
+                int vx = c.dx - c.prev_dx;
+                int vy = c.dy - c.prev_dy;
+                if (vx == 0 && vy == 0) continue;
+                for (int k : {i - 1, i + 1}) {
+                    if (k < 0 || k >= n_curr) continue;
+                    const DrawCmd& nb = curr_cmds[k];
+                    if (nb.kind != CmdKind::Image || nb.img_ref != c.img_ref || nb.dw > 64 || nb.dh > 64) continue;
+                    if (std::abs(nb.dx - c.dx) <= 32 && std::abs(nb.dy - c.dy) <= 32) {
+                        if (!nb.has_match || (nb.dx - nb.prev_dx) != vx || (nb.dy - nb.prev_dy) != vy) {
+                            c.prev_dx = c.dx;
+                            c.prev_dy = c.dy;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        for (const DrawCmd& c : curr_cmds) {
+            if (c.has_match && (c.prev_dx != c.dx || c.prev_dy != c.dy)) {
+                any_motion = true;
+                break;
             }
         }
 
