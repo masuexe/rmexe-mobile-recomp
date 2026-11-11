@@ -1652,8 +1652,8 @@ struct UiInputManager {
     std::string soft_label_right;
 
     // Network & PvP settings (persisted in controls.cfg, overridable via CLI)
-    bool online_mode = false;
-    std::string server_url = "127.0.0.1:8765";
+    bool online_mode = true;
+    std::string server_url = "111.229.100.54:8765";
     std::string player_uid = generate_random_uid();
     std::string player_name = "ROCKMAN";
     bool is_lon_game = false;
@@ -1667,6 +1667,9 @@ struct UiInputManager {
     std::string cli_player_uid;
     std::string cli_player_name;
     std::string custom_sav_path;
+    int cli_pvp_mode = 0;         // 0 = none, 1 = create, 2 = join
+    uint32_t cli_pvp_room_id = 0;
+    int cli_pvp_join_retries = 0;
 
     std::string toast_text;
     int toast_frames = 0;
@@ -2034,17 +2037,29 @@ struct UiInputManager {
         bool s1_held = (keypad_state & (1 << 0x15)) != 0;
         std::string k1 = primary_soft_key_label(ACT_SOFT1);
         std::string left_txt = soft_label_left.empty() ? ("[" + k1 + "] ---") : ("[" + k1 + "] " + soft_label_left);
-        fill_rect_alpha(display_buf, 240, 260, 2, 242, 92, 16, s1_held ? 0xFF2B5EA8u : 0xFF202942u);
-        draw_rect_border(display_buf, 240, 260, 2, 242, 92, 16, s1_held ? 0xFF74B2FFu : 0xFF394970u);
+        fill_rect_alpha(display_buf, 240, 260, 2, 242, 80, 16, s1_held ? 0xFF2B5EA8u : 0xFF202942u);
+        draw_rect_border(display_buf, 240, 260, 2, 242, 80, 16, s1_held ? 0xFF74B2FFu : 0xFF394970u);
         draw_ui_text(display_buf, 240, 260, left_txt, 5, 254, soft_label_left.empty() ? 0xFF7080A0u : 0xFFF0F6FFu);
 
+        // Right Softkey (SOFT_KEY_2 -> DoJa 0x16)
+        bool s2_held = (keypad_state & (1 << 0x16)) != 0;
+        std::string k2 = primary_soft_key_label(ACT_SOFT2);
+        std::string right_txt = soft_label_right.empty() ? ("--- [" + k2 + "]") : (soft_label_right + " [" + k2 + "]");
+        fill_rect_alpha(display_buf, 240, 260, 158, 242, 80, 16, s2_held ? 0xFF2B5EA8u : 0xFF202942u);
+        draw_rect_border(display_buf, 240, 260, 158, 242, 80, 16, s2_held ? 0xFF74B2FFu : 0xFF394970u);
+        int rw = measure_ui_text(right_txt);
+        draw_ui_text(display_buf, 240, 260, right_txt, std::max(161, 235 - rw), 254, soft_label_right.empty() ? 0xFF7080A0u : 0xFFF0F6FFu);
+
         // Center Status / F1 Hint
-        if (is_turbo_held()) {
+        if (is_turbo_held() && !g_pvp.active()) {
             std::string c_txt = ">> 倍速";
             int cw = measure_ui_text(c_txt);
             draw_ui_text(display_buf, 240, 260, c_txt, 120 - cw / 2, 254, 0xFFFFD448u);
         } else if (g_pvp.active()) {
             std::string c_txt = "#" + std::to_string(g_pvp.room_id());
+            if (g_pvp.match_started() && g_pvp.rtt_ms() > 0) {
+                c_txt += " " + std::to_string(g_pvp.rtt_ms()) + "ms";
+            }
             int cw = measure_ui_text(c_txt);
             draw_ui_text(display_buf, 240, 260, c_txt, 120 - cw / 2, 254, g_pvp.match_started() ? 0xFF68FF9Au : 0xFF74C4FFu);
         } else if (online_mode) {
@@ -2056,21 +2071,15 @@ struct UiInputManager {
             int cw = measure_ui_text(c_txt);
             draw_ui_text(display_buf, 240, 260, c_txt, 120 - cw / 2, 254, 0xFF8A9CC2u);
         }
-
-        // Right Softkey (SOFT_KEY_2 -> DoJa 0x16)
-        bool s2_held = (keypad_state & (1 << 0x16)) != 0;
-        std::string k2 = primary_soft_key_label(ACT_SOFT2);
-        std::string right_txt = soft_label_right.empty() ? ("--- [" + k2 + "]") : (soft_label_right + " [" + k2 + "]");
-        fill_rect_alpha(display_buf, 240, 260, 146, 242, 92, 16, s2_held ? 0xFF2B5EA8u : 0xFF202942u);
-        draw_rect_border(display_buf, 240, 260, 146, 242, 92, 16, s2_held ? 0xFF74B2FFu : 0xFF394970u);
-        int rw = measure_ui_text(right_txt);
-        draw_ui_text(display_buf, 240, 260, right_txt, std::max(149, 235 - rw), 254, soft_label_right.empty() ? 0xFF7080A0u : 0xFFF0F6FFu);
     }
 
     void compose_display_buffer(const uint32_t* game_fb, int32_t keypad_state, bool tick_toast = true) {
         std::memcpy(display_buf, game_fb, 240 * 240 * sizeof(uint32_t));
         if (show_softkey_bar) {
             render_softkey_bar(keypad_state);
+        }
+        if (overlay_open) {
+            render_overlay_onto_display_buf();
         }
         if (toast_frames > 0 && !toast_text.empty()) {
             uint32_t alpha = (toast_frames < 20) ? static_cast<uint32_t>(toast_frames * 255 / 20) : 235u;
@@ -2136,325 +2145,603 @@ struct UiInputManager {
         binds[act_idx].pad_btn = btn;
     }
 
-    // Returns true if user chose "Save & Quit"
+    // Layout order (Online & PvP right at top for instant access!):
+    // 0: 联机对战 (Create / Quick Join / Room List / Exit Match)
+    // 1: 服务器地址 (Enter to type/paste IP:Port, Left/Right preset toggle)
+    // 2: 玩家昵称 (Enter to type/paste nickname)
+    // 3: 通信模式 (Online Server / Local Offline)
+    // 4: 主音量
+    // 5: 帧率模式 (60 FPS / 15 FPS)
+    // 6: 底部软键栏
+    // 7..16: Keybindings (ACT_COUNT = 10)
+    // 17: 恢复默认按键配置
+    // 18: 返回游戏 (Resume)
+    // 19: 保存进度并退出
+    static constexpr int BIND_START_ROW = 7;
+    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 17
+    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 20
+    static constexpr int VISIBLE_ROWS = 9;
+
+    bool overlay_open = false;
+    int overlay_sel_row = 0;
+    int overlay_sel_col = 0; // 0 = Key1, 1 = Key2, 2 = Pad
+    int overlay_scroll_top = 0;
+    bool overlay_waiting_bind = false;
+    int overlay_text_edit_mode = 0; // 0 = none, 1 = server_url, 2 = player_name
+    std::string overlay_text_edit_buf;
+    bool overlay_ignore_next_textinput = false;
+    std::vector<pvp::PvpRoomInfo> overlay_open_rooms;
+
+    static void pop_utf8_char(std::string& s) {
+        while (!s.empty() && (static_cast<uint8_t>(s.back()) & 0xC0u) == 0x80u) {
+            s.pop_back();
+        }
+        if (!s.empty()) s.pop_back();
+    }
+
+    static void sanitize_append(std::string& dst, const char* src, bool strip_spaces, size_t max_bytes) {
+        if (!src) return;
+        for (const unsigned char* p = reinterpret_cast<const unsigned char*>(src); *p; ++p) {
+            if (*p < 0x20 || *p == 0x7F) continue;
+            if (strip_spaces && *p == ' ') continue;
+            if (dst.size() >= max_bytes) break;
+            dst.push_back(static_cast<char>(*p));
+        }
+    }
+
+    void refresh_open_rooms() {
+        overlay_open_rooms.clear();
+        if (online_mode && !server_url.empty() && !g_pvp.active()) {
+            pvp::PvpClientSession::list_open_rooms(server_url, is_lon_game ? "lon" : "pon", overlay_open_rooms);
+        }
+        int max_choices = 2 + static_cast<int>(overlay_open_rooms.size());
+        if (pvp_menu_choice >= max_choices) pvp_menu_choice = 0;
+    }
+
+    void connect_and_probe_server() {
+        online_mode = true;
+        save_config();
+        std::string stat_msg;
+        if (pvp::PvpClientSession::check_server_status(server_url, stat_msg)) {
+            show_toast("已连接 " + server_url + " (" + stat_msg + ")", 120);
+            refresh_open_rooms();
+        } else {
+            overlay_open_rooms.clear();
+            show_toast("未连上 " + server_url + " (请检查地址或端口)", 120);
+        }
+    }
+
+    void cycle_server_preset(int dir) {
+        if (g_pvp.active()) {
+            show_toast("请先退出当前对战房间再修改地址", 90);
+            return;
+        }
+        const std::vector<std::string> presets = {
+            "111.229.100.54:8765",
+            "127.0.0.1:8765"
+        };
+        int cur = -1;
+        for (size_t i = 0; i < presets.size(); ++i) {
+            if (server_url == presets[i]) { cur = static_cast<int>(i); break; }
+        }
+        int nxt = (cur < 0) ? 0 : ((cur + dir + static_cast<int>(presets.size())) % static_cast<int>(presets.size()));
+        server_url = presets[static_cast<size_t>(nxt)];
+        connect_and_probe_server();
+    }
+
+    void toggle_fps_mode() {
+        high_fps_mode = !high_fps_mode;
+        save_config();
+        show_toast(high_fps_mode ? "帧率模式: 60 FPS (丝滑插值)" : "帧率模式: 15 FPS (原版帧率)", 90);
+    }
+
+    void toggle_net_mode() {
+        if (g_pvp.active()) {
+            show_toast("请先在第一行退出当前对战房间", 90);
+            return;
+        }
+        online_mode = !online_mode;
+        save_config();
+        if (online_mode) {
+            connect_and_probe_server();
+        } else {
+            g_pvp.close_udp();
+            overlay_open_rooms.clear();
+            pvp_menu_choice = 0;
+            show_toast("通信模式: 本地离线模拟", 90);
+        }
+    }
+
+    void open_overlay(bool allow_room_probe) {
+        // Ensure OS IME preedit composition is stopped so F1/Esc/Arrow/Enter are never swallowed
+        SDL_StopTextInput();
+        clear_held_states();
+        overlay_sel_row = 0;
+        overlay_sel_col = 0;
+        overlay_scroll_top = 0;
+        overlay_waiting_bind = false;
+        overlay_text_edit_mode = 0;
+        overlay_text_edit_buf.clear();
+        overlay_ignore_next_textinput = false;
+        overlay_open = true;
+        if (allow_room_probe && !g_pvp.active()) {
+            refresh_open_rooms();
+        }
+    }
+
+    void close_overlay() {
+        overlay_open = false;
+        overlay_waiting_bind = false;
+        overlay_text_edit_mode = 0;
+        SDL_StopTextInput();
+        clear_held_states();
+    }
+
+    void exec_pvp_action() {
+        if (g_pvp.active()) {
+            uint32_t old_rm = g_pvp.room_id();
+            if (g_pvp.match_started()) {
+                g_pvp.send_match_end(0);
+            }
+            g_pvp.close_udp();
+            show_toast("已退出对战房间 #" + std::to_string(old_rm), 90);
+            close_overlay();
+            return;
+        }
+        online_mode = true;
+        save_config();
+        std::string gm = is_lon_game ? "lon" : "pon";
+        if (pvp_menu_choice == 0) {
+            if (g_pvp.create_room(server_url, player_uid, player_name, gm)) {
+                show_toast("已创建房间 #" + std::to_string(g_pvp.room_id()) + " 等待挑战者...", 180);
+                close_overlay();
+            } else {
+                show_toast("创建失败: 无法连接 " + server_url, 120);
+            }
+        } else {
+            uint32_t target_room = 0;
+            if (pvp_menu_choice >= 2 && static_cast<size_t>(pvp_menu_choice - 2) < overlay_open_rooms.size()) {
+                target_room = overlay_open_rooms[static_cast<size_t>(pvp_menu_choice - 2)].room_id;
+            }
+            if (g_pvp.join_room(server_url, target_room, player_uid, player_name, gm)) {
+                show_toast("已加入 #" + std::to_string(g_pvp.room_id()) + " VS " + g_pvp.opponent_name(), 150);
+                close_overlay();
+            } else {
+                refresh_open_rooms();
+                show_toast("暂无可加入的对战房间 (" + server_url + ")", 120);
+            }
+        }
+    }
+
+    void handle_overlay_event(const SDL_Event& ev, SDL_Window* win, SDL_Renderer* ren, int scale, bool& quit_game) {
+        if (ev.type == SDL_QUIT ||
+            (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_CLOSE)) {
+            quit_game = true;
+            close_overlay();
+            return;
+        }
+        if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+            open_controllers();
+            return;
+        }
+        if (overlay_text_edit_mode != 0) {
+            size_t max_len = (overlay_text_edit_mode == 1) ? 44 : 18;
+            bool no_space = (overlay_text_edit_mode == 1);
+            if (ev.type == SDL_TEXTINPUT) {
+                if (overlay_ignore_next_textinput) {
+                    overlay_ignore_next_textinput = false;
+                } else {
+                    sanitize_append(overlay_text_edit_buf, ev.text.text, no_space, max_len);
+                }
+            } else if (ev.type == SDL_KEYDOWN) {
+                overlay_ignore_next_textinput = false;
+                SDL_Keycode k = ev.key.keysym.sym;
+                uint16_t mod = ev.key.keysym.mod;
+                if (k == SDLK_ESCAPE || k == SDLK_F1) {
+                    overlay_text_edit_mode = 0;
+                    SDL_StopTextInput();
+                } else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
+                    std::string trimmed = trim(overlay_text_edit_buf);
+                    if (!trimmed.empty()) {
+                        if (overlay_text_edit_mode == 1) {
+                            if (trimmed.find(':') == std::string::npos) {
+                                trimmed += ":8765";
+                            }
+                            overlay_text_edit_mode = 0;
+                            SDL_StopTextInput();
+                            if (!g_pvp.active()) {
+                                server_url = trimmed;
+                                connect_and_probe_server();
+                            } else {
+                                show_toast("请先退出当前对战房间再修改地址", 90);
+                            }
+                        } else {
+                            player_name = trimmed;
+                            save_config();
+                            overlay_text_edit_mode = 0;
+                            SDL_StopTextInput();
+                            show_toast("玩家昵称已更新: " + player_name, 90);
+                        }
+                    } else {
+                        overlay_text_edit_mode = 0;
+                        SDL_StopTextInput();
+                    }
+                } else if (k == SDLK_BACKSPACE) {
+                    if (mod & KMOD_CTRL) overlay_text_edit_buf.clear();
+                    else pop_utf8_char(overlay_text_edit_buf);
+                } else if (k == SDLK_DELETE) {
+                    overlay_text_edit_buf.clear();
+                } else if ((mod & KMOD_CTRL) && k == SDLK_v) {
+                    if (SDL_HasClipboardText()) {
+                        char* clip = SDL_GetClipboardText();
+                        if (clip) {
+                            sanitize_append(overlay_text_edit_buf, clip, no_space, max_len);
+                            SDL_free(clip);
+                        }
+                    }
+                }
+            }
+        } else if (overlay_waiting_bind) {
+            if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
+                SDL_Keycode k = ev.key.keysym.sym;
+                int bind_idx = overlay_sel_row - BIND_START_ROW;
+                if (k == SDLK_ESCAPE || k == SDLK_F1 || bind_idx < 0 || bind_idx >= ACT_COUNT) {
+                    overlay_waiting_bind = false;
+                } else if (k == SDLK_BACKSPACE || k == SDLK_DELETE) {
+                    if (overlay_sel_col < 2) assign_key_unique(bind_idx, overlay_sel_col, SDLK_UNKNOWN);
+                    else assign_pad_unique(bind_idx, SDL_CONTROLLER_BUTTON_INVALID);
+                    save_config();
+                    overlay_waiting_bind = false;
+                } else {
+                    int target_slot = (overlay_sel_col < 2) ? overlay_sel_col : 0;
+                    assign_key_unique(bind_idx, target_slot, k);
+                    save_config();
+                    overlay_waiting_bind = false;
+                }
+            } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
+                int bind_idx = overlay_sel_row - BIND_START_ROW;
+                if (bind_idx >= 0 && bind_idx < ACT_COUNT) {
+                    assign_pad_unique(bind_idx, ev.cbutton.button);
+                    overlay_sel_col = 2;
+                    save_config();
+                }
+                overlay_waiting_bind = false;
+            }
+        } else {
+            auto adjust_row_lr = [&](int dir) {
+                if (overlay_sel_row == 0 && !g_pvp.active()) {
+                    if (online_mode) refresh_open_rooms();
+                    int max_choices = 2 + static_cast<int>(overlay_open_rooms.size());
+                    pvp_menu_choice = (pvp_menu_choice + dir + max_choices) % max_choices;
+                } else if (overlay_sel_row == 1) {
+                    cycle_server_preset(dir);
+                } else if (overlay_sel_row == 3) {
+                    toggle_net_mode();
+                } else if (overlay_sel_row == 4) {
+                    std::lock_guard<std::mutex> lk(g_audio.mtx);
+                    g_audio.muted = false;
+                    g_audio.master_volume = std::clamp(g_audio.master_volume + dir * 5, 0, 100);
+                    save_config();
+                } else if (overlay_sel_row == 5) {
+                    toggle_fps_mode();
+                } else if (overlay_sel_row == 6) {
+                    show_softkey_bar = !show_softkey_bar;
+                    apply_softbar_geometry(win, ren, scale);
+                    save_config();
+                } else if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
+                    overlay_sel_col = (overlay_sel_col + dir + 3) % 3;
+                }
+            };
+            auto activate_row = [&]() {
+                if (overlay_sel_row == 0) {
+                    exec_pvp_action();
+                } else if (overlay_sel_row == 1) {
+                    if (g_pvp.active()) {
+                        show_toast("请先退出当前对战房间再修改地址", 90);
+                    } else {
+                        overlay_text_edit_mode = 1;
+                        overlay_text_edit_buf = server_url;
+                        overlay_ignore_next_textinput = true;
+                        SDL_StartTextInput();
+                    }
+                } else if (overlay_sel_row == 2) {
+                    overlay_text_edit_mode = 2;
+                    overlay_text_edit_buf = player_name;
+                    overlay_ignore_next_textinput = true;
+                    SDL_StartTextInput();
+                } else if (overlay_sel_row == 3) {
+                    toggle_net_mode();
+                } else if (overlay_sel_row == 4) {
+                    {
+                        std::lock_guard<std::mutex> lk(g_audio.mtx);
+                        g_audio.muted = !g_audio.muted;
+                    }
+                    save_config();
+                } else if (overlay_sel_row == 5) {
+                    toggle_fps_mode();
+                } else if (overlay_sel_row == 6) {
+                    show_softkey_bar = !show_softkey_bar;
+                    apply_softbar_geometry(win, ren, scale);
+                    save_config();
+                } else if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
+                    overlay_waiting_bind = true;
+                } else if (overlay_sel_row == BIND_END_ROW) {
+                    reset_defaults();
+                    save_config();
+                    show_toast("已恢复默认按键配置");
+                } else if (overlay_sel_row == BIND_END_ROW + 1) {
+                    close_overlay();
+                } else if (overlay_sel_row == BIND_END_ROW + 2) {
+                    quit_game = true;
+                    close_overlay();
+                }
+            };
+
+            auto matches_act = [&](int act_idx, SDL_Keycode k) {
+                return (binds[act_idx].keys[0] != SDLK_UNKNOWN && binds[act_idx].keys[0] == k) ||
+                       (binds[act_idx].keys[1] != SDLK_UNKNOWN && binds[act_idx].keys[1] == k);
+            };
+
+            if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
+                SDL_Keycode k = ev.key.keysym.sym;
+                bool in_bind_rows = (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW);
+                if (k == SDLK_F1 || k == SDLK_ESCAPE || (!in_bind_rows && matches_act(ACT_CANCEL, k))) {
+                    close_overlay();
+                } else if (k == SDLK_F3) {
+                    toggle_fps_mode();
+                } else if (k == SDLK_UP || matches_act(ACT_UP, k)) {
+                    overlay_sel_row = (overlay_sel_row - 1 + TOTAL_ROWS) % TOTAL_ROWS;
+                } else if (k == SDLK_DOWN || matches_act(ACT_DOWN, k)) {
+                    overlay_sel_row = (overlay_sel_row + 1) % TOTAL_ROWS;
+                } else if (k == SDLK_LEFT || matches_act(ACT_LEFT, k)) {
+                    adjust_row_lr(-1);
+                } else if (k == SDLK_RIGHT || matches_act(ACT_RIGHT, k)) {
+                    adjust_row_lr(1);
+                } else if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE ||
+                           (!in_bind_rows && matches_act(ACT_SELECT, k))) {
+                    activate_row();
+                } else if ((k == SDLK_DELETE || k == SDLK_BACKSPACE) && in_bind_rows) {
+                    int bind_idx = overlay_sel_row - BIND_START_ROW;
+                    if (overlay_sel_col < 2) assign_key_unique(bind_idx, overlay_sel_col, SDLK_UNKNOWN);
+                    else assign_pad_unique(bind_idx, SDL_CONTROLLER_BUTTON_INVALID);
+                    save_config();
+                } else if (k == SDLK_F11) {
+                    toggle_fullscreen(win);
+                }
+            } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
+                switch (ev.cbutton.button) {
+                    case SDL_CONTROLLER_BUTTON_DPAD_UP:
+                        overlay_sel_row = (overlay_sel_row - 1 + TOTAL_ROWS) % TOTAL_ROWS; break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+                        overlay_sel_row = (overlay_sel_row + 1) % TOTAL_ROWS; break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+                        adjust_row_lr(-1); break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+                        adjust_row_lr(1); break;
+                    case SDL_CONTROLLER_BUTTON_A:
+                        activate_row(); break;
+                    case SDL_CONTROLLER_BUTTON_B:
+                    case SDL_CONTROLLER_BUTTON_START:
+                        close_overlay(); break;
+                    default: break;
+                }
+            }
+        }
+
+        if (overlay_sel_row < overlay_scroll_top) overlay_scroll_top = overlay_sel_row;
+        if (overlay_sel_row >= overlay_scroll_top + VISIBLE_ROWS) overlay_scroll_top = overlay_sel_row - VISIBLE_ROWS + 1;
+    }
+
+    void render_overlay_onto_display_buf() {
+        bool live_pvp = g_pvp.active();
+        fill_rect_alpha(display_buf, 240, 260, 0, 0, 240, 240, live_pvp ? 0xB8080C18u : 0xDC080C18u);
+
+        // Title bar
+        fill_rect_alpha(display_buf, 240, 260, 4, 4, 232, 18, live_pvp ? 0xFF14362Au : 0xFF1A284Au);
+        draw_rect_border(display_buf, 240, 260, 4, 4, 232, 18, live_pvp ? 0xFF4CC88Au : 0xFF4F78C8u);
+        std::string title = live_pvp
+            ? (g_pvp.match_started() ? "联机菜单 — 对战后台运行中 (F1关闭)" : "联机菜单 — 房间等待中 (F1关闭)")
+            : "联机对战与模拟器设置 (F1 / Esc)";
+        draw_ui_text(display_buf, 240, 260, title, 120 - measure_ui_text(title) / 2, 17, 0xFFFFFFFFu);
+
+        // Dynamic section header
+        if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
+            draw_ui_text(display_buf, 240, 260, "动作",  8,   34, 0xFF8EB0E8u);
+            draw_ui_text(display_buf, 240, 260, "键位1", 80,  34, 0xFF8EB0E8u);
+            draw_ui_text(display_buf, 240, 260, "键位2", 136, 34, 0xFF8EB0E8u);
+            draw_ui_text(display_buf, 240, 260, "手柄",  192, 34, 0xFF8EB0E8u);
+        } else {
+            draw_ui_text(display_buf, 240, 260, "功能选项", 8, 34, 0xFF8EB0E8u);
+            draw_ui_text(display_buf, 240, 260, "当前设置 (Enter确认 / ←→切换)", 74, 34, 0xFF8EB0E8u);
+        }
+        fill_rect_alpha(display_buf, 240, 260, 6, 37, 228, 1, 0xFF324672u);
+
+        // Rows viewport (y = 40 .. 193, 9 rows * 17px)
+        for (int vi = 0; vi < VISIBLE_ROWS; ++vi) {
+            int r = overlay_scroll_top + vi;
+            if (r >= TOTAL_ROWS) break;
+            int ry = 40 + vi * 17;
+            bool is_sel = (r == overlay_sel_row);
+            if (is_sel) {
+                fill_rect_alpha(display_buf, 240, 260, 5, ry, 226, 16, 0xFF223A6Au);
+                draw_rect_border(display_buf, 240, 260, 5, ry, 226, 16, 0xFF5A8AE0u);
+            }
+
+            if (r == 0) {
+                draw_ui_text(display_buf, 240, 260, "联机对战", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFFFE484u);
+                std::string pstr;
+                uint32_t pcol = 0xFFFFD874u;
+                if (g_pvp.active()) {
+                    pstr = g_pvp.match_started()
+                        ? ("[ 退出对战 #" + std::to_string(g_pvp.room_id()) + " ]")
+                        : ("[ 取消等待 #" + std::to_string(g_pvp.room_id()) + " ]");
+                    pcol = 0xFF88FFAAu;
+                } else if (pvp_menu_choice == 0) {
+                    pstr = "< 创建对战房间 >";
+                } else if (pvp_menu_choice == 1) {
+                    pstr = "< 快速加入配对 >";
+                } else if (static_cast<size_t>(pvp_menu_choice - 2) < overlay_open_rooms.size()) {
+                    const auto& rm = overlay_open_rooms[static_cast<size_t>(pvp_menu_choice - 2)];
+                    pstr = "< #" + std::to_string(rm.room_id) + " " + rm.host + " >";
+                    pcol = 0xFF74D8FFu;
+                } else {
+                    pstr = "< 快速加入配对 >";
+                }
+                draw_ui_text(display_buf, 240, 260, pstr, 84, ry + 12, pcol);
+            } else if (r == 1) {
+                draw_ui_text(display_buf, 240, 260, "服务器地址", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                std::string disp_srv = server_url;
+                if (disp_srv.size() > 21) disp_srv = disp_srv.substr(0, 20) + "..";
+                std::string ustr = "[" + disp_srv + "]";
+                draw_ui_text(display_buf, 240, 260, ustr, 76, ry + 12, is_sel ? 0xFF88EEFFu : 0xFF74D8FFu);
+            } else if (r == 2) {
+                draw_ui_text(display_buf, 240, 260, "玩家昵称", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                std::string nstr = "[" + player_name + "]";
+                draw_ui_text(display_buf, 240, 260, nstr, 84, ry + 12, is_sel ? 0xFFFFEC88u : 0xFF88FFAAu);
+            } else if (r == 3) {
+                draw_ui_text(display_buf, 240, 260, "通信模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                std::string nstr = online_mode ? "< 在线服务器 >" : "< 本地离线模拟 >";
+                draw_ui_text(display_buf, 240, 260, nstr, 86, ry + 12, online_mode ? 0xFF74D8FFu : 0xFF98A8C0u);
+            } else if (r == 4) {
+                int vol = 100;
+                bool muted = false;
+                {
+                    std::lock_guard<std::mutex> lk(g_audio.mtx);
+                    vol = g_audio.master_volume;
+                    muted = g_audio.muted;
+                }
+                draw_ui_text(display_buf, 240, 260, "主音量", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                std::string vstr = muted ? ("< 静音 (" + std::to_string(vol) + "%) >") : ("< " + std::to_string(vol) + "% >");
+                draw_ui_text(display_buf, 240, 260, vstr, 102, ry + 12, muted ? 0xFFFF8888u : 0xFF88FFAAu);
+            } else if (r == 5) {
+                draw_ui_text(display_buf, 240, 260, "帧率模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                std::string fstr = high_fps_mode ? "< 60 FPS 丝滑插值 >" : "< 15 FPS 原版帧率 >";
+                draw_ui_text(display_buf, 240, 260, fstr, 84, ry + 12, high_fps_mode ? 0xFF88FFAAu : 0xFFFFD874u);
+            } else if (r == 6) {
+                draw_ui_text(display_buf, 240, 260, "底部软键栏", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                std::string sstr = show_softkey_bar ? "< 开启 >" : "< 关闭 >";
+                draw_ui_text(display_buf, 240, 260, sstr, 110, ry + 12, show_softkey_bar ? 0xFF88FFAAu : 0xFF98A8C0u);
+            } else if (r >= BIND_START_ROW && r < BIND_END_ROW) {
+                int bi = r - BIND_START_ROW;
+                draw_ui_text(display_buf, 240, 260, binds[bi].label_zh, 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                std::string cols[3] = {
+                    short_key_name(binds[bi].keys[0]),
+                    short_key_name(binds[bi].keys[1]),
+                    short_pad_name(binds[bi].pad_btn)
+                };
+                int cx[3] = {74, 130, 186};
+                int cw[3] = {52, 52, 42};
+                for (int c = 0; c < 3; ++c) {
+                    bool cell_sel = is_sel && (overlay_sel_col == c);
+                    if (cell_sel) {
+                        fill_rect_alpha(display_buf, 240, 260, cx[c], ry + 1, cw[c], 14, 0xFF345898u);
+                        draw_rect_border(display_buf, 240, 260, cx[c], ry + 1, cw[c], 14, 0xFFFFD24Cu);
+                    }
+                    int tw = measure_ui_text(cols[c]);
+                    uint32_t tcol = (cols[c] == "---") ? 0xFF687898u : (cell_sel ? 0xFFFFEC88u : 0xFFE8F0FFu);
+                    draw_ui_text(display_buf, 240, 260, cols[c], cx[c] + (cw[c] - tw) / 2, ry + 12, tcol);
+                }
+            } else if (r == BIND_END_ROW) {
+                std::string lbl = "[ 恢复默认按键配置 ]";
+                draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFFD866u : 0xFFC8D8F8u);
+            } else if (r == BIND_END_ROW + 1) {
+                std::string lbl = "[ 返回游戏 (Resume) ]";
+                draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFF88FFAAu : 0xFFC8D8F8u);
+            } else if (r == BIND_END_ROW + 2) {
+                std::string lbl = "[ 保存进度并退出 ]";
+                draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFF8888u : 0xFFE8B8B8u);
+            }
+        }
+
+        // Scrollbar track on right edge
+        fill_rect_alpha(display_buf, 240, 260, 233, 40, 3, VISIBLE_ROWS * 17, 0xFF182238u);
+        int sb_h = std::max(14, (VISIBLE_ROWS * 17 * VISIBLE_ROWS) / TOTAL_ROWS);
+        int sb_y = 40 + ((VISIBLE_ROWS * 17 - sb_h) * overlay_scroll_top) / std::max(1, TOTAL_ROWS - VISIBLE_ROWS);
+        fill_rect_alpha(display_buf, 240, 260, 233, sb_y, 3, sb_h, 0xFF6894E0u);
+
+        // Footer instructions
+        fill_rect_alpha(display_buf, 240, 260, 6, 196, 228, 1, 0xFF324672u);
+        if (overlay_sel_row == 1) {
+            draw_ui_text(display_buf, 240, 260, "Enter:手动输入/粘贴地址  ←→:预设切换", 6, 211, 0xFF88EEFFu);
+        } else if (overlay_sel_row == 2) {
+            draw_ui_text(display_buf, 240, 260, "Enter:输入/粘贴昵称 (自动保存)", 14, 211, 0xFFFFEC88u);
+        } else if (overlay_sel_row == 0) {
+            if (live_pvp) {
+                draw_ui_text(display_buf, 240, 260, "Enter:立即退出房间   F1/Esc:继续对战", 10, 211, 0xFF88FFAAu);
+            } else {
+                draw_ui_text(display_buf, 240, 260, "←→:选建房/快速加入/房间号  Enter:出发!", 6, 211, 0xFFFFE484u);
+            }
+        } else {
+            draw_ui_text(display_buf, 240, 260, "↑↓:换行  ←→:切换/选槽  Enter:确认/改键", 6, 211, 0xFFA4BCE4u);
+        }
+        draw_ui_text(display_buf, 240, 260, "↓下滑设置按键 | F3:帧率 F11:全屏 F12:截图", 4, 227, 0xFF849AC0u);
+
+        // Text input modal popup (Server URL / Player Nickname)
+        if (overlay_text_edit_mode != 0) {
+            fill_rect_alpha(display_buf, 240, 260, 8, 62, 224, 106, 0xF60C162Cu);
+            draw_rect_border(display_buf, 240, 260, 8, 62, 224, 106, 0xFF68B8FFu);
+            std::string hdr = (overlay_text_edit_mode == 1)
+                ? "输入服务器地址 (IP:端口)"
+                : "输入联机玩家昵称";
+            draw_ui_text(display_buf, 240, 260, hdr, 120 - measure_ui_text(hdr) / 2, 82, 0xFFFFE070u);
+
+            fill_rect_alpha(display_buf, 240, 260, 16, 94, 208, 24, 0xFF060B18u);
+            draw_rect_border(display_buf, 240, 260, 16, 94, 208, 24, 0xFF88D8FFu);
+            std::string cursor_txt = overlay_text_edit_buf + "_";
+            while (measure_ui_text(cursor_txt) > 198 && cursor_txt.size() > 2) {
+                cursor_txt.erase(0, 1);
+            }
+            draw_ui_text(display_buf, 240, 260, cursor_txt, 22, 111, 0xFFFFFFFFu);
+
+            std::string h1 = "支持直接打字或 Ctrl+V 粘贴剪贴板";
+            std::string h2 = "Enter:保存确认   Backspace:退格   Esc:取消";
+            draw_ui_text(display_buf, 240, 260, h1, 120 - measure_ui_text(h1) / 2, 136, 0xFF88CCFFu);
+            draw_ui_text(display_buf, 240, 260, h2, 120 - measure_ui_text(h2) / 2, 155, 0xFFA0B8E0u);
+        }
+
+        // Waiting for key modal popup
+        if (overlay_waiting_bind && overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
+            int bi = overlay_sel_row - BIND_START_ROW;
+            fill_rect_alpha(display_buf, 240, 260, 12, 72, 216, 86, 0xF4101830u);
+            draw_rect_border(display_buf, 240, 260, 12, 72, 216, 86, 0xFFFFD24Cu);
+            std::string p1 = std::string("正在设置: ") + binds[bi].label_zh;
+            std::string p2 = "请按下键盘按键或手柄按钮...";
+            std::string p3 = "Esc:取消   Backspace:清空槽位";
+            draw_ui_text(display_buf, 240, 260, p1, 120 - measure_ui_text(p1) / 2, 95,  0xFFFFE070u);
+            draw_ui_text(display_buf, 240, 260, p2, 120 - measure_ui_text(p2) / 2, 118, 0xFFFFFFFFu);
+            draw_ui_text(display_buf, 240, 260, p3, 120 - measure_ui_text(p3) / 2, 142, 0xFFA0B8E0u);
+        }
+    }
+
+    // Blocking pause modal used ONLY in single-player (!g_pvp.active()).
+    // Returns true if user chose "Save & Quit".
     bool run_pause_config_modal(SDL_Window* win, SDL_Renderer* ren, SDL_Texture* tex, const uint32_t* game_fb, int scale) {
         if (!win || !ren || !tex) return false;
         auto pause_t0 = std::chrono::steady_clock::now();
         if (g_audio.dev_id != 0) SDL_PauseAudioDevice(g_audio.dev_id, 1);
 
-        constexpr int TOTAL_ROWS = ACT_COUNT + 8; // 10 binds + Vol + FPS + SoftBar + NetMode + PvP + Reset + Resume + Quit
-        constexpr int VISIBLE_ROWS = 9;
-        int sel_row = 0;
-        int sel_col = 0; // 0 = Key1, 1 = Key2, 2 = Pad
-        int scroll_top = 0;
-        bool waiting_bind = false;
-        bool menu_open = true;
+        open_overlay(true);
         bool quit_game = false;
 
-        auto toggle_fps_mode = [&]() {
-            high_fps_mode = !high_fps_mode;
-            save_config();
-            show_toast(high_fps_mode ? "帧率模式: 60 FPS (丝滑插值)" : "帧率模式: 15 FPS (原版帧率)", 90);
-        };
-
-        auto toggle_net_mode = [&]() {
-            online_mode = !online_mode;
-            save_config();
-            if (online_mode) {
-                std::string stat_msg;
-                if (pvp::PvpClientSession::check_server_status(server_url, stat_msg)) {
-                    show_toast("已连接服务器 (" + stat_msg + ")", 120);
-                } else {
-                    show_toast("在线模式已开启 (未连接时自动本地回退)", 120);
-                }
-            } else {
-                g_pvp.close_udp();
-                show_toast("通信模式: 本地离线模拟", 90);
-            }
-        };
-
-        auto exec_pvp_action = [&]() {
-            if (g_pvp.active()) {
-                uint32_t old_rm = g_pvp.room_id();
-                g_pvp.close_udp();
-                show_toast("已退出对战房间 #" + std::to_string(old_rm), 90);
-                return;
-            }
-            online_mode = true;
-            save_config();
-            std::string gm = is_lon_game ? "lon" : "pon";
-            if (pvp_menu_choice == 0) {
-                if (g_pvp.create_room(server_url, player_uid, player_name, gm)) {
-                    show_toast("已创建对战房间 #" + std::to_string(g_pvp.room_id()) + " 等待加入...", 150);
-                } else {
-                    show_toast("创建失败: 无法连接 " + server_url, 120);
-                }
-            } else {
-                if (g_pvp.join_room(server_url, 0, player_uid, player_name, gm)) {
-                    show_toast("已加入 #" + std::to_string(g_pvp.room_id()) + " 对手:" + g_pvp.opponent_name(), 150);
-                } else {
-                    show_toast("暂无等待中的对战房间 (" + server_url + ")", 120);
-                }
-            }
-        };
-
-        while (menu_open) {
+        while (overlay_open) {
             if (g_quit_signal.load(std::memory_order_relaxed)) {
                 quit_game = true;
-                menu_open = false;
+                close_overlay();
                 break;
             }
             if (g_pvp.poll_udp()) {
                 show_toast("对战配对成功! VS " + g_pvp.opponent_name(), 150);
+                close_overlay();
+                break;
             }
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
-                if (ev.type == SDL_QUIT ||
-                    (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_CLOSE)) {
-                    quit_game = true;
-                    menu_open = false;
-                    break;
-                } else if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-                    open_controllers();
-                } else if (waiting_bind) {
-                    if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
-                        SDL_Keycode k = ev.key.keysym.sym;
-                        if (k == SDLK_ESCAPE || k == SDLK_F1) {
-                            waiting_bind = false;
-                        } else if (k == SDLK_BACKSPACE || k == SDLK_DELETE) {
-                            if (sel_col < 2) assign_key_unique(sel_row, sel_col, SDLK_UNKNOWN);
-                            else assign_pad_unique(sel_row, SDL_CONTROLLER_BUTTON_INVALID);
-                            save_config();
-                            waiting_bind = false;
-                        } else {
-                            int target_slot = (sel_col < 2) ? sel_col : 0;
-                            assign_key_unique(sel_row, target_slot, k);
-                            save_config();
-                            waiting_bind = false;
-                        }
-                    } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
-                        assign_pad_unique(sel_row, ev.cbutton.button);
-                        sel_col = 2;
-                        save_config();
-                        waiting_bind = false;
-                    }
-                } else {
-                    auto adjust_row_lr = [&](int dir) {
-                        if (sel_row < ACT_COUNT) {
-                            sel_col = (sel_col + dir + 3) % 3;
-                        } else if (sel_row == ACT_COUNT) {
-                            std::lock_guard<std::mutex> lk(g_audio.mtx);
-                            g_audio.muted = false;
-                            g_audio.master_volume = std::clamp(g_audio.master_volume + dir * 5, 0, 100);
-                            save_config();
-                        } else if (sel_row == ACT_COUNT + 1) {
-                            toggle_fps_mode();
-                        } else if (sel_row == ACT_COUNT + 2) {
-                            show_softkey_bar = !show_softkey_bar;
-                            apply_softbar_geometry(win, ren, scale);
-                            save_config();
-                        } else if (sel_row == ACT_COUNT + 3) {
-                            toggle_net_mode();
-                        } else if (sel_row == ACT_COUNT + 4 && !g_pvp.active()) {
-                            pvp_menu_choice = 1 - pvp_menu_choice;
-                        }
-                    };
-                    auto activate_row = [&]() {
-                        if (sel_row < ACT_COUNT) {
-                            waiting_bind = true;
-                        } else if (sel_row == ACT_COUNT) {
-                            {
-                                std::lock_guard<std::mutex> lk(g_audio.mtx);
-                                g_audio.muted = !g_audio.muted;
-                            }
-                            save_config();
-                        } else if (sel_row == ACT_COUNT + 1) {
-                            toggle_fps_mode();
-                        } else if (sel_row == ACT_COUNT + 2) {
-                            show_softkey_bar = !show_softkey_bar;
-                            apply_softbar_geometry(win, ren, scale);
-                            save_config();
-                        } else if (sel_row == ACT_COUNT + 3) {
-                            toggle_net_mode();
-                        } else if (sel_row == ACT_COUNT + 4) {
-                            exec_pvp_action();
-                        } else if (sel_row == ACT_COUNT + 5) {
-                            reset_defaults();
-                            save_config();
-                            show_toast("已恢复默认按键配置");
-                        } else if (sel_row == ACT_COUNT + 6) {
-                            menu_open = false;
-                        } else if (sel_row == ACT_COUNT + 7) {
-                            quit_game = true;
-                            menu_open = false;
-                        }
-                    };
-
-                    if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
-                        SDL_Keycode k = ev.key.keysym.sym;
-                        if (k == SDLK_F1 || k == SDLK_ESCAPE) {
-                            menu_open = false;
-                        } else if (k == SDLK_F3) {
-                            toggle_fps_mode();
-                        } else if (k == SDLK_UP) {
-                            sel_row = (sel_row - 1 + TOTAL_ROWS) % TOTAL_ROWS;
-                        } else if (k == SDLK_DOWN) {
-                            sel_row = (sel_row + 1) % TOTAL_ROWS;
-                        } else if (k == SDLK_LEFT) {
-                            adjust_row_lr(-1);
-                        } else if (k == SDLK_RIGHT) {
-                            adjust_row_lr(1);
-                        } else if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) {
-                            activate_row();
-                        } else if ((k == SDLK_DELETE || k == SDLK_BACKSPACE) && sel_row < ACT_COUNT) {
-                            if (sel_col < 2) assign_key_unique(sel_row, sel_col, SDLK_UNKNOWN);
-                            else assign_pad_unique(sel_row, SDL_CONTROLLER_BUTTON_INVALID);
-                            save_config();
-                        } else if (k == SDLK_F11) {
-                            toggle_fullscreen(win);
-                        }
-                    } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
-                        switch (ev.cbutton.button) {
-                            case SDL_CONTROLLER_BUTTON_DPAD_UP:
-                                sel_row = (sel_row - 1 + TOTAL_ROWS) % TOTAL_ROWS; break;
-                            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-                                sel_row = (sel_row + 1) % TOTAL_ROWS; break;
-                            case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-                                adjust_row_lr(-1); break;
-                            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-                                adjust_row_lr(1); break;
-                            case SDL_CONTROLLER_BUTTON_A:
-                                activate_row(); break;
-                            case SDL_CONTROLLER_BUTTON_B:
-                            case SDL_CONTROLLER_BUTTON_START:
-                                menu_open = false; break;
-                            default: break;
-                        }
-                    }
-                }
+                handle_overlay_event(ev, win, ren, scale, quit_game);
+                if (!overlay_open) break;
             }
+            if (!overlay_open) break;
 
-            if (sel_row < scroll_top) scroll_top = sel_row;
-            if (sel_row >= scroll_top + VISIBLE_ROWS) scroll_top = sel_row - VISIBLE_ROWS + 1;
-
-            // Compose background + translucent modal panel
             compose_display_buffer(game_fb, 0, true);
-            fill_rect_alpha(display_buf, 240, 260, 0, 0, 240, 240, 0xDC080C18u);
-
-            // Title bar
-            fill_rect_alpha(display_buf, 240, 260, 4, 4, 232, 18, 0xFF1A284Au);
-            draw_rect_border(display_buf, 240, 260, 4, 4, 232, 18, 0xFF4F78C8u);
-            std::string title = "按键与模拟器设置 (F1 / Esc)";
-            draw_ui_text(display_buf, 240, 260, title, 120 - measure_ui_text(title) / 2, 17, 0xFFFFFFFFu);
-
-            // Column headers
-            draw_ui_text(display_buf, 240, 260, "动作",  8,   34, 0xFF8EB0E8u);
-            draw_ui_text(display_buf, 240, 260, "键位1", 80,  34, 0xFF8EB0E8u);
-            draw_ui_text(display_buf, 240, 260, "键位2", 136, 34, 0xFF8EB0E8u);
-            draw_ui_text(display_buf, 240, 260, "手柄",  192, 34, 0xFF8EB0E8u);
-            fill_rect_alpha(display_buf, 240, 260, 6, 37, 228, 1, 0xFF324672u);
-
-            // Rows viewport (y = 40 .. 193, 9 rows * 17px)
-            for (int vi = 0; vi < VISIBLE_ROWS; ++vi) {
-                int r = scroll_top + vi;
-                if (r >= TOTAL_ROWS) break;
-                int ry = 40 + vi * 17;
-                bool is_sel = (r == sel_row);
-                if (is_sel) {
-                    fill_rect_alpha(display_buf, 240, 260, 5, ry, 226, 16, 0xFF223A6Au);
-                    draw_rect_border(display_buf, 240, 260, 5, ry, 226, 16, 0xFF5A8AE0u);
-                }
-
-                if (r < ACT_COUNT) {
-                    draw_ui_text(display_buf, 240, 260, binds[r].label_zh, 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
-                    std::string cols[3] = {
-                        short_key_name(binds[r].keys[0]),
-                        short_key_name(binds[r].keys[1]),
-                        short_pad_name(binds[r].pad_btn)
-                    };
-                    int cx[3] = {74, 130, 186};
-                    int cw[3] = {52, 52, 42};
-                    for (int c = 0; c < 3; ++c) {
-                        bool cell_sel = is_sel && (sel_col == c);
-                        if (cell_sel) {
-                            fill_rect_alpha(display_buf, 240, 260, cx[c], ry + 1, cw[c], 14, 0xFF345898u);
-                            draw_rect_border(display_buf, 240, 260, cx[c], ry + 1, cw[c], 14, 0xFFFFD24Cu);
-                        }
-                        int tw = measure_ui_text(cols[c]);
-                        uint32_t tcol = (cols[c] == "---") ? 0xFF687898u : (cell_sel ? 0xFFFFEC88u : 0xFFE8F0FFu);
-                        draw_ui_text(display_buf, 240, 260, cols[c], cx[c] + (cw[c] - tw) / 2, ry + 12, tcol);
-                    }
-                } else if (r == ACT_COUNT) {
-                    int vol = 100;
-                    bool muted = false;
-                    {
-                        std::lock_guard<std::mutex> lk(g_audio.mtx);
-                        vol = g_audio.master_volume;
-                        muted = g_audio.muted;
-                    }
-                    draw_ui_text(display_buf, 240, 260, "主音量", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
-                    std::string vstr = muted ? ("< 静音 (" + std::to_string(vol) + "%) >") : ("< " + std::to_string(vol) + "% >");
-                    draw_ui_text(display_buf, 240, 260, vstr, 110, ry + 12, muted ? 0xFFFF8888u : 0xFF88FFAAu);
-                } else if (r == ACT_COUNT + 1) {
-                    draw_ui_text(display_buf, 240, 260, "帧率模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
-                    std::string fstr = high_fps_mode ? "< 60 FPS 丝滑插值 >" : "< 15 FPS 原版帧率 >";
-                    draw_ui_text(display_buf, 240, 260, fstr, 86, ry + 12, high_fps_mode ? 0xFF88FFAAu : 0xFFFFD874u);
-                } else if (r == ACT_COUNT + 2) {
-                    draw_ui_text(display_buf, 240, 260, "底部软键栏", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
-                    std::string sstr = show_softkey_bar ? "< 开启 >" : "< 关闭 >";
-                    draw_ui_text(display_buf, 240, 260, sstr, 118, ry + 12, show_softkey_bar ? 0xFF88FFAAu : 0xFF98A8C0u);
-                } else if (r == ACT_COUNT + 3) {
-                    draw_ui_text(display_buf, 240, 260, "通信模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
-                    std::string nstr = online_mode ? "< 在线服务器 >" : "< 本地离线模拟 >";
-                    draw_ui_text(display_buf, 240, 260, nstr, 98, ry + 12, online_mode ? 0xFF74D8FFu : 0xFF88FFAAu);
-                } else if (r == ACT_COUNT + 4) {
-                    draw_ui_text(display_buf, 240, 260, "联机对战", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
-                    std::string pstr;
-                    uint32_t pcol = 0xFFFFD874u;
-                    if (g_pvp.active()) {
-                        pstr = g_pvp.match_started()
-                            ? ("[ 退出对战 #" + std::to_string(g_pvp.room_id()) + " ]")
-                            : ("[ 取消等待 #" + std::to_string(g_pvp.room_id()) + " ]");
-                        pcol = 0xFF88FFAAu;
-                    } else {
-                        pstr = (pvp_menu_choice == 0) ? "< 创建对战房间 >" : "< 加入对战房间 >";
-                    }
-                    draw_ui_text(display_buf, 240, 260, pstr, 94, ry + 12, pcol);
-                } else if (r == ACT_COUNT + 5) {
-                    std::string lbl = "[ 恢复默认按键配置 ]";
-                    draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFFD866u : 0xFFC8D8F8u);
-                } else if (r == ACT_COUNT + 6) {
-                    std::string lbl = "[ 返回游戏 (Resume) ]";
-                    draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFF88FFAAu : 0xFFC8D8F8u);
-                } else if (r == ACT_COUNT + 7) {
-                    std::string lbl = "[ 保存进度并退出 ]";
-                    draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFF8888u : 0xFFE8B8B8u);
-                }
-            }
-
-            // Scrollbar track on right edge
-            fill_rect_alpha(display_buf, 240, 260, 233, 40, 3, VISIBLE_ROWS * 17, 0xFF182238u);
-            int sb_h = std::max(14, (VISIBLE_ROWS * 17 * VISIBLE_ROWS) / TOTAL_ROWS);
-            int sb_y = 40 + ((VISIBLE_ROWS * 17 - sb_h) * scroll_top) / std::max(1, TOTAL_ROWS - VISIBLE_ROWS);
-            fill_rect_alpha(display_buf, 240, 260, 233, sb_y, 3, sb_h, 0xFF6894E0u);
-
-            // Footer instructions
-            fill_rect_alpha(display_buf, 240, 260, 6, 196, 228, 1, 0xFF324672u);
-            draw_ui_text(display_buf, 240, 260, "↑↓←→:选择  Enter:改键  Del:清空", 8, 211, 0xFFA4BCE4u);
-            draw_ui_text(display_buf, 240, 260, "F2:软键栏 F3:60/15帧 F11:全屏 F12:截图", 6, 227, 0xFF849AC0u);
-
-            // Waiting for key modal popup
-            if (waiting_bind && sel_row < ACT_COUNT) {
-                fill_rect_alpha(display_buf, 240, 260, 12, 72, 216, 86, 0xF4101830u);
-                draw_rect_border(display_buf, 240, 260, 12, 72, 216, 86, 0xFFFFD24Cu);
-                std::string p1 = std::string("正在设置: ") + binds[sel_row].label_zh;
-                std::string p2 = "请按下键盘按键或手柄按钮...";
-                std::string p3 = "Esc:取消   Backspace:清空槽位";
-                draw_ui_text(display_buf, 240, 260, p1, 120 - measure_ui_text(p1) / 2, 95,  0xFFFFE070u);
-                draw_ui_text(display_buf, 240, 260, p2, 120 - measure_ui_text(p2) / 2, 118, 0xFFFFFFFFu);
-                draw_ui_text(display_buf, 240, 260, p3, 120 - measure_ui_text(p3) / 2, 142, 0xFFA0B8E0u);
-            }
-
             int logical_h = show_softkey_bar ? 260 : 240;
             SDL_Rect src_rect{0, 0, 240, logical_h};
             SDL_UpdateTexture(tex, nullptr, display_buf, 240 * static_cast<int>(sizeof(uint32_t)));
@@ -2464,7 +2751,7 @@ struct UiInputManager {
             SDL_Delay(16);
         }
 
-        clear_held_states();
+        close_overlay();
         if (g_audio.dev_id != 0) SDL_PauseAudioDevice(g_audio.dev_id, 0);
         auto pause_t1 = std::chrono::steady_clock::now();
         paused_duration_ms += std::chrono::duration_cast<std::chrono::milliseconds>(pause_t1 - pause_t0).count();
@@ -2966,6 +3253,173 @@ void set_cli_fps_override(int fps) {
     g_ui.cli_high_fps_mode = (fps >= 30);
 }
 
+void set_cli_pvp_action(int mode, uint32_t room_id) {
+    g_ui.cli_pvp_mode = mode;
+    g_ui.cli_pvp_room_id = room_id;
+    g_ui.cli_pvp_join_retries = 0;
+}
+
+pvp::PvpClientSession& DojaRuntime::pvp_session() {
+    return g_pvp;
+}
+
+std::string DojaRuntime::player_nickname() const {
+    return g_ui.player_name;
+}
+
+int DojaRuntime::take_cli_pvp_action(uint32_t& room_id_out) {
+    if (g_ui.cli_pvp_mode == 0) return 0;
+    std::string gm = g_ui.is_lon_game ? "lon" : "pon";
+    g_ui.online_mode = true;
+    if (g_ui.cli_pvp_mode == 1) {
+        g_ui.cli_pvp_mode = 0;
+        if (g_pvp.create_room(g_ui.server_url, g_ui.player_uid, g_ui.player_name, gm)) {
+            room_id_out = g_pvp.room_id();
+            g_ui.show_toast("已创建房间 #" + std::to_string(room_id_out) + " 等待加入...", 180);
+            return 1;
+        }
+        return -1;
+    }
+    if (g_ui.cli_pvp_mode == 2) {
+        if (g_pvp.join_room(g_ui.server_url, g_ui.cli_pvp_room_id, g_ui.player_uid, g_ui.player_name, gm)) {
+            g_ui.cli_pvp_mode = 0;
+            room_id_out = g_pvp.room_id();
+            g_ui.show_toast("已加入 #" + std::to_string(room_id_out) + " VS " + g_pvp.opponent_name(), 150);
+            return 2;
+        }
+        if (++g_ui.cli_pvp_join_retries > 80) {
+            g_ui.cli_pvp_mode = 0;
+            return -1;
+        }
+        return 0;
+    }
+    g_ui.cli_pvp_mode = 0;
+    return 0;
+}
+
+int32_t DojaRuntime::poll_local_pvp_keypad() {
+    poll_events();
+    if (g_ui.overlay_open) {
+        return 0; // Keep local Navi neutral while player navigates the non-blocking F1 overlay!
+    }
+    int32_t mask = keypad_state_;
+    int target_f = frame_count_ + 1;
+    for (const auto& kv : injected_keys_) {
+        if (kv.doja_key >= 0 && kv.doja_key < 31 && target_f >= kv.start_frame && target_f <= kv.end_frame) {
+            mask |= (1 << kv.doja_key);
+        }
+    }
+    return mask;
+}
+
+void DojaRuntime::save_full_snapshot(FullHeapSnapshot& out) const {
+    out.heap = heap_;
+    out.palettes.clear();
+    out.offscreen_argb.clear();
+    out.paletted_image_refs.clear();
+    for (size_t i = 1; i < heap_.size(); ++i) {
+        const HeapObject& o = heap_[i];
+        if (o.kind == ObjKind::Palette && o.pal) {
+            out.palettes.emplace_back(static_cast<Ref>(i), *o.pal);
+        } else if (o.kind == ObjKind::Image && o.img && !o.img->argb.empty()) {
+            out.offscreen_argb.emplace_back(static_cast<Ref>(i), o.img->argb);
+        } else if (o.kind == ObjKind::PalettedImage && o.img) {
+            out.paletted_image_refs.emplace_back(static_cast<Ref>(i), o.img->palette_ref);
+        }
+    }
+}
+
+void DojaRuntime::restore_full_snapshot(const FullHeapSnapshot& in) {
+    heap_ = in.heap;
+    for (const auto& p : in.palettes) {
+        if (p.first > 0 && static_cast<size_t>(p.first) < heap_.size() && heap_[p.first].pal) {
+            *heap_[p.first].pal = p.second;
+        }
+    }
+    for (const auto& im : in.offscreen_argb) {
+        if (im.first > 0 && static_cast<size_t>(im.first) < heap_.size() && heap_[im.first].img) {
+            heap_[im.first].img->argb = im.second;
+        }
+    }
+    for (const auto& pr : in.paletted_image_refs) {
+        if (pr.first > 0 && static_cast<size_t>(pr.first) < heap_.size() && heap_[pr.first].img) {
+            heap_[pr.first].img->palette_ref = pr.second;
+        }
+    }
+    g_interp.reset();
+}
+
+void DojaRuntime::save_combat_snapshot(FastCombatSnapshot& out, size_t min_ref) const {
+    if (out.base_heap_size == 0) {
+        out.base_heap_size = heap_.size();
+    }
+    size_t base_lim = std::min(out.base_heap_size, heap_.size());
+    out.states.clear();
+    out.paletted_image_refs.clear();
+    for (size_t i = std::max<size_t>(1, min_ref); i < base_lim; ++i) {
+        const HeapObject& o = heap_[i];
+        if (o.kind == ObjKind::ClassInstance ||
+            o.kind == ObjKind::IntArray ||
+            o.kind == ObjKind::RefArray ||
+            o.kind == ObjKind::Random) {
+            FastCombatObjState st;
+            st.ref = static_cast<Ref>(i);
+            st.fields_i32 = o.fields_i32;
+            st.fields_i64 = o.fields_i64;
+            st.rng_seed = o.rng_seed;
+            out.states.push_back(std::move(st));
+        } else if (o.kind == ObjKind::PalettedImage && o.img) {
+            out.paletted_image_refs.emplace_back(static_cast<Ref>(i), o.img->palette_ref);
+        }
+    }
+    out.extra_objs.clear();
+    if (heap_.size() > base_lim) {
+        out.extra_objs.assign(heap_.begin() + static_cast<ptrdiff_t>(base_lim), heap_.end());
+    }
+}
+
+void DojaRuntime::restore_combat_snapshot(const FastCombatSnapshot& in) {
+    if (in.base_heap_size > 0 && heap_.size() > in.base_heap_size) {
+        heap_.resize(in.base_heap_size);
+    }
+    for (const auto& st : in.states) {
+        if (st.ref > 0 && static_cast<size_t>(st.ref) < heap_.size()) {
+            HeapObject& o = heap_[st.ref];
+            o.fields_i32 = st.fields_i32;
+            o.fields_i64 = st.fields_i64;
+            o.rng_seed = st.rng_seed;
+        }
+    }
+    if (!in.extra_objs.empty()) {
+        heap_.insert(heap_.end(), in.extra_objs.begin(), in.extra_objs.end());
+    }
+    for (const auto& pr : in.paletted_image_refs) {
+        if (pr.first > 0 && static_cast<size_t>(pr.first) < heap_.size() && heap_[pr.first].img) {
+            heap_[pr.first].img->palette_ref = pr.second;
+        }
+    }
+}
+
+void DojaRuntime::fb_fill_rect_alpha(int rx, int ry, int rw, int rh, uint32_t argb) {
+    UiInputManager::fill_rect_alpha(framebuffer_, 240, 240, rx, ry, rw, rh, argb);
+}
+
+void DojaRuntime::fb_draw_border(int rx, int ry, int rw, int rh, uint32_t argb) {
+    UiInputManager::draw_rect_border(framebuffer_, 240, 240, rx, ry, rw, rh, argb);
+}
+
+int DojaRuntime::fb_measure_text(const std::string& utf8) const {
+    return UiInputManager::measure_ui_text(utf8);
+}
+
+void DojaRuntime::fb_draw_text(const std::string& utf8, int x, int baseline_y, uint32_t color, bool shadow) {
+    UiInputManager::draw_ui_text(framebuffer_, 240, 240, utf8, x, baseline_y, color, shadow);
+}
+
+void DojaRuntime::show_ui_toast(const std::string& msg, int frames) {
+    g_ui.show_toast(msg, frames);
+}
+
 void DojaRuntime::set_config_path(const std::string& path) {
     if (!path.empty()) {
         g_ui.config_path = path;
@@ -3049,6 +3503,8 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
             );
             if (win) {
                 sdl_window_ = win;
+                // Disable SDL2's default text-input mode during gameplay so Chinese IME never intercepts WASD/ZX/F1/Esc
+                SDL_StopTextInput();
                 SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
                 if (!ren) {
                     ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
@@ -3227,7 +3683,7 @@ int32_t DojaRuntime::array_length(Ref r) {
 int32_t& DojaRuntime::iaload(Ref arr, int32_t idx) {
     HeapObject& o = get(arr);
     if (idx < 0 || static_cast<size_t>(idx) >= o.fields_i32.size()) {
-        throw JavaException(1);
+        throw JavaException(1, "iaload", idx, static_cast<int32_t>(o.fields_i32.size()));
     }
     return o.fields_i32[idx];
 }
@@ -3235,7 +3691,7 @@ int32_t& DojaRuntime::iaload(Ref arr, int32_t idx) {
 int32_t DojaRuntime::baload(Ref arr, int32_t idx) {
     HeapObject& o = get(arr);
     if (idx < 0 || static_cast<size_t>(idx) >= o.bytes.size()) {
-        throw JavaException(1);
+        throw JavaException(1, "baload", idx, static_cast<int32_t>(o.bytes.size()));
     }
     return static_cast<int8_t>(o.bytes[idx]);
 }
@@ -3243,7 +3699,7 @@ int32_t DojaRuntime::baload(Ref arr, int32_t idx) {
 void DojaRuntime::bastore(Ref arr, int32_t idx, int32_t val) {
     HeapObject& o = get(arr);
     if (idx < 0 || static_cast<size_t>(idx) >= o.bytes.size()) {
-        throw JavaException(1);
+        throw JavaException(1, "bastore", idx, static_cast<int32_t>(o.bytes.size()));
     }
     o.bytes[idx] = static_cast<uint8_t>(val & 0xFF);
 }
@@ -3321,12 +3777,12 @@ void DojaRuntime::poll_events() {
         if (ab.doja_key >= 0) {
             if (now_down) {
                 keypad_state_ |= (1 << ab.doja_key);
-                if (current_canvas_ref_ > 0) {
+                if (current_canvas_ref_ > 0 && !pvp_match_active_) {
                     generated_process_event(*this, current_canvas_ref_, 0, ab.doja_key);
                 }
             } else {
                 keypad_state_ &= ~(1 << ab.doja_key);
-                if (current_canvas_ref_ > 0) {
+                if (current_canvas_ref_ > 0 && !pvp_match_active_) {
                     generated_process_event(*this, current_canvas_ref_, 1, ab.doja_key);
                 }
             }
@@ -3340,22 +3796,27 @@ void DojaRuntime::poll_events() {
         if (pressed == was_down) return;
         if (pressed) {
             keypad_state_ |= mask;
-            if (current_canvas_ref_ > 0) {
+            if (current_canvas_ref_ > 0 && !pvp_match_active_) {
                 generated_process_event(*this, current_canvas_ref_, 0, doja_key);
             }
         } else {
             keypad_state_ &= ~mask;
-            if (current_canvas_ref_ > 0) {
+            if (current_canvas_ref_ > 0 && !pvp_match_active_) {
                 generated_process_event(*this, current_canvas_ref_, 1, doja_key);
             }
         }
     };
 
-    auto open_pause_modal = [&]() {
-        if (in_modal) return;
-        in_modal = true;
+    auto open_pause_or_overlay = [&]() {
         keypad_state_ = 0;
         g_ui.clear_held_states();
+        if (g_pvp.active()) {
+            // Online PvP / Room Wait: open menu as a non-blocking background-running overlay!
+            g_ui.open_overlay(false);
+            return false; // Did NOT block
+        }
+        if (in_modal) return true;
+        in_modal = true;
         bool quit = g_ui.run_pause_config_modal(
             static_cast<SDL_Window*>(sdl_window_),
             static_cast<SDL_Renderer*>(sdl_renderer_),
@@ -3367,10 +3828,30 @@ void DojaRuntime::poll_events() {
         if (quit) {
             clean_exit_runtime(*this, true, 0);
         }
+        return true; // Blocked inside modal
     };
+
+    if (g_ui.overlay_open) {
+        keypad_state_ = 0;
+    }
 
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
+        if (g_ui.overlay_open) {
+            bool quit_req = false;
+            g_ui.handle_overlay_event(
+                ev,
+                static_cast<SDL_Window*>(sdl_window_),
+                static_cast<SDL_Renderer*>(sdl_renderer_),
+                window_scale_,
+                quit_req
+            );
+            keypad_state_ = 0;
+            if (quit_req) {
+                clean_exit_runtime(*this, true, 0);
+            }
+            continue;
+        }
         if (ev.type == SDL_QUIT ||
             (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_CLOSE)) {
             clean_exit_runtime(*this, true, 0);
@@ -3384,8 +3865,8 @@ void DojaRuntime::poll_events() {
             // Emulator hotkeys on key-down
             if (pressed) {
                 if (sym == SDLK_F1 || sym == SDLK_ESCAPE) {
-                    open_pause_modal();
-                    return;
+                    if (open_pause_or_overlay()) return;
+                    continue;
                 }
                 if (sym == SDLK_F2) {
                     g_ui.show_softkey_bar = !g_ui.show_softkey_bar;
@@ -3474,8 +3955,8 @@ void DojaRuntime::poll_events() {
             bool pressed = (ev.type == SDL_CONTROLLERBUTTONDOWN);
             int btn = ev.cbutton.button;
             if (pressed && btn == SDL_CONTROLLER_BUTTON_START && !in_modal) {
-                open_pause_modal();
-                return;
+                if (open_pause_or_overlay()) return;
+                continue;
             }
             for (int i = 0; i < ACT_COUNT; ++i) {
                 if (g_ui.binds[i].pad_btn == btn) {
@@ -3502,34 +3983,65 @@ void DojaRuntime::poll_events() {
 
 void DojaRuntime::present_screen() {
     ++frame_count_;
+    // Support deterministic synthetic UI hotkeys in --inject-key (100=F1, 101=Enter, 102=Down)
     for (const auto& kv : injected_keys_) {
-        if (kv.first == frame_count_) {
-            keypad_state_ |= (1 << kv.second);
-            if (current_canvas_ref_ > 0) {
-                generated_process_event(*this, current_canvas_ref_, 0, kv.second);
-            }
-        } else if (kv.first + 1 == frame_count_) {
-            keypad_state_ &= ~(1 << kv.second);
-            if (current_canvas_ref_ > 0) {
-                generated_process_event(*this, current_canvas_ref_, 1, kv.second);
+        if (kv.start_frame == frame_count_ && kv.doja_key >= 100) {
+            SDL_Keycode sym = (kv.doja_key == 100) ? SDLK_F1 : ((kv.doja_key == 101) ? SDLK_RETURN : SDLK_DOWN);
+            if (sdl_window_) {
+                SDL_Event kev{};
+                kev.type = SDL_KEYDOWN;
+                kev.key.state = SDL_PRESSED;
+                kev.key.repeat = 0;
+                kev.key.keysym.sym = sym;
+                SDL_PushEvent(&kev);
+            } else {
+                // Headless mode fallback for automated UI overlay testing
+                if (sym == SDLK_F1) {
+                    if (g_ui.overlay_open) g_ui.close_overlay();
+                    else if (g_pvp.active()) { keypad_state_ = 0; g_ui.open_overlay(false); }
+                } else if (g_ui.overlay_open) {
+                    SDL_Event kev{};
+                    kev.type = SDL_KEYDOWN;
+                    kev.key.state = SDL_PRESSED;
+                    kev.key.keysym.sym = sym;
+                    bool quit_req = false;
+                    g_ui.handle_overlay_event(kev, nullptr, nullptr, window_scale_, quit_req);
+                    if (quit_req) clean_exit_runtime(*this, false, 0);
+                }
             }
         }
     }
-    poll_events();
-    if (g_pvp.active()) {
-        if (g_pvp.poll_udp()) {
-            g_ui.show_toast("挑战者已连接! VS " + g_ui.player_name + " <-> " + g_pvp.opponent_name(), 150);
+    if (!pvp_match_active_) {
+        for (const auto& kv : injected_keys_) {
+            if (kv.doja_key < 0 || kv.doja_key >= 31 || g_ui.overlay_open) continue;
+            if (kv.start_frame == frame_count_) {
+                keypad_state_ |= (1 << kv.doja_key);
+                if (current_canvas_ref_ > 0) {
+                    generated_process_event(*this, current_canvas_ref_, 0, kv.doja_key);
+                }
+            } else if (kv.end_frame + 1 == frame_count_) {
+                keypad_state_ &= ~(1 << kv.doja_key);
+                if (current_canvas_ref_ > 0) {
+                    generated_process_event(*this, current_canvas_ref_, 1, kv.doja_key);
+                }
+            }
         }
-        if (g_pvp.match_started()) {
-            g_pvp.send_frame_input(static_cast<uint32_t>(frame_count_), keypad_state_);
-        } else if ((frame_count_ % 120) == 0) {
-            g_pvp.send_ping();
+        poll_events();
+        if (g_pvp.active()) {
+            if (g_pvp.poll_udp()) {
+                g_ui.show_toast("挑战者已连接! VS " + g_ui.player_name + " <-> " + g_pvp.opponent_name(), 150);
+            }
+            if (!g_pvp.match_started() && (frame_count_ % 120) == 0) {
+                g_pvp.send_ping();
+            }
         }
+    } else {
+        poll_events();
     }
     if (sdl_renderer_ && sdl_texture_) {
         SDL_Renderer* ren = static_cast<SDL_Renderer*>(sdl_renderer_);
         SDL_Texture* tex = static_cast<SDL_Texture*>(sdl_texture_);
-        bool interp_active = g_ui.high_fps_mode && !fast_forward_ && !g_ui.is_turbo_held();
+        bool interp_active = g_ui.high_fps_mode && !fast_forward_ && (!g_ui.is_turbo_held() || g_pvp.active());
         g_interp.on_screen_unlock(framebuffer_, interp_active);
 
         const uint32_t* present_fb = framebuffer_;
@@ -3546,6 +4058,16 @@ void DojaRuntime::present_screen() {
         SDL_RenderPresent(ren);
     } else {
         g_interp.reset();
+        if (g_ui.toast_frames > 0) --g_ui.toast_frames;
+        if (!fast_forward_) {
+            static thread_local auto s_last_headless_tp = std::chrono::steady_clock::now();
+            auto now_tp = std::chrono::steady_clock::now();
+            auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_tp - s_last_headless_tp).count();
+            if (dt_ms < 15) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(15 - dt_ms));
+            }
+            s_last_headless_tp = std::chrono::steady_clock::now();
+        }
     }
     if (max_frames_ > 0 && frame_count_ >= max_frames_) {
         if (!dump_ppm_path_.empty()) {
@@ -3575,7 +4097,7 @@ int64_t DojaRuntime::current_time_millis() {
         fake_time_ms_ += 20;
         return fake_time_ms_;
     }
-    if (g_ui.is_turbo_held()) {
+    if (g_ui.is_turbo_held() && !g_pvp.active()) {
         g_ui.turbo_bonus_ms += 12;
     }
     auto now = std::chrono::steady_clock::now().time_since_epoch();
@@ -3586,7 +4108,7 @@ int64_t DojaRuntime::current_time_millis() {
 void DojaRuntime::sleep_ms(int64_t ms) {
     poll_events();
     if (fast_forward_) return;
-    if (g_ui.is_turbo_held()) {
+    if (g_ui.is_turbo_held() && !g_pvp.active()) {
         g_ui.turbo_bonus_ms += std::max<int64_t>(0, ms - 12);
         std::this_thread::sleep_for(std::chrono::milliseconds(std::min<int64_t>(ms, 12)));
         return;
@@ -3618,7 +4140,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             if (fast_forward_) {
                 return Slot(0);
             }
-            if (g_ui.is_turbo_held()) {
+            if (g_ui.is_turbo_held() && !g_pvp.active()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 return Slot(0);
             }
@@ -4023,10 +4545,14 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
         if (m == "getHeight") return Slot(240);
         if (m == "getGraphics") return Slot(screen_graphics_ref_);
         if (m == "getKeypadState") {
+            if (keypad_override_enabled_) {
+                return Slot(keypad_override_mask_);
+            }
             poll_events();
             return Slot(keypad_state_);
         }
         if (m == "setSoftLabel") {
+            if (suppress_av_) return Slot(0);
             int idx = args[1].i;
             std::string lbl = (args[2].r > 0) ? get(args[2].r).str : "";
             if (idx == 0) g_ui.soft_label_left = lbl;
@@ -4069,6 +4595,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             return Slot(0);
         }
         if (m == "setFont") return Slot(0);
+        if (suppress_av_) return Slot(0);
         if (m == "lock") {
             graphics_locked_ = true;
             if (gfx.target_image == 0) {
@@ -4207,6 +4734,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
     }
 
     if (c == "com/nttdocomo/ui/Palette" && m == "setEntry") {
+        if (suppress_av_) return Slot(0);
         HeapObject& pal_o = get(args[0].r);
         int idx = args[1].i;
         if (pal_o.pal && idx >= 0 && idx < 256) {
@@ -4292,6 +4820,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             return Slot(0);
         }
         if (m == "setAttribute") {
+            if (suppress_av_) return Slot(0);
             if (args[1].i == 4) {
                 ap.origin_y = std::clamp(args[2].i, 0, 100);
                 g_audio.set_port_volume(ap.aux_i32, args[0].r, ap.origin_y);
@@ -4299,6 +4828,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             return Slot(0);
         }
         if (m == "play") {
+            if (suppress_av_) return Slot(0);
             if (ap.origin_x > 0) {
                 int snd_id = get(ap.origin_x).aux_i32;
                 g_audio.play_port(ap.aux_i32, snd_id, ap.origin_y, args[0].r, current_time_millis());
@@ -4306,6 +4836,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             return Slot(0);
         }
         if (m == "stop") {
+            if (suppress_av_) return Slot(0);
             g_audio.stop_port(ap.aux_i32, args[0].r);
             return Slot(0);
         }

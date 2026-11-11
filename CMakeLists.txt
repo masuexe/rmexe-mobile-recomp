@@ -14,6 +14,7 @@ add_library(doja_runtime STATIC
 )
 target_include_directories(doja_runtime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
     ${SDL2_INCLUDE_DIRS}
     ${ZLIB_INCLUDE_DIRS}
 )

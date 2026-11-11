@@ -268,6 +268,49 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
         c_type = "int64_t" if f_desc in ("J", "D") else "int32_t"
         lines.append(f"static {c_type} {c_var} = 0;")
 
+    sorted_statics = [(f_desc, c_var) for (_, _, f_desc), c_var in sorted(static_fields.items())]
+    lines.extend(
+        [
+            "",
+            "static void generated_save_statics(std::vector<int64_t>& out) {",
+            f"    out.resize({len(sorted_statics)});",
+        ]
+    )
+    for idx, (_, c_var) in enumerate(sorted_statics):
+        lines.append(f"    out[{idx}] = static_cast<int64_t>({c_var});")
+    lines.extend(
+        [
+            "}",
+            "",
+            "static void generated_restore_statics(const std::vector<int64_t>& in) {",
+            f"    if (in.size() < {len(sorted_statics)}) return;",
+        ]
+    )
+    for idx, (f_desc, c_var) in enumerate(sorted_statics):
+        c_type = "int64_t" if f_desc in ("J", "D") else "int32_t"
+        lines.append(f"    {c_var} = static_cast<{c_type}>(in[{idx}]);")
+    lines.append("}")
+
+    is_pon_pvp = (
+        "app/Rock" in classes
+        and ("app/Ene", "Hit", "(III)Z") in defined_methods
+        and ("app/Rock", "Hit", "(III)Z") in defined_methods
+        and ("app/CpCanvas", "EnSet", "()V") in defined_methods
+        and ("app/CpCanvas", "Load", "(I)V") in defined_methods
+    )
+    if is_pon_pvp:
+        lines.extend(
+            [
+                "",
+                "// Online PvP NetBattle hooks (implemented in pvp_pon_engine.inl)",
+                "static bool pvp_pon_tick_override(DojaRuntime& rt, Ref cp);",
+                "static int32_t pvp_pon_intercept_ene_hit(DojaRuntime& rt, Ref ene_thiz, int32_t a0, int32_t a1, int32_t a2);",
+                "static bool pvp_pon_intercept_ene_draw(DojaRuntime& rt, Ref ene_thiz, int32_t a0);",
+                "static bool g_pvp_in_ene_hit_passthrough = false;",
+                "static int32_t g_pvp_rock_flip_override = -1;",
+            ]
+        )
+
     lines.extend(["", "// Forward declarations of recompiled methods"])
     for (cls_name, m_name, m_desc), (fn_name, is_static) in sorted(defined_methods.items()):
         arg_types, ret_type = parse_method_descriptor(m_desc)
@@ -330,6 +373,19 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
             lines.append("    auto push_j = [&](int64_t v) { stk[sp++].j = v; stk[sp++].j = 0; };")
             lines.append("    auto pop_j  = [&]() -> int64_t { sp -= 2; return stk[sp].j; };")
 
+            if is_pon_pvp and (cls_name, m.name, m.descriptor) == ("app/Ene", "Hit", "(III)Z"):
+                lines.append("    if (!g_pvp_in_ene_hit_passthrough) {")
+                lines.append("        int32_t pvp_hr = pvp_pon_intercept_ene_hit(rt, thiz, a0, a1, a2);")
+                lines.append("        if (pvp_hr >= 0) return pvp_hr;")
+                lines.append("    }")
+            if is_pon_pvp and (cls_name, m.name, m.descriptor) == ("app/Ene", "Draw", "(I)V"):
+                lines.append("    if (pvp_pon_intercept_ene_draw(rt, thiz, a0)) return;")
+
+            is_cp_exe = is_pon_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "exe", "()V")
+            is_rock_draw = is_pon_pvp and (cls_name, m.name, m.descriptor) == ("app/Rock", "Draw", "(I)V")
+            seen_exe_gfx_lock = False
+            emitted_exe_join = False
+
             has_exc = len(m.exceptions) > 0
             if has_exc:
                 lines.append("    dispatch_handler:")
@@ -346,6 +402,15 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
             n = len(code)
             while pc < n:
                 op = code[pc]
+                if (
+                    is_cp_exe
+                    and seen_exe_gfx_lock
+                    and not emitted_exe_join
+                    and op == 0xB2
+                    and resolve_ref(struct.unpack_from(">H", code, pc + 1)[0]) == ("app/CpCanvas", "play_flg", "I")
+                ):
+                    emitted_exe_join = True
+                    lines.append("    pvp_exe_frame_join:;")
                 lines.append(f"    L_{pc}: pc = {pc};")
                 if op == 0x00:  # nop
                     pc += 1
@@ -577,6 +642,8 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                                 lines.append(f"            int64_t call_a{a_i} = pop_j();")
                             else:
                                 lines.append(f"            int32_t call_a{a_i} = pop_i();")
+                        if is_rock_draw and ref == ("app/CpCanvas", "Ani", "(IIIIIIII)I"):
+                            lines.append("            if (g_pvp_rock_flip_override >= 0) call_a7 = g_pvp_rock_flip_override;")
                         call_args = ["rt"]
                         if not callee_static:
                             lines.append("            Ref call_thiz = pop_i();")
@@ -612,6 +679,9 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                         elif m_ret != "V":
                             lines.append("            push_i(res.i);")
                         lines.append("        }")
+                        if is_cp_exe and not seen_exe_gfx_lock and t_cls == "com/nttdocomo/ui/Graphics" and t_name == "lock":
+                            seen_exe_gfx_lock = True
+                            lines.append("        if (pvp_pon_tick_override(rt, loc[0].r)) goto pvp_exe_frame_join;")
                     pc += 5 if op == 0xB9 else 3
                 elif op == 0xBB:  # new
                     c_idx = struct.unpack_from(">H", code, pc + 1)[0]
@@ -695,6 +765,14 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                 lines.append("    return 0;")
             lines.append("}")
             lines.append("")
+
+    if is_pon_pvp:
+        lines.extend(
+            [
+                '#include "pvp_pon_engine.inl"',
+                "",
+            ]
+        )
 
     # Emit entry-point glue
     lines.extend(

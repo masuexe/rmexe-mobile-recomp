@@ -1,6 +1,7 @@
 #include "doja_runtime.hpp"
 #include "net_config.hpp"
 
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -31,6 +32,7 @@ int main(int argc, char** argv) {
     int max_frames = 0;
     bool headless = false;
     bool fast_forward = false;
+    bool explicit_server = false;
 
     rmexe::DojaRuntime rt;
 
@@ -47,8 +49,16 @@ int main(int argc, char** argv) {
             rt.set_config_path(argv[++i]);
         } else if (arg == "--server" && i + 1 < argc) {
             rmexe::set_network_server(argv[++i], true);
+            explicit_server = true;
         } else if (arg == "--offline") {
             rmexe::set_network_server("", false);
+        } else if (arg == "--pvp-create") {
+            if (!explicit_server) rmexe::set_network_server("", true);
+            rmexe::set_cli_pvp_action(1, 0);
+        } else if (arg == "--pvp-join" && i + 1 < argc) {
+            if (!explicit_server) rmexe::set_network_server("", true);
+            uint32_t rid = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
+            rmexe::set_cli_pvp_action(2, rid);
         } else if (arg == "--uid" && i + 1 < argc) {
             rmexe::set_player_identity(argv[++i], "");
         } else if (arg == "--name" && i + 1 < argc) {
@@ -70,9 +80,17 @@ int main(int argc, char** argv) {
             std::string kv = argv[++i];
             auto colon = kv.find(':');
             if (colon != std::string::npos) {
-                int f = std::atoi(kv.substr(0, colon).c_str());
+                std::string fspec = kv.substr(0, colon);
                 int k = std::atoi(kv.substr(colon + 1).c_str());
-                rt.inject_key_at_frame(f, k);
+                auto dash = fspec.find('-');
+                if (dash != std::string::npos) {
+                    int f0 = std::atoi(fspec.substr(0, dash).c_str());
+                    int f1 = std::atoi(fspec.substr(dash + 1).c_str());
+                    rt.inject_key_span(f0, f1, k);
+                } else {
+                    int f = std::atoi(fspec.c_str());
+                    rt.inject_key_at_frame(f, k);
+                }
             }
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: " << argv[0] << " [options]\n"
@@ -81,6 +99,8 @@ int main(int argc, char** argv) {
                       << "  --sav <path>          Path to .sav overlay file  (default: <sp>.sav)\n"
                       << "  --config <path>       Path to keybinding config  (default: controls.cfg)\n"
                       << "  --server <host:port>  Connect to rmexe_server    (e.g. 127.0.0.1:8765)\n"
+                      << "  --pvp-create          Auto-create an online PvP NetBattle room on boot\n"
+                      << "  --pvp-join <room_id>  Auto-join PvP room <room_id> (0 = quick match)\n"
                       << "  --offline             Use built-in offline Capcom i-mode simulation\n"
                       << "  --uid <id>            Override subscriber UID for cloud saves/rankings\n"
                       << "  --name <nick>         Override player nickname   (up to 12 ASCII chars)\n"
@@ -90,7 +110,7 @@ int main(int argc, char** argv) {
                       << "  --fast-forward        Disable frame sleep for rapid testing\n"
                       << "  --max-frames <N>      Exit after N rendered frames\n"
                       << "  --dump-ppm <path>     Save 240x240 framebuffer to PPM on exit\n"
-                      << "  --inject-key <F:K>    Inject DoJa key K at frame F\n";
+                      << "  --inject-key <F:K>    Inject DoJa key K at frame F (or F1-F2:K span)\n";
             return 0;
         }
     }

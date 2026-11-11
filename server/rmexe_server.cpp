@@ -216,12 +216,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::cout << "[rmexe_server] Unified Capcom i-mode + PvP NetBattle Server listening on "
+    pvp_engine.set_udp_fd(udp_fd);
+    std::cout << std::unitbuf
+              << "[rmexe_server] Unified Capcom i-mode + PvP NetBattle Server listening on "
               << bind_ip << ":" << port << " (TCP HTTP/1.1 + UDP Relay)\n"
               << "[rmexe_server] Persistent database: " << data_dir << "/capcom_state.db\n";
 
     std::vector<TcpClientConn> clients;
     std::vector<pollfd> pfds;
+    uint64_t last_maint_ms = rmexe::pvp::steady_millis();
 
     while (g_running) {
         pfds.clear();
@@ -344,6 +347,12 @@ int main(int argc, char** argv) {
             } else {
                 ++i;
             }
+        }
+
+        // Priority 4: Periodic PvP room liveness check (auto-dissolve abandoned/dead rooms)
+        if (now_ms > last_maint_ms && (now_ms - last_maint_ms) >= 1000ULL) {
+            last_maint_ms = now_ms;
+            pvp_engine.periodic_maintenance();
         }
     }
 

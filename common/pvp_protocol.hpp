@@ -17,14 +17,131 @@
 namespace rmexe::pvp {
 
 enum PvpPktType : uint8_t {
-    PKT_BIND         = 1,
-    PKT_BIND_ACK     = 2,
-    PKT_MATCH_START  = 3,
-    PKT_PING         = 4,
-    PKT_PONG         = 5,
-    PKT_FRAME_INPUT  = 6,
-    PKT_BATTLE_STATE = 7,
-    PKT_DISCONNECT   = 8,
+    PKT_BIND          = 1,
+    PKT_BIND_ACK      = 2,
+    PKT_MATCH_START   = 3,
+    PKT_PING          = 4,
+    PKT_PONG          = 5,
+    PKT_FRAME_INPUT   = 6,
+    PKT_BATTLE_STATE  = 7,
+    PKT_DISCONNECT    = 8,
+    PKT_BUILD_SYNC    = 9,
+    PKT_BUILD_ACK     = 10,
+    PKT_CUSTOM_COMMIT = 11,
+    PKT_CUSTOM_ACK    = 12,
+    PKT_INPUT_BUNDLE  = 13,
+    PKT_INPUT_REQ     = 14,
+    PKT_MATCH_END     = 15,
+};
+
+// Player's .sav Fighter Build (HP, Buster levels, Element, NaviCust skills, 30-chip Folder + Regular)
+struct PvpFighterBuild {
+    int32_t max_hp = 100;
+    int32_t ata_lv = 1;       // Buster Attack 1..5
+    int32_t cha_lv = 1;       // Buster Charge 1..5
+    int32_t r_zoku = 0;       // 0=Null, 1=Heat, 2=Aqua, 3=Elec, 4=Wood
+    int32_t regu_flg = 0;     // 1 if Regular Chip active
+    int32_t regu_id = 0;      // Regular slot index 0..29 in folder
+    int32_t skill_kouka[29]{};
+    int32_t folder_packed[30]{}; // (tip_id << 8) | code_id
+    std::string player_name;
+
+    std::vector<uint8_t> serialize() const {
+        std::vector<uint8_t> out;
+        out.reserve(276);
+        net::push_be32(out, max_hp);
+        net::push_be32(out, ata_lv);
+        net::push_be32(out, cha_lv);
+        net::push_be32(out, r_zoku);
+        net::push_be32(out, regu_flg);
+        net::push_be32(out, regu_id);
+        for (int i = 0; i < 29; ++i) net::push_be32(out, skill_kouka[i]);
+        for (int i = 0; i < 30; ++i) net::push_be32(out, folder_packed[i]);
+        std::string nm = player_name.substr(0, 24);
+        out.push_back(static_cast<uint8_t>(nm.size()));
+        out.insert(out.end(), nm.begin(), nm.end());
+        return out;
+    }
+
+    static bool deserialize(const uint8_t* d, size_t len, PvpFighterBuild& b) {
+        if (!d || len < 261) return false;
+        auto rd32 = [&](size_t off) -> int32_t {
+            return static_cast<int32_t>(
+                (static_cast<uint32_t>(d[off]) << 24) |
+                (static_cast<uint32_t>(d[off + 1]) << 16) |
+                (static_cast<uint32_t>(d[off + 2]) << 8) |
+                static_cast<uint32_t>(d[off + 3]));
+        };
+        size_t p = 0;
+        b.max_hp   = rd32(p); p += 4;
+        b.ata_lv   = rd32(p); p += 4;
+        b.cha_lv   = rd32(p); p += 4;
+        b.r_zoku   = rd32(p); p += 4;
+        b.regu_flg = rd32(p); p += 4;
+        b.regu_id  = rd32(p); p += 4;
+        for (int i = 0; i < 29; ++i) { b.skill_kouka[i] = rd32(p); p += 4; }
+        for (int i = 0; i < 30; ++i) { b.folder_packed[i] = rd32(p); p += 4; }
+        uint8_t nlen = d[p++];
+        if (p + nlen > len) return false;
+        b.player_name.assign(reinterpret_cast<const char*>(d + p), nlen);
+        return true;
+    }
+};
+
+// Custom Screen (BattleTip) locked-in chip queue for a given combat turn
+struct PvpCustomCommit {
+    uint16_t turn_no = 0;
+    int8_t   tip_no = -1;       // -1 = empty/ADD, 0..8 = top index in rock.tip[]
+    uint8_t  max_sel = 5;       // Updated draw size 5..10 (including ADD bonus)
+    uint8_t  regu_flg = 0;      // Updated regular chip availability
+    uint8_t  sec_cha = 0;       // Updated shuffle availability
+    int16_t  pa_no = -1;        // >= 0 if Program Advance formed
+    uint16_t rock_tip_ids[9]{}; // tip_id (0..255) in rock.tip[0..8]
+    uint32_t fol_used_mask = 0; // Bitmask of used folder slots [0..29]
+
+    static constexpr size_t kWireSize = 30;
+
+    std::vector<uint8_t> serialize() const {
+        std::vector<uint8_t> out;
+        out.reserve(kWireSize);
+        net::push_be16(out, turn_no);
+        out.push_back(static_cast<uint8_t>(tip_no));
+        out.push_back(max_sel);
+        out.push_back(regu_flg);
+        out.push_back(sec_cha);
+        net::push_be16(out, static_cast<uint16_t>(pa_no));
+        for (int i = 0; i < 9; ++i) net::push_be16(out, rock_tip_ids[i]);
+        net::push_be32(out, static_cast<int32_t>(fol_used_mask));
+        return out;
+    }
+
+    static bool deserialize(const uint8_t* d, size_t len, PvpCustomCommit& c) {
+        if (!d || len < kWireSize) return false;
+        auto rd16 = [&](size_t off) -> uint16_t {
+            return static_cast<uint16_t>((d[off] << 8) | d[off + 1]);
+        };
+        auto rd32 = [&](size_t off) -> uint32_t {
+            return (static_cast<uint32_t>(d[off]) << 24) |
+                   (static_cast<uint32_t>(d[off + 1]) << 16) |
+                   (static_cast<uint32_t>(d[off + 2]) << 8) |
+                   static_cast<uint32_t>(d[off + 3]);
+        };
+        c.turn_no  = rd16(0);
+        c.tip_no   = static_cast<int8_t>(d[2]);
+        c.max_sel  = d[3];
+        c.regu_flg = d[4];
+        c.sec_cha  = d[5];
+        c.pa_no    = static_cast<int16_t>(rd16(6));
+        for (int i = 0; i < 9; ++i) c.rock_tip_ids[i] = rd16(8 + i * 2);
+        c.fol_used_mask = rd32(26);
+        return true;
+    }
+};
+
+struct PvpRoomInfo {
+    uint32_t room_id = 0;
+    std::string game;
+    std::string host;
 };
 
 // 28-byte wire-safe network-order UDP packet header
@@ -148,7 +265,13 @@ public:
         sockaddr_storage udp_addr{};
         socklen_t udp_addr_len = 0;
         uint64_t last_seen_ms = 0;
-        std::map<uint32_t, int32_t> recent_inputs; // Last 64 frames for loss recovery
+        std::map<uint32_t, int32_t> recent_inputs; // Legacy frame inputs
+        std::map<uint64_t, int32_t> turn_inputs;   // ((uint64_t)turn << 32) | frame -> mask
+        bool has_build = false;
+        std::vector<uint8_t> build_wire;
+        bool has_commit = false;
+        uint16_t commit_turn = 0;
+        std::vector<uint8_t> commit_wire;
     };
 
     struct Room {
@@ -157,10 +280,18 @@ public:
         uint32_t rng_seed = 0;
         bool match_started = false;
         uint64_t created_ms = 0;
+        uint64_t match_ended_ms = 0;
         PeerSlot peers[2]; // [0] = P1, [1] = P2
     };
 
     PvpServerEngine() : rng_(std::random_device{}()) {}
+
+    void set_udp_fd(int fd) { udp_fd_ = fd; }
+
+    void periodic_maintenance() {
+        std::lock_guard<std::mutex> lk(mtx_);
+        prune_stale_rooms_unlocked();
+    }
 
     bool is_pvp_http_path(const std::string& url) const {
         std::string path = net::extract_path_only(url);
@@ -206,6 +337,24 @@ public:
             }
             js << "]}";
         } else if (path == "/pvp/create" && net::iequals(method, "POST")) {
+            std::string req_uid = params.count("uid") ? params["uid"] : "P1";
+            // Dissolve any previous room owned/joined by this same uid so ghost rooms never stack up
+            if (!req_uid.empty()) {
+                for (auto it = rooms_.begin(); it != rooms_.end();) {
+                    Room& old_rm = it->second;
+                    bool match0 = old_rm.peers[0].occupied && old_rm.peers[0].uid == req_uid;
+                    bool match1 = old_rm.peers[1].occupied && old_rm.peers[1].uid == req_uid;
+                    if (match0 || match1) {
+                        int surv = match0 ? 1 : 0;
+                        notify_peer_disconnect_unlocked(old_rm, surv);
+                        it = rooms_.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                if (rooms_.empty()) next_room_id_ = 1001;
+            }
+
             uint32_t rid = next_room_id_++;
             Room rm{};
             rm.room_id = rid;
@@ -213,7 +362,7 @@ public:
             rm.rng_seed = rng_() | 1u;
             rm.created_ms = steady_millis();
             rm.peers[0].occupied = true;
-            rm.peers[0].uid = params.count("uid") ? params["uid"] : "P1";
+            rm.peers[0].uid = req_uid;
             rm.peers[0].name = params.count("name") && !params["name"].empty() ? params["name"] : "P1_NAVI";
             rm.peers[0].token = (rng_() & 0x7FFFFFFFu) | 0x10000u;
             rm.peers[0].last_seen_ms = rm.created_ms;
@@ -257,9 +406,14 @@ public:
             uint32_t rid = params.count("room") ? static_cast<uint32_t>(std::strtoul(params["room"].c_str(), nullptr, 10)) : 0;
             uint32_t tok = params.count("token") ? static_cast<uint32_t>(std::strtoul(params["token"].c_str(), nullptr, 10)) : 0;
             auto it = rooms_.find(rid);
-            if (it != rooms_.end() &&
-                (it->second.peers[0].token == tok || it->second.peers[1].token == tok)) {
-                rooms_.erase(it);
+            if (it != rooms_.end()) {
+                Room& rm = it->second;
+                if (rm.peers[0].token == tok || rm.peers[1].token == tok) {
+                    int surv = (rm.peers[0].token == tok) ? 1 : 0;
+                    notify_peer_disconnect_unlocked(rm, surv);
+                    rooms_.erase(it);
+                    if (rooms_.empty()) next_room_id_ = 1001;
+                }
             }
             js << "{\"ok\":true}";
         } else {
@@ -332,6 +486,10 @@ public:
                         ::sendto(udp_fd, swire.data(), swire.size(), 0,
                                  reinterpret_cast<const sockaddr*>(&rm.peers[p].udp_addr), rm.peers[p].udp_addr_len);
                     }
+                    if (opp.has_build && !opp.build_wire.empty()) {
+                        ::sendto(udp_fd, opp.build_wire.data(), opp.build_wire.size(), 0,
+                                 reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                    }
                 }
                 break;
             }
@@ -340,6 +498,140 @@ public:
                 pong.pkt_type = PKT_PONG;
                 auto wire = pong.serialize();
                 ::sendto(udp_fd, wire.data(), wire.size(), 0, reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                break;
+            }
+            case PKT_BUILD_SYNC: {
+                me.has_build = true;
+                me.build_wire.assign(data, data + len);
+                // Server ACK back so sender knows server cached it, AND relay to opponent
+                PvpPacketHeader ack{};
+                ack.pkt_type = PKT_BUILD_ACK;
+                ack.slot = hdr.slot;
+                ack.room_id = rm.room_id;
+                ack.token = me.token;
+                auto awire = ack.serialize();
+                ::sendto(udp_fd, awire.data(), awire.size(), 0, reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                if (opp.occupied && opp.udp_bound) {
+                    ::sendto(udp_fd, data, len, 0,
+                             reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
+                }
+                if (opp.has_build && !opp.build_wire.empty()) {
+                    ::sendto(udp_fd, opp.build_wire.data(), opp.build_wire.size(), 0,
+                             reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                }
+                break;
+            }
+            case PKT_BUILD_ACK:
+            case PKT_CUSTOM_ACK:
+            case PKT_BATTLE_STATE: {
+                if (opp.occupied && opp.udp_bound) {
+                    ::sendto(udp_fd, data, len, 0,
+                             reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
+                }
+                break;
+            }
+            case PKT_MATCH_END: {
+                if (rm.match_ended_ms == 0) rm.match_ended_ms = now;
+                if (opp.occupied && opp.udp_bound) {
+                    ::sendto(udp_fd, data, len, 0,
+                             reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
+                }
+                break;
+            }
+            case PKT_CUSTOM_COMMIT: {
+                if (payload && hdr.payload_len >= PvpCustomCommit::kWireSize) {
+                    uint16_t cturn = static_cast<uint16_t>((payload[0] << 8) | payload[1]);
+                    me.has_commit = true;
+                    me.commit_turn = cturn;
+                    me.commit_wire.assign(data, data + len);
+                    // Send ACK and relay to opponent; also push opponent's cached commit if same turn
+                    PvpPacketHeader ack{};
+                    ack.pkt_type = PKT_CUSTOM_ACK;
+                    ack.slot = hdr.slot;
+                    ack.room_id = rm.room_id;
+                    ack.token = me.token;
+                    ack.frame_or_seq = cturn;
+                    auto awire = ack.serialize();
+                    ::sendto(udp_fd, awire.data(), awire.size(), 0, reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                    if (opp.occupied && opp.udp_bound) {
+                        ::sendto(udp_fd, data, len, 0,
+                                 reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
+                    }
+                    if (opp.has_commit && opp.commit_turn == cturn && !opp.commit_wire.empty()) {
+                        ::sendto(udp_fd, opp.commit_wire.data(), opp.commit_wire.size(), 0,
+                                 reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                    }
+                }
+                break;
+            }
+            case PKT_INPUT_BUNDLE: {
+                // Payload format: [turn_no:u16][count:u8][reserved:u8][inputs[0..count-1]:be32]
+                if (payload && hdr.payload_len >= 4) {
+                    uint16_t turn = static_cast<uint16_t>((payload[0] << 8) | payload[1]);
+                    uint8_t cnt = payload[2];
+                    if (cnt > 32) cnt = 32;
+                    if (hdr.payload_len >= static_cast<uint16_t>(4 + cnt * 4)) {
+                        for (uint8_t i = 0; i < cnt; ++i) {
+                            if (hdr.frame_or_seq < i) break;
+                            uint32_t f = hdr.frame_or_seq - i;
+                            size_t off = 4 + i * 4;
+                            int32_t mask = static_cast<int32_t>(
+                                (static_cast<uint32_t>(payload[off]) << 24) |
+                                (static_cast<uint32_t>(payload[off + 1]) << 16) |
+                                (static_cast<uint32_t>(payload[off + 2]) << 8) |
+                                static_cast<uint32_t>(payload[off + 3]));
+                            uint64_t key = (static_cast<uint64_t>(turn) << 32) | f;
+                            me.turn_inputs[key] = mask;
+                        }
+                        while (me.turn_inputs.size() > 4096) {
+                            me.turn_inputs.erase(me.turn_inputs.begin());
+                        }
+                    }
+                }
+                if (opp.occupied && opp.udp_bound) {
+                    ::sendto(udp_fd, data, len, 0,
+                             reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
+                }
+                break;
+            }
+            case PKT_INPUT_REQ: {
+                uint16_t turn = static_cast<uint16_t>(hdr.keypad_mask & 0xFFFF);
+                uint32_t want_f = hdr.frame_or_seq;
+                // Replay up to 32 cached inputs from opp starting at want_f in 8-frame wire-compatible chunks!
+                for (uint32_t chunk = 0; chunk < 4; ++chunk) {
+                    uint32_t base_f = want_f + chunk * 8;
+                    std::vector<int32_t> found_masks;
+                    uint32_t top_f = base_f;
+                    for (uint32_t f = base_f; f < base_f + 8; ++f) {
+                        uint64_t key = (static_cast<uint64_t>(turn) << 32) | f;
+                        auto fit = opp.turn_inputs.find(key);
+                        if (fit == opp.turn_inputs.end()) break;
+                        found_masks.push_back(fit->second);
+                        top_f = f;
+                    }
+                    if (found_masks.empty()) break;
+                    std::vector<uint8_t> pl;
+                    net::push_be16(pl, turn);
+                    pl.push_back(static_cast<uint8_t>(found_masks.size()));
+                    pl.push_back(0);
+                    // Pack newest first: top_f down to base_f
+                    for (int i = static_cast<int>(found_masks.size()) - 1; i >= 0; --i) {
+                        net::push_be32(pl, found_masks[i]);
+                    }
+                    PvpPacketHeader rep{};
+                    rep.pkt_type = PKT_INPUT_BUNDLE;
+                    rep.slot = static_cast<uint8_t>(opp_idx + 1);
+                    rep.room_id = rm.room_id;
+                    rep.token = opp.token;
+                    rep.frame_or_seq = top_f;
+                    auto rwire = rep.serialize(pl.data(), pl.size());
+                    ::sendto(udp_fd, rwire.data(), rwire.size(), 0, reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                    if (found_masks.size() < 8) break;
+                }
+                if (opp.occupied && opp.udp_bound) {
+                    ::sendto(udp_fd, data, len, 0,
+                             reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
+                }
                 break;
             }
             case PKT_FRAME_INPUT: {
@@ -353,19 +645,13 @@ public:
                 }
                 break;
             }
-            case PKT_BATTLE_STATE: {
-                if (opp.occupied && opp.udp_bound) {
-                    ::sendto(udp_fd, data, len, 0,
-                             reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
-                }
-                break;
-            }
             case PKT_DISCONNECT: {
                 if (opp.occupied && opp.udp_bound) {
                     ::sendto(udp_fd, data, len, 0,
                              reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
                 }
                 rooms_.erase(it);
+                if (rooms_.empty()) next_room_id_ = 1001;
                 break;
             }
             default:
@@ -376,24 +662,69 @@ public:
 private:
     std::mutex mtx_;
     std::mt19937 rng_;
+    int udp_fd_ = -1;
     uint32_t next_room_id_ = 1001;
     std::unordered_map<uint32_t, Room> rooms_;
+
+    void notify_peer_disconnect_unlocked(const Room& rm, int surv_idx) {
+        if (udp_fd_ < 0 || surv_idx < 0 || surv_idx > 1) return;
+        const PeerSlot& surv = rm.peers[surv_idx];
+        if (!surv.occupied || !surv.udp_bound) return;
+        PvpPacketHeader d{};
+        d.pkt_type = PKT_DISCONNECT;
+        d.slot = static_cast<uint8_t>((1 - surv_idx) + 1);
+        d.room_id = rm.room_id;
+        d.token = rm.peers[1 - surv_idx].token;
+        auto wire = d.serialize();
+        ::sendto(udp_fd_, wire.data(), wire.size(), 0,
+                 reinterpret_cast<const sockaddr*>(&surv.udp_addr), surv.udp_addr_len);
+    }
 
     void prune_stale_rooms_unlocked() {
         uint64_t now = steady_millis();
         for (auto it = rooms_.begin(); it != rooms_.end();) {
-            uint64_t latest = std::max(it->second.peers[0].last_seen_ms, it->second.peers[1].last_seen_ms);
-            if (now > latest && (now - latest) > 600000ULL) { // 10 min idle timeout
+            const Room& rm = it->second;
+            bool dissolve = false;
+            int notify_surv = -1;
+
+            if (rm.match_ended_ms > 0 && now > rm.match_ended_ms && (now - rm.match_ended_ms) > 6000ULL) {
+                dissolve = true;
+            } else if (!rm.match_started && !rm.peers[1].occupied) {
+                // Open waiting room: live hosts send PKT_BIND every 500ms (even inside F1 menu).
+                // Dissolve abandoned rooms after 8 seconds of silence!
+                uint64_t seen0 = rm.peers[0].last_seen_ms;
+                if (now > seen0 && (now - seen0) > 8000ULL) {
+                    dissolve = true;
+                }
+            } else {
+                // Paired / active match: live clients send PKT_PING every 2s + 16Hz combat inputs.
+                // If either player vanishes for >12 seconds, notify survivor & dissolve room!
+                bool dead0 = !rm.peers[0].occupied || (now > rm.peers[0].last_seen_ms && (now - rm.peers[0].last_seen_ms) > 12000ULL);
+                bool dead1 = !rm.peers[1].occupied || (now > rm.peers[1].last_seen_ms && (now - rm.peers[1].last_seen_ms) > 12000ULL);
+                if (dead0 || dead1) {
+                    dissolve = true;
+                    if (dead0 && !dead1) notify_surv = 1;
+                    else if (dead1 && !dead0) notify_surv = 0;
+                }
+            }
+
+            if (dissolve) {
+                if (notify_surv >= 0) {
+                    notify_peer_disconnect_unlocked(rm, notify_surv);
+                }
                 it = rooms_.erase(it);
             } else {
                 ++it;
             }
         }
+        if (rooms_.empty()) {
+            next_room_id_ = 1001;
+        }
     }
 };
 
 // ============================================================================
-// Client-Side Non-Blocking PvP Lobby & UDP Lockstep Session Helper
+// Client-Side Non-Blocking PvP Lobby & UDP Lockstep/Rollback Session Helper
 // ============================================================================
 class PvpClientSession {
 public:
@@ -403,11 +734,21 @@ public:
 
     bool active() const { return udp_fd_ >= 0 && room_id_ != 0; }
     bool match_started() const { return match_started_; }
+    bool peer_disconnected() const { return peer_disconnected_; }
+    bool remote_match_ended() const { return remote_match_ended_; }
+    int32_t remote_winner_slot() const { return remote_winner_slot_; }
     uint32_t room_id() const { return room_id_; }
     uint8_t slot() const { return slot_; }
+    bool is_host() const { return slot_ == 1; }
     uint32_t shared_rng_seed() const { return rng_seed_; }
+    uint32_t rng_seed() const { return rng_seed_; }
     int last_rtt_ms() const { return last_rtt_ms_; }
+    int rtt_ms() const { return last_rtt_ms_; }
     const std::string& opponent_name() const { return opponent_name_; }
+
+    bool has_remote_build() const { return has_remote_build_; }
+    bool local_build_acked() const { return local_build_acked_; }
+    const PvpFighterBuild& remote_build() const { return remote_build_; }
 
     static bool check_server_status(const std::string& server_host_port, std::string& summary_out) {
         net::HttpResponse resp;
@@ -419,6 +760,35 @@ public:
         std::string open_r = json_extract_str(js, "open_rooms");
         std::string act_m  = json_extract_str(js, "active_matches");
         summary_out = "房间:" + (open_r.empty() ? "0" : open_r) + " 对战中:" + (act_m.empty() ? "0" : act_m);
+        return true;
+    }
+
+    static bool list_open_rooms(const std::string& server_host_port, const std::string& game, std::vector<PvpRoomInfo>& out_rooms) {
+        out_rooms.clear();
+        std::string uri = "/pvp/rooms?game=" + net::url_encode(game);
+        net::HttpResponse resp;
+        if (!net::http_request_tcp(server_host_port, "GET", uri, {}, {}, resp, 1500) ||
+            resp.status_code != 200) {
+            return false;
+        }
+        std::string js(reinterpret_cast<const char*>(resp.body.data()), resp.body.size());
+        size_t pos = js.find("\"rooms\":");
+        if (pos == std::string::npos) return true;
+        pos = js.find('[', pos);
+        if (pos == std::string::npos) return true;
+        while (pos < js.size()) {
+            size_t lb = js.find('{', pos);
+            if (lb == std::string::npos) break;
+            size_t rb = js.find('}', lb);
+            if (rb == std::string::npos) break;
+            std::string item = js.substr(lb, rb - lb + 1);
+            PvpRoomInfo ri{};
+            ri.room_id = static_cast<uint32_t>(std::strtoul(json_extract_str(item, "room_id").c_str(), nullptr, 10));
+            ri.game = json_extract_str(item, "game");
+            ri.host = json_extract_str(item, "host");
+            if (ri.room_id != 0) out_rooms.push_back(std::move(ri));
+            pos = rb + 1;
+        }
         return true;
     }
 
@@ -434,10 +804,10 @@ public:
         std::string js(reinterpret_cast<const char*>(resp.body.data()), resp.body.size());
         if (json_extract_str(js, "ok") != "true") return false;
 
+        reset_match_buffers();
         room_id_ = static_cast<uint32_t>(std::strtoul(json_extract_str(js, "room_id").c_str(), nullptr, 10));
         token_   = static_cast<uint32_t>(std::strtoul(json_extract_str(js, "token").c_str(), nullptr, 10));
         slot_    = 1;
-        match_started_ = false;
         opponent_name_.clear();
         server_addr_str_ = server_host_port;
         return open_and_bind_udp(server_host_port);
@@ -458,13 +828,138 @@ public:
         std::string js(reinterpret_cast<const char*>(resp.body.data()), resp.body.size());
         if (json_extract_str(js, "ok") != "true") return false;
 
+        reset_match_buffers();
         room_id_       = static_cast<uint32_t>(std::strtoul(json_extract_str(js, "room_id").c_str(), nullptr, 10));
         token_         = static_cast<uint32_t>(std::strtoul(json_extract_str(js, "token").c_str(), nullptr, 10));
         opponent_name_ = json_extract_str(js, "host");
         slot_          = 2;
-        match_started_ = false;
         server_addr_str_ = server_host_port;
         return open_and_bind_udp(server_host_port);
+    }
+
+    void send_build_sync(const PvpFighterBuild& b) {
+        if (udp_fd_ < 0) return;
+        auto pl = b.serialize();
+        PvpPacketHeader h{};
+        h.pkt_type = PKT_BUILD_SYNC;
+        h.slot = slot_;
+        h.room_id = room_id_;
+        h.token = token_;
+        auto wire = h.serialize(pl.data(), pl.size());
+        ::sendto(udp_fd_, wire.data(), wire.size(), 0,
+                 reinterpret_cast<const sockaddr*>(&srv_addr_), srv_addr_len_);
+    }
+
+    void send_custom_commit(const PvpCustomCommit& c) {
+        if (udp_fd_ < 0) return;
+        auto pl = c.serialize();
+        PvpPacketHeader h{};
+        h.pkt_type = PKT_CUSTOM_COMMIT;
+        h.slot = slot_;
+        h.room_id = room_id_;
+        h.token = token_;
+        h.frame_or_seq = c.turn_no;
+        auto wire = h.serialize(pl.data(), pl.size());
+        ::sendto(udp_fd_, wire.data(), wire.size(), 0,
+                 reinterpret_cast<const sockaddr*>(&srv_addr_), srv_addr_len_);
+    }
+
+    bool has_remote_commit(uint16_t turn, PvpCustomCommit& out) const {
+        auto it = remote_commits_.find(turn);
+        if (it == remote_commits_.end()) return false;
+        out = it->second;
+        return true;
+    }
+
+    bool is_custom_acked(uint16_t turn) const {
+        return acked_custom_turns_.count(turn) > 0;
+    }
+
+    // Sends redundant window of up to 8 recent local inputs for (turn, latest_frame)
+    void send_input_bundle(uint16_t turn, uint32_t latest_frame, const int32_t* newest_first_masks, uint8_t count, uint16_t state_hash16 = 0) {
+        if (udp_fd_ < 0 || count == 0) return;
+        if (count > 8) count = 8;
+        // Cache locally too so we can answer PKT_INPUT_REQ directly via relay
+        for (uint8_t i = 0; i < count; ++i) {
+            if (latest_frame >= i) {
+                uint64_t key = (static_cast<uint64_t>(turn) << 32) | (latest_frame - i);
+                local_turn_inputs_[key] = newest_first_masks[i];
+            }
+        }
+        while (local_turn_inputs_.size() > 4096) {
+            local_turn_inputs_.erase(local_turn_inputs_.begin());
+        }
+
+        std::vector<uint8_t> pl;
+        pl.reserve(4 + count * 4);
+        net::push_be16(pl, turn);
+        pl.push_back(count);
+        pl.push_back(0);
+        for (uint8_t i = 0; i < count; ++i) {
+            net::push_be32(pl, newest_first_masks[i]);
+        }
+        PvpPacketHeader h{};
+        h.pkt_type = PKT_INPUT_BUNDLE;
+        h.slot = slot_;
+        h.room_id = room_id_;
+        h.token = token_;
+        h.frame_or_seq = latest_frame;
+        h.checksum16 = state_hash16;
+        auto wire = h.serialize(pl.data(), pl.size());
+        ::sendto(udp_fd_, wire.data(), wire.size(), 0,
+                 reinterpret_cast<const sockaddr*>(&srv_addr_), srv_addr_len_);
+    }
+
+    bool get_remote_turn_input(uint16_t turn, uint32_t frame, int32_t& mask_out, uint16_t* hash16_out = nullptr) const {
+        uint64_t key = (static_cast<uint64_t>(turn) << 32) | frame;
+        auto it = remote_turn_inputs_.find(key);
+        if (it == remote_turn_inputs_.end()) return false;
+        mask_out = it->second;
+        if (hash16_out) {
+            auto hit = remote_turn_hashes_.find(key);
+            *hash16_out = (hit != remote_turn_hashes_.end()) ? hit->second : 0;
+        }
+        return true;
+    }
+
+    bool has_any_remote_turn_input_after(uint16_t turn, uint32_t frame) const {
+        uint64_t key = (static_cast<uint64_t>(turn) << 32) | frame;
+        auto it = remote_turn_inputs_.upper_bound(key);
+        if (it == remote_turn_inputs_.end()) return false;
+        return static_cast<uint16_t>(it->first >> 32) == turn;
+    }
+
+    void request_missing_input(uint16_t turn, uint32_t missing_frame) {
+        if (udp_fd_ < 0) return;
+        uint64_t now = steady_millis();
+        uint64_t req_key = (static_cast<uint64_t>(turn) << 32) | missing_frame;
+        uint64_t min_interval = (req_key != last_input_req_key_) ? 20 : 50;
+        if (now - last_input_req_ms_ < min_interval) return;
+        last_input_req_ms_ = now;
+        last_input_req_key_ = req_key;
+        PvpPacketHeader h{};
+        h.pkt_type = PKT_INPUT_REQ;
+        h.slot = slot_;
+        h.room_id = room_id_;
+        h.token = token_;
+        h.frame_or_seq = missing_frame;
+        h.keypad_mask = static_cast<int32_t>(turn);
+        auto wire = h.serialize();
+        ::sendto(udp_fd_, wire.data(), wire.size(), 0,
+                 reinterpret_cast<const sockaddr*>(&srv_addr_), srv_addr_len_);
+    }
+
+    void send_match_end(int32_t winner_slot) {
+        if (udp_fd_ < 0 || room_id_ == 0) return;
+        PvpPacketHeader h{};
+        h.pkt_type = PKT_MATCH_END;
+        h.slot = slot_;
+        h.room_id = room_id_;
+        h.token = token_;
+        h.keypad_mask = winner_slot;
+        auto wire = h.serialize();
+        ::sendto(udp_fd_, wire.data(), wire.size(), 0,
+                 reinterpret_cast<const sockaddr*>(&srv_addr_), srv_addr_len_);
     }
 
     void send_frame_input(uint32_t frame, int32_t keypad_mask) {
@@ -510,6 +1005,25 @@ public:
     // Polls all pending UDP packets without blocking; returns true if PKT_MATCH_START newly arrived
     bool poll_udp() {
         if (udp_fd_ < 0) return false;
+        uint64_t now = steady_millis();
+        // Periodically refresh BIND until match_started_ so NAT mappings stay alive & dropped BINDs recover
+        if (room_id_ != 0 && !match_started_ && (now - last_bind_ms_) >= 500) {
+            last_bind_ms_ = now;
+            PvpPacketHeader b{};
+            b.pkt_type = PKT_BIND;
+            b.slot = slot_;
+            b.room_id = room_id_;
+            b.token = token_;
+            auto wire = b.serialize();
+            ::sendto(udp_fd_, wire.data(), wire.size(), 0,
+                     reinterpret_cast<const sockaddr*>(&srv_addr_), srv_addr_len_);
+        }
+        // Periodic ping during match for live HUD RTT display
+        if (room_id_ != 0 && match_started_ && (now - last_ping_ms_) >= 2000) {
+            last_ping_ms_ = now;
+            send_ping();
+        }
+
         bool newly_started = false;
         uint8_t buf[1500];
         while (true) {
@@ -532,6 +1046,94 @@ public:
             } else if (h.pkt_type == PKT_PONG) {
                 uint32_t now32 = static_cast<uint32_t>(steady_millis() & 0xFFFFFFFFu);
                 last_rtt_ms_ = static_cast<int>(now32 - h.frame_or_seq);
+            } else if (h.pkt_type == PKT_BUILD_SYNC) {
+                PvpFighterBuild fb{};
+                if (PvpFighterBuild::deserialize(payload, h.payload_len, fb)) {
+                    remote_build_ = std::move(fb);
+                    if (!remote_build_.player_name.empty()) {
+                        opponent_name_ = remote_build_.player_name;
+                    }
+                    has_remote_build_ = true;
+                    PvpPacketHeader ack{};
+                    ack.pkt_type = PKT_BUILD_ACK;
+                    ack.slot = slot_;
+                    ack.room_id = room_id_;
+                    ack.token = token_;
+                    auto awire = ack.serialize();
+                    ::sendto(udp_fd_, awire.data(), awire.size(), 0,
+                             reinterpret_cast<const sockaddr*>(&srv_addr_), srv_addr_len_);
+                }
+            } else if (h.pkt_type == PKT_BUILD_ACK) {
+                local_build_acked_ = true;
+            } else if (h.pkt_type == PKT_CUSTOM_COMMIT) {
+                PvpCustomCommit cc{};
+                if (PvpCustomCommit::deserialize(payload, h.payload_len, cc)) {
+                    remote_commits_[cc.turn_no] = cc;
+                    PvpPacketHeader ack{};
+                    ack.pkt_type = PKT_CUSTOM_ACK;
+                    ack.slot = slot_;
+                    ack.room_id = room_id_;
+                    ack.token = token_;
+                    ack.frame_or_seq = cc.turn_no;
+                    auto awire = ack.serialize();
+                    ::sendto(udp_fd_, awire.data(), awire.size(), 0,
+                             reinterpret_cast<const sockaddr*>(&srv_addr_), srv_addr_len_);
+                }
+            } else if (h.pkt_type == PKT_CUSTOM_ACK) {
+                acked_custom_turns_[static_cast<uint16_t>(h.frame_or_seq & 0xFFFF)] = true;
+            } else if (h.pkt_type == PKT_INPUT_BUNDLE) {
+                if (payload && h.payload_len >= 4) {
+                    uint16_t turn = static_cast<uint16_t>((payload[0] << 8) | payload[1]);
+                    uint8_t cnt = payload[2];
+                    if (cnt > 32) cnt = 32;
+                    if (h.payload_len >= static_cast<uint16_t>(4 + cnt * 4)) {
+                        for (uint8_t i = 0; i < cnt; ++i) {
+                            if (h.frame_or_seq < i) break;
+                            uint32_t f = h.frame_or_seq - i;
+                            size_t off = 4 + i * 4;
+                            int32_t mask = static_cast<int32_t>(
+                                (static_cast<uint32_t>(payload[off]) << 24) |
+                                (static_cast<uint32_t>(payload[off + 1]) << 16) |
+                                (static_cast<uint32_t>(payload[off + 2]) << 8) |
+                                static_cast<uint32_t>(payload[off + 3]));
+                            uint64_t key = (static_cast<uint64_t>(turn) << 32) | f;
+                            remote_turn_inputs_[key] = mask;
+                            if (i == 0 && h.checksum16 != 0) {
+                                remote_turn_hashes_[key] = h.checksum16;
+                            }
+                        }
+                        while (remote_turn_inputs_.size() > 4096) {
+                            remote_turn_inputs_.erase(remote_turn_inputs_.begin());
+                        }
+                        while (remote_turn_hashes_.size() > 4096) {
+                            remote_turn_hashes_.erase(remote_turn_hashes_.begin());
+                        }
+                    }
+                }
+            } else if (h.pkt_type == PKT_INPUT_REQ) {
+                uint16_t turn = static_cast<uint16_t>(h.keypad_mask & 0xFFFF);
+                uint32_t want_f = h.frame_or_seq;
+                for (uint32_t chunk = 0; chunk < 4; ++chunk) {
+                    uint32_t base_f = want_f + chunk * 8;
+                    std::vector<int32_t> masks;
+                    uint32_t top_f = base_f;
+                    for (uint32_t f = base_f; f < base_f + 8; ++f) {
+                        uint64_t key = (static_cast<uint64_t>(turn) << 32) | f;
+                        auto it = local_turn_inputs_.find(key);
+                        if (it == local_turn_inputs_.end()) break;
+                        masks.push_back(it->second);
+                        top_f = f;
+                    }
+                    if (masks.empty()) break;
+                    int32_t rev[8]{};
+                    uint8_t cnt = static_cast<uint8_t>(masks.size());
+                    for (uint8_t i = 0; i < cnt; ++i) rev[i] = masks[cnt - 1 - i];
+                    send_input_bundle(turn, top_f, rev, cnt, 0);
+                    if (cnt < 8) break;
+                }
+            } else if (h.pkt_type == PKT_MATCH_END) {
+                remote_match_ended_ = true;
+                remote_winner_slot_ = h.keypad_mask;
             } else if (h.pkt_type == PKT_FRAME_INPUT) {
                 remote_inputs_[h.frame_or_seq] = h.keypad_mask;
                 while (remote_inputs_.size() > 128) {
@@ -543,8 +1145,8 @@ public:
                     while (remote_states_.size() > 32) remote_states_.pop_front();
                 }
             } else if (h.pkt_type == PKT_DISCONNECT) {
+                peer_disconnected_ = true;
                 match_started_ = false;
-                room_id_ = 0;
             }
         }
         return newly_started;
@@ -565,26 +1167,36 @@ public:
     }
 
     void close_udp() {
+        uint32_t old_room = room_id_;
+        uint32_t old_token = token_;
+        std::string old_srv = server_addr_str_;
         if (udp_fd_ >= 0) {
-            if (room_id_ != 0) {
+            if (old_room != 0) {
                 PvpPacketHeader d{};
                 d.pkt_type = PKT_DISCONNECT;
                 d.slot = slot_;
-                d.room_id = room_id_;
-                d.token = token_;
+                d.room_id = old_room;
+                d.token = old_token;
                 auto wire = d.serialize();
+                // Send twice over UDP + reliable TCP /pvp/leave so rooms dissolve immediately
+                ::sendto(udp_fd_, wire.data(), wire.size(), 0,
+                         reinterpret_cast<const sockaddr*>(&srv_addr_), srv_addr_len_);
                 ::sendto(udp_fd_, wire.data(), wire.size(), 0,
                          reinterpret_cast<const sockaddr*>(&srv_addr_), srv_addr_len_);
             }
             ::close(udp_fd_);
             udp_fd_ = -1;
         }
+        reset_match_buffers();
         room_id_ = 0;
         token_ = 0;
         udp_bound_ = false;
-        match_started_ = false;
-        remote_inputs_.clear();
-        remote_states_.clear();
+        if (old_room != 0 && !old_srv.empty()) {
+            net::HttpResponse dummy{};
+            std::string uri = "/pvp/leave?room=" + std::to_string(old_room) +
+                              "&token=" + std::to_string(old_token);
+            net::http_request_tcp(old_srv, "POST", uri, {}, {}, dummy, 350);
+        }
     }
 
 private:
@@ -598,10 +1210,46 @@ private:
     uint32_t rng_seed_ = 0;
     bool udp_bound_ = false;
     bool match_started_ = false;
+    bool peer_disconnected_ = false;
+    bool remote_match_ended_ = false;
+    int32_t remote_winner_slot_ = -1;
+    bool has_remote_build_ = false;
+    bool local_build_acked_ = false;
+    PvpFighterBuild remote_build_{};
+    uint64_t last_bind_ms_ = 0;
+    uint64_t last_ping_ms_ = 0;
+    uint64_t last_input_req_ms_ = 0;
+    uint64_t last_input_req_key_ = UINT64_MAX;
     int last_rtt_ms_ = -1;
     std::string opponent_name_;
     std::map<uint32_t, int32_t> remote_inputs_;
+    std::map<uint64_t, int32_t> remote_turn_inputs_;
+    std::map<uint64_t, uint16_t> remote_turn_hashes_;
+    std::map<uint64_t, int32_t> local_turn_inputs_;
+    std::map<uint16_t, PvpCustomCommit> remote_commits_;
+    std::unordered_map<uint16_t, bool> acked_custom_turns_;
     std::deque<std::vector<uint8_t>> remote_states_;
+
+    void reset_match_buffers() {
+        match_started_ = false;
+        peer_disconnected_ = false;
+        remote_match_ended_ = false;
+        remote_winner_slot_ = -1;
+        has_remote_build_ = false;
+        local_build_acked_ = false;
+        remote_build_ = PvpFighterBuild{};
+        last_bind_ms_ = 0;
+        last_ping_ms_ = 0;
+        last_input_req_ms_ = 0;
+        last_input_req_key_ = UINT64_MAX;
+        remote_inputs_.clear();
+        remote_turn_inputs_.clear();
+        remote_turn_hashes_.clear();
+        local_turn_inputs_.clear();
+        remote_commits_.clear();
+        acked_custom_turns_.clear();
+        remote_states_.clear();
+    }
 
     bool open_and_bind_udp(const std::string& server_host_port) {
         std::string host;
@@ -627,6 +1275,7 @@ private:
         srv_addr_len_ = res->ai_addrlen;
         freeaddrinfo(res);
 
+        last_bind_ms_ = steady_millis();
         PvpPacketHeader b{};
         b.pkt_type = PKT_BIND;
         b.slot = slot_;

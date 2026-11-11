@@ -16,4 +16,7 @@ void set_custom_sav_path(const std::string& sav_path);
 // Override 60 FPS / 15 FPS presentation mode if explicitly passed via --fps
 void set_cli_fps_override(int fps);
 
+// Trigger automatic PvP room creation (mode=1) or join (mode=2) once game boots
+void set_cli_pvp_action(int mode, uint32_t room_id);
+
 } // namespace rmexe

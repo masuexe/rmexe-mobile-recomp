@@ -8,6 +8,10 @@
 #include <stdexcept>
 #include <iostream>
 
+namespace rmexe::pvp {
+class PvpClientSession;
+}
+
 namespace rmexe {
 
 // 32-bit handle into the deterministic object table (0 == null)
@@ -24,7 +28,11 @@ union Slot {
 
 struct JavaException : public std::exception {
     Ref exc_ref;
-    explicit JavaException(Ref r = 1) : exc_ref(r) {}
+    const char* where;
+    int32_t detail_a;
+    int32_t detail_b;
+    explicit JavaException(Ref r = 1, const char* w = "java", int32_t a = 0, int32_t b = 0)
+        : exc_ref(r), where(w), detail_a(a), detail_b(b) {}
     const char* what() const noexcept override { return "JavaException"; }
 };
 
@@ -106,6 +114,33 @@ struct HeapObject {
     std::shared_ptr<JarInflaterData> inflater;
 };
 
+struct FullHeapSnapshot {
+    std::vector<HeapObject> heap;
+    std::vector<std::pair<Ref, PaletteData>> palettes;
+    std::vector<std::pair<Ref, std::vector<uint32_t>>> offscreen_argb;
+    std::vector<std::pair<Ref, Ref>> paletted_image_refs;
+};
+
+struct FastCombatObjState {
+    Ref ref = 0;
+    std::vector<int32_t> fields_i32;
+    std::vector<int64_t> fields_i64;
+    uint64_t rng_seed = 0;
+};
+
+struct FastCombatSnapshot {
+    size_t base_heap_size = 0;
+    std::vector<FastCombatObjState> states;
+    std::vector<std::pair<Ref, Ref>> paletted_image_refs;
+    std::vector<HeapObject> extra_objs;
+};
+
+struct InjectedKeySpan {
+    int start_frame = 0;
+    int end_frame = 0;
+    int doja_key = 0;
+};
+
 // Runtime host interface implemented in doja_runtime.cpp
 class DojaRuntime {
 public:
@@ -127,7 +162,7 @@ public:
 
     HeapObject& get(Ref r) {
         if (r <= 0 || static_cast<size_t>(r) >= heap_.size()) {
-            throw JavaException(1);
+            throw JavaException(1, "get", r, static_cast<int32_t>(heap_.size()));
         }
         return heap_[r];
     }
@@ -135,8 +170,20 @@ public:
     int32_t array_length(Ref r);
 
     // Field & array access helpers
-    int32_t& field_i32(Ref obj, size_t idx) { return get(obj).fields_i32[idx]; }
-    int64_t& field_i64(Ref obj, size_t idx) { return get(obj).fields_i64[idx]; }
+    int32_t& field_i32(Ref obj, size_t idx) {
+        HeapObject& o = get(obj);
+        if (idx >= o.fields_i32.size()) {
+            throw JavaException(1, "field_i32", static_cast<int32_t>(idx), static_cast<int32_t>(o.fields_i32.size()));
+        }
+        return o.fields_i32[idx];
+    }
+    int64_t& field_i64(Ref obj, size_t idx) {
+        HeapObject& o = get(obj);
+        if (idx >= o.fields_i64.size()) {
+            throw JavaException(1, "field_i64", static_cast<int32_t>(idx), static_cast<int32_t>(o.fields_i64.size()));
+        }
+        return o.fields_i64[idx];
+    }
     int32_t& iaload(Ref arr, int32_t idx);
     uint8_t& baload_ref(Ref arr, int32_t idx);
     int32_t baload(Ref arr, int32_t idx);
@@ -161,12 +208,43 @@ public:
     void set_fast_forward(bool ff) { fast_forward_ = ff; }
     void set_config_path(const std::string& path);
     void inject_key_at_frame(int frame, int doja_key) {
-        injected_keys_.push_back({frame, doja_key});
+        injected_keys_.push_back({frame, frame, doja_key});
+    }
+    void inject_key_span(int start_frame, int end_frame, int doja_key) {
+        injected_keys_.push_back({start_frame, std::max(start_frame, end_frame), doja_key});
     }
 
     Ref current_app() const { return current_app_ref_; }
     void set_current_app(Ref app) { current_app_ref_ = app; }
     Ref current_canvas() const { return current_canvas_ref_; }
+    int frame_count() const { return frame_count_; }
+    uint32_t* framebuffer() { return framebuffer_; }
+
+    // Online PvP & GGPO Rollback host hooks
+    pvp::PvpClientSession& pvp_session();
+    std::string player_nickname() const;
+    int take_cli_pvp_action(uint32_t& room_id_out);
+    void set_pvp_match_active(bool active) { pvp_match_active_ = active; }
+    bool pvp_match_active() const { return pvp_match_active_; }
+    void set_suppress_av(bool sup) { suppress_av_ = sup; }
+    bool suppress_av() const { return suppress_av_; }
+    void set_keypad_override(bool enabled, int32_t mask) {
+        keypad_override_enabled_ = enabled;
+        keypad_override_mask_ = mask;
+    }
+    int32_t poll_local_pvp_keypad();
+
+    void save_full_snapshot(FullHeapSnapshot& out) const;
+    void restore_full_snapshot(const FullHeapSnapshot& in);
+    void save_combat_snapshot(FastCombatSnapshot& out, size_t min_ref = 1) const;
+    void restore_combat_snapshot(const FastCombatSnapshot& in);
+
+    // Framebuffer HUD overlay drawing helpers (240x240 screen space)
+    void fb_fill_rect_alpha(int rx, int ry, int rw, int rh, uint32_t argb);
+    void fb_draw_border(int rx, int ry, int rw, int rh, uint32_t argb);
+    int fb_measure_text(const std::string& utf8) const;
+    void fb_draw_text(const std::string& utf8, int x, int baseline_y, uint32_t color, bool shadow = true);
+    void show_ui_toast(const std::string& msg, int frames = 90);
 
 private:
     std::vector<HeapObject> heap_;
@@ -194,7 +272,11 @@ private:
     bool fast_forward_ = false;
     int64_t fake_time_ms_ = 1000;
     std::string dump_ppm_path_;
-    std::vector<std::pair<int, int>> injected_keys_;
+    std::vector<InjectedKeySpan> injected_keys_;
+    bool pvp_match_active_ = false;
+    bool suppress_av_ = false;
+    bool keypad_override_enabled_ = false;
+    int32_t keypad_override_mask_ = 0;
 
     // SDL handles (opaque pointers to avoid polluting generated code with SDL headers)
     void* sdl_window_ = nullptr;
