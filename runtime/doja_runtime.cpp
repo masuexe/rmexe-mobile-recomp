@@ -7,10 +7,15 @@
 #include <zlib.h>
 #include <iconv.h>
 #include <dlfcn.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -26,6 +31,13 @@ DojaRuntime* g_runtime = nullptr;
 // Dynamic FreeType2 loader for crisp CJK (Japanese) + English 12px font rendering
 // ============================================================================
 namespace {
+
+std::atomic<bool> g_quit_signal{false};
+
+void on_termination_signal(int sig) {
+    g_quit_signal.store(true, std::memory_order_relaxed);
+    std::signal(sig, SIG_DFL);
+}
 
 struct FreeTypeFont {
     void* lib_handle = nullptr;
@@ -527,8 +539,13 @@ struct MldAudioEngine {
         }
     }
 
+    ~MldAudioEngine() {
+        shutdown_sdl_audio();
+    }
+
     void shutdown_sdl_audio() {
         if (dev_id != 0) {
+            SDL_PauseAudioDevice(dev_id, 1);
             SDL_CloseAudioDevice(dev_id);
             dev_id = 0;
         }
@@ -2182,12 +2199,18 @@ struct UiInputManager {
         };
 
         while (menu_open) {
+            if (g_quit_signal.load(std::memory_order_relaxed)) {
+                quit_game = true;
+                menu_open = false;
+                break;
+            }
             if (g_pvp.poll_udp()) {
                 show_toast("对战配对成功! VS " + g_pvp.opponent_name(), 150);
             }
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
-                if (ev.type == SDL_QUIT) {
+                if (ev.type == SDL_QUIT ||
+                    (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_CLOSE)) {
                     quit_game = true;
                     menu_open = false;
                     break;
@@ -3000,9 +3023,16 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
 
     // Initialize SDL2 window & renderer (unless headless scale <= 0)
     if (scale > 0) {
+        SDL_SetHint(SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE, "1");
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
             std::cerr << "SDL_Init warning: " << SDL_GetError() << "\n";
         } else {
+#ifdef __linux__
+            prctl(PR_SET_PDEATHSIG, SIGHUP);
+#endif
+            std::signal(SIGINT, on_termination_signal);
+            std::signal(SIGTERM, on_termination_signal);
+            std::signal(SIGHUP, on_termination_signal);
             g_ui.load_config();
             if (!std::ifstream(g_ui.config_path).good()) {
                 g_ui.save_config();
@@ -3051,6 +3081,11 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
 }
 
 void DojaRuntime::shutdown() {
+    static bool s_shut_down = false;
+    if (!s_shut_down) {
+        s_shut_down = true;
+        save_sav_overlay();
+    }
     g_pvp.close_udp();
     g_ui.close_controllers();
     g_audio.shutdown_sdl_audio();
@@ -3066,8 +3101,22 @@ void DojaRuntime::shutdown() {
         SDL_DestroyWindow(static_cast<SDL_Window*>(sdl_window_));
         sdl_window_ = nullptr;
     }
-    SDL_Quit();
+    if (SDL_WasInit(0) != 0) {
+        SDL_Quit();
+    }
 }
+
+namespace {
+
+[[noreturn]] void clean_exit_runtime(DojaRuntime& rt, bool save_ui_cfg, int code) {
+    if (save_ui_cfg) {
+        g_ui.save_config();
+    }
+    rt.shutdown();
+    std::exit(code);
+}
+
+} // namespace
 
 void DojaRuntime::load_sav_overlay() {
     std::ifstream sav(sav_path_, std::ios::binary);
@@ -3258,6 +3307,9 @@ void DojaRuntime::draw_text_internal(HeapObject& gfx, const std::string& text, i
 }
 
 void DojaRuntime::poll_events() {
+    if (g_quit_signal.load(std::memory_order_relaxed)) {
+        clean_exit_runtime(*this, sdl_window_ != nullptr, 0);
+    }
     if (!sdl_window_) return;
     static bool in_modal = false;
 
@@ -3313,18 +3365,15 @@ void DojaRuntime::poll_events() {
         );
         in_modal = false;
         if (quit) {
-            save_sav_overlay();
-            g_ui.save_config();
-            std::exit(0);
+            clean_exit_runtime(*this, true, 0);
         }
     };
 
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
-        if (ev.type == SDL_QUIT) {
-            save_sav_overlay();
-            g_ui.save_config();
-            std::exit(0);
+        if (ev.type == SDL_QUIT ||
+            (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_CLOSE)) {
+            clean_exit_runtime(*this, true, 0);
         } else if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED) {
             g_ui.open_controllers();
         } else if (ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP) {
@@ -3516,8 +3565,7 @@ void DojaRuntime::present_screen() {
                 }
             }
         }
-        save_sav_overlay();
-        std::exit(0);
+        clean_exit_runtime(*this, false, 0);
     }
 }
 
@@ -3956,8 +4004,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
                 s_browser_launch_frame = -999;
                 return Slot(0);
             }
-            save_sav_overlay();
-            std::exit(0);
+            clean_exit_runtime(*this, false, 0);
         }
     }
 
