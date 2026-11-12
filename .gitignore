@@ -5,6 +5,7 @@ assets/**/*.jam
 assets/**/*.rpz
 assets/**/*.sav
 assets/**/*.zip
+assets/fonts/
 *.jar
 *.sp
 *.jam

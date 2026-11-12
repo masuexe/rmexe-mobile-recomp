@@ -267,6 +267,8 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
     for (cls_name, f_name, f_desc), c_var in sorted(static_fields.items()):
         c_type = "int64_t" if f_desc in ("J", "D") else "int32_t"
         lines.append(f"static {c_type} {c_var} = 0;")
+    if "sf_app_CpCanvas_bas_max_flg" in static_fields.values():
+        lines.append("#define HAS_SF_app_CpCanvas_bas_max_flg 1")
 
     sorted_statics = [(f_desc, c_var) for (_, _, f_desc), c_var in sorted(static_fields.items())]
     lines.extend(

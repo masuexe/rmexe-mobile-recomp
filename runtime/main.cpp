@@ -1,7 +1,18 @@
 #include "doja_runtime.hpp"
 #include "net_config.hpp"
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -23,6 +34,13 @@
 #endif
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE* fp = nullptr;
+        freopen_s(&fp, "CONOUT$", "w", stdout);
+        freopen_s(&fp, "CONOUT$", "w", stderr);
+    }
+#endif
     std::string jar_path = DEFAULT_JAR_PATH;
     std::string sp_path = DEFAULT_SP_PATH;
     std::string sav_path = DEFAULT_SAV_PATH;
@@ -59,6 +77,12 @@ int main(int argc, char** argv) {
             if (!explicit_server) rmexe::set_network_server("", true);
             uint32_t rid = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
             rmexe::set_cli_pvp_action(2, rid);
+        } else if (arg == "--pvp-self-test") {
+            headless = true;
+            fast_forward = true;
+            rt.set_pvp_self_test(true);
+        } else if (arg == "--pvp-auto-bot") {
+            rt.set_pvp_auto_bot(true);
         } else if (arg == "--uid" && i + 1 < argc) {
             rmexe::set_player_identity(argv[++i], "");
         } else if (arg == "--name" && i + 1 < argc) {
@@ -101,6 +125,8 @@ int main(int argc, char** argv) {
                       << "  --server <host:port>  Connect to rmexe_server    (e.g. 127.0.0.1:8765)\n"
                       << "  --pvp-create          Auto-create an online PvP NetBattle room on boot\n"
                       << "  --pvp-join <room_id>  Auto-join PvP room <room_id> (0 = quick match)\n"
+                      << "  --pvp-self-test       Run headless 213-chip PvP symmetry & GGPO rollback suite\n"
+                      << "  --pvp-auto-bot        Drive automated PvP inputs in --pvp-create/--pvp-join\n"
                       << "  --offline             Use built-in offline Capcom i-mode simulation\n"
                       << "  --uid <id>            Override subscriber UID for cloud saves/rankings\n"
                       << "  --name <nick>         Override player nickname   (up to 12 ASCII chars)\n"
@@ -121,7 +147,7 @@ int main(int argc, char** argv) {
         rt.set_max_frames(max_frames, dump_ppm_path);
     }
 
-    if (!rt.init(jar_path, sp_path, "", headless ? 0 : scale)) {
+    if (!rt.init(jar_path, sp_path, "", headless ? 0 : scale, DEFAULT_WINDOW_TITLE)) {
         return 1;
     }
 

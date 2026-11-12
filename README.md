@@ -25,7 +25,7 @@ Supports both the **original Japanese releases** (`PoN_jp`, `LoN_jp`) and the **
   - **Dual-Mode Capcom i-mode Network & Unified PvP Server ([`common/capcom_protocol.hpp`](common/capcom_protocol.hpp), [`common/pvp_protocol.hpp`](common/pvp_protocol.hpp), [`server/rmexe_server.cpp`](server/rmexe_server.cpp))**:
     - **Built-in Offline Fallback (Zero-Config Single-Player)**: Simulates all original Capcom i-mode endpoints (`buyreg`, server date, `scck` episodic unlocks, `pts` portal points, `DataSave`/`Load` cloud backups, `exesr` Top-10 Virus Busting leaderboard & rival chip folders, and `dataget.php` seasonal 10-wave courses) locally in `capcom_local.db`.
     - **Standalone Unified Server (`rmexe_server`)**: Multiplexes **TCP HTTP/1.1** (multi-user Capcom cloud saves, live global Virus Busting leaderboard, and PvP room matchmaking) and **UDP** (low-latency real-time PvP NetBattle frame-input lockstep/rollback relay) on a single port (`8765`).
-  - **Shift-JIS (`CP932`) $\leftrightarrow$ `UTF-8` & CJK Font Rendering**: Automatic string transcoding via `iconv` and crisp 12px Japanese/English glyph rendering via `libfreetype`.
+  - **Cross-Platform Linux & Windows Support (`CP932` $\leftrightarrow$ `UTF-8` & Portable CJK Font Engine)**: Automatic Shift-JIS transcoding (`iconv` on Linux, Win32 NLS on Windows), cross-platform POSIX/Winsock2 networking ([`common/platform_socket.hpp`](common/platform_socket.hpp)), and crisp 12px Japanese/Chinese/English glyph rendering via embedded `stb_truetype`.
 
 ---
 
@@ -34,16 +34,19 @@ Supports both the **original Japanese releases** (`PoN_jp`, `LoN_jp`) and the **
 ```text
 rmexe-mobile-recomp/
 ├── ARCHITECTURE.md          # Full technical specification (60 FPS interpolation & GGPO PvP design)
-├── CMakeLists.txt           # CMake build system for rmexe_server and all 4 game variants
+├── CMakeLists.txt           # Cross-platform CMake build system (Linux & Windows)
 ├── assets/                  # Place user-supplied .jar, .sp, and .jam files here (gitignored)
 │   └── README.md            # Directory structure instructions for JP and EN assets
 ├── common/
 │   ├── capcom_protocol.hpp  # Capcom i-mode binary protocol & persistent cloud/leaderboard engine
+│   ├── platform_socket.hpp  # Cross-platform POSIX / Winsock2 TCP & UDP socket abstraction
 │   ├── pvp_protocol.hpp     # PvP matchmaking REST + 28-byte UDP real-time frame-sync protocol
+│   ├── stb_truetype.h       # Embedded public-domain TrueType/OpenType CJK font rasterizer
 │   └── ymu762_fm.hpp        # Yamaha MA-3 (YMU762) / MA-5 (YMU765) 6-waveform ROM & 4-Op FM patches
 ├── runtime/
 │   ├── doja_runtime.hpp     # Deterministic heap, slot types, and DoJaRuntime interface
 │   ├── doja_runtime.cpp     # Clean-room DoJa/CLDC runtime, MA-3/MA-5 FM audio, 60 FPS interpolator, UI
+│   ├── pvp_pon_engine.inl   # Symmetric 2-player GGPO rollback online PvP engine for PoN
 │   ├── net_config.hpp       # CLI/config network, FPS mode & player identity bridge
 │   └── main.cpp             # CLI entry point, headless smoke-test & frame capture harness
 ├── server/
@@ -59,11 +62,11 @@ rmexe-mobile-recomp/
 
 ## Building
 
-### Prerequisites (Linux / WSL2)
+### Prerequisites (Linux / WSL2 / Windows)
 
-- C++20 compiler (`g++ >= 10` or `clang++ >= 12`)
+- C++20 compiler (`g++ >= 10`, `clang++ >= 12`, MinGW-w64 / Zig C++, or MSVC)
 - `cmake >= 3.16`, `python3 >= 3.8`
-- `libsdl2-dev`, `zlib1g-dev`, `libfreetype6`
+- `SDL2` and `zlib` (`libsdl2-dev` and `zlib1g-dev` on Debian/Ubuntu)
 
 ### 1. Place Game Assets
 
@@ -119,7 +122,9 @@ Press **`F1`** or **`Esc`** (or **`Start`** on a Gamepad) at any time during gam
 | **B Button** (Cancel / Mega Buster) | `KEY_ASTERISK` (`0x0A`) | `X`, `K` | `B` / Circle |
 | **L Button** (Left Softkey / Custom) | `KEY_SOFT1` (`0x15`) | `Q`, `U` | `LB` / `L1` |
 | **R Button** (Right Softkey / PET Menu) | `KEY_SOFT2` (`0x16`) | `E`, `I` (plus `Backspace`) | `RB` / `R1` |
-| **Pound / #** | `KEY_POUND` (`0x0B`) | `C`, `L` | `X` / Square |
+| **Pound / #** (Sort Folder / Buster) | `KEY_POUND` (`0x0B`) | `C`, `L` | `X` / Square |
+| **Page Up / 1** (List Page Up / PoN Rival Folder) | `KEY_1` (`0x01`) | `1`, `PageUp` | `LT` / `L2` |
+| **Page Down / 4** (List Page Down) | `KEY_4` (`0x04`) | `4`, `PageDown` | `RT` / `R2` |
 | **Hold Fast-Forward (Turbo)** | — | `Tab`, `` ` `` | `Y` / Triangle |
 | Numeric Keypad (`0`–`9`) | `KEY_0`–`KEY_9` (`0x00`–`0x09`) | `0`–`9` / Numpad `0`–`9` | — |
 
@@ -143,4 +148,4 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the complete engineering design, in
 - **Phase 1**: Static Bytecode & ScratchPad Survey (`tools/survey_doja.py`) — **Completed**
 - **Phase 2**: Ahead-of-Time JVM-to-C++20 Recompiler, SDL2 Native Runtime & Yamaha MA-3/MA-5 Stereo FM Audio (`tools/recomp_jar.py`, `runtime/`, `common/ymu762_fm.hpp`) — **Completed**
 - **Phase 3**: High-Frame-Rate (60 FPS) Display-List Motion Interpolation & `60 FPS / 15 FPS` Toggle — **Completed**
-- **Phase 4**: Real-Time PvP NetBattle Expansion with GGPO Rollback Netcode (Unified `rmexe_server` TCP+UDP transport ready; combat engine dual-player hook next)
+- **Phase 4**: Real-Time PvP NetBattle Expansion with GGPO Rollback Netcode (`PoN` JP/EN completed in `runtime/pvp_pon_engine.inl`; `LoN` PvP expansion next)

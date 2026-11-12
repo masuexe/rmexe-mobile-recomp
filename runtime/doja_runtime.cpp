@@ -1,3 +1,4 @@
+#define SDL_MAIN_HANDLED
 #include "doja_runtime.hpp"
 #include "net_config.hpp"
 #include "../common/pvp_protocol.hpp"
@@ -5,11 +6,17 @@
 
 #include <SDL2/SDL.h>
 #include <zlib.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <iconv.h>
-#include <dlfcn.h>
+#endif
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
+
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "../common/stb_truetype.h"
 
 #include <algorithm>
 #include <atomic>
@@ -18,17 +25,19 @@
 #include <csignal>
 #include <cstdio>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 
 namespace rmexe {
 
 DojaRuntime* g_runtime = nullptr;
 
 // ============================================================================
-// Dynamic FreeType2 loader for crisp CJK (Japanese) + English 12px font rendering
+// Portable TrueType/OpenType CJK + English 12px Font Engine (stb_truetype)
 // ============================================================================
 namespace {
 
@@ -39,50 +48,153 @@ void on_termination_signal(int sig) {
     std::signal(sig, SIG_DFL);
 }
 
-struct FreeTypeFont {
-    void* lib_handle = nullptr;
-    void* ft_library = nullptr;
-    void* ft_face = nullptr;
+std::string get_exe_base_dir() {
+    char* base = SDL_GetBasePath();
+    if (!base) return "";
+    std::string s(base);
+    SDL_free(base);
+    return s;
+}
+
+std::string resolve_runtime_path(const std::string& rel_or_abs, const std::string& base_dir) {
+    if (rel_or_abs.empty()) return rel_or_abs;
+    std::error_code ec;
+    if (std::filesystem::exists(rel_or_abs, ec) || std::filesystem::path(rel_or_abs).is_absolute() || base_dir.empty()) {
+        return rel_or_abs;
+    }
+    std::filesystem::path cand = std::filesystem::path(base_dir) / rel_or_abs;
+    if (std::filesystem::exists(cand, ec)) {
+        return cand.string();
+    }
+    return rel_or_abs;
+}
+
+struct StbFontEngine {
+    struct CachedGlyph {
+        bool valid = false;
+        int adv_x = 6;
+        int xoff = 0;
+        int yoff = 0;
+        int width = 0;
+        int rows = 0;
+        std::vector<uint8_t> bmp;
+    };
+
+    std::vector<uint8_t> font_bytes;
+    stbtt_fontinfo info{};
+    float scale = 1.0f;
+    bool loaded = false;
     bool initialized = false;
+    std::unordered_map<uint32_t, CachedGlyph> cache;
 
-    using fn_Init = int (*)(void**);
-    using fn_NewFace = int (*)(void*, const char*, long, void**);
-    using fn_SetPixelSizes = int (*)(void*, unsigned int, unsigned int);
-    using fn_LoadChar = int (*)(void*, unsigned long, int);
+    bool try_load_file(const std::string& path, bool require_cjk) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return false;
+        std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (buf.size() < 64) return false;
 
-    fn_LoadChar load_char = nullptr;
+        int offset = stbtt_GetFontOffsetForIndex(buf.data(), 0);
+        if (offset < 0) return false;
 
-    void init() {
+        stbtt_fontinfo tmp{};
+        if (!stbtt_InitFont(&tmp, buf.data(), offset)) return false;
+        if (require_cjk && stbtt_FindGlyphIndex(&tmp, 0x3042) == 0 && stbtt_FindGlyphIndex(&tmp, 0x4E2D) == 0) {
+            return false;
+        }
+
+        font_bytes = std::move(buf);
+        if (!stbtt_InitFont(&info, font_bytes.data(), offset)) {
+            font_bytes.clear();
+            return false;
+        }
+        scale = stbtt_ScaleForMappingEmToPixels(&info, 12.0f);
+        if (scale <= 0.0f) {
+            scale = stbtt_ScaleForPixelHeight(&info, 13.0f);
+        }
+        cache.clear();
+        loaded = true;
+        return true;
+    }
+
+    void init(const std::string& base_dir) {
         if (initialized) return;
         initialized = true;
-        lib_handle = dlopen("libfreetype.so.6", RTLD_LAZY);
-        if (!lib_handle) return;
 
-        auto init_ft = reinterpret_cast<fn_Init>(dlsym(lib_handle, "FT_Init_FreeType"));
-        auto new_face = reinterpret_cast<fn_NewFace>(dlsym(lib_handle, "FT_New_Face"));
-        auto set_sizes = reinterpret_cast<fn_SetPixelSizes>(dlsym(lib_handle, "FT_Set_Pixel_Sizes"));
-        load_char = reinterpret_cast<fn_LoadChar>(dlsym(lib_handle, "FT_Load_Char"));
-        if (!init_ft || !new_face || !set_sizes || !load_char) return;
+        std::vector<std::string> cjk_candidates;
+        if (!base_dir.empty()) {
+            cjk_candidates.push_back(base_dir + "assets/fonts/wqy-microhei.ttc");
+            cjk_candidates.push_back(base_dir + "wqy-microhei.ttc");
+        }
+        cjk_candidates.push_back("assets/fonts/wqy-microhei.ttc");
+        cjk_candidates.push_back("wqy-microhei.ttc");
+#ifdef _WIN32
+        const char* win_dir = std::getenv("WINDIR");
+        std::string wfonts = (win_dir && *win_dir) ? (std::string(win_dir) + "\\Fonts\\") : "C:\\Windows\\Fonts\\";
+        cjk_candidates.push_back(wfonts + "msgothic.ttc");
+        cjk_candidates.push_back(wfonts + "msyh.ttc");
+        cjk_candidates.push_back(wfonts + "YuGothR.ttc");
+        cjk_candidates.push_back(wfonts + "meiryo.ttc");
+#else
+        cjk_candidates.push_back("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc");
+        cjk_candidates.push_back("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
+        cjk_candidates.push_back("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc");
+        cjk_candidates.push_back("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc");
+#endif
+        for (const auto& p : cjk_candidates) {
+            if (try_load_file(p, true)) return;
+        }
 
-        if (init_ft(&ft_library) != 0) return;
-        const char* font_paths[] = {
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        const char* fallback_paths[] = {
+#ifdef _WIN32
+            "C:\\Windows\\Fonts\\arial.ttf",
+#else
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+#endif
         };
-        for (const char* path : font_paths) {
-            if (new_face(ft_library, path, 0, &ft_face) == 0 && ft_face) {
-                set_sizes(ft_face, 0, 12);
-                break;
-            }
+        for (const char* p : fallback_paths) {
+            if (try_load_file(p, false)) return;
         }
+    }
+
+    const CachedGlyph* get_glyph(uint32_t cp) {
+        if (!loaded) return nullptr;
+        auto it = cache.find(cp);
+        if (it != cache.end()) {
+            return it->second.valid ? &it->second : nullptr;
+        }
+
+        CachedGlyph cg{};
+        int gidx = stbtt_FindGlyphIndex(&info, static_cast<int>(cp));
+        if (gidx == 0 && cp > 0x7F) {
+            cache.emplace(cp, std::move(cg));
+            return nullptr;
+        }
+
+        int adv_raw = 0, lsb_raw = 0;
+        stbtt_GetCodepointHMetrics(&info, static_cast<int>(cp), &adv_raw, &lsb_raw);
+        int adv_px = static_cast<int>(std::lround(adv_raw * scale));
+        cg.adv_x = (adv_px > 0) ? adv_px : ((cp < 0x80) ? 6 : 12);
+
+        int w = 0, h = 0, xoff = 0, yoff = 0;
+        unsigned char* raw_bmp = stbtt_GetCodepointBitmap(&info, scale, scale, static_cast<int>(cp), &w, &h, &xoff, &yoff);
+        if (raw_bmp && w > 0 && h > 0 && w < 64 && h < 64) {
+            cg.width = w;
+            cg.rows = h;
+            cg.xoff = xoff;
+            cg.yoff = yoff;
+            cg.bmp.assign(raw_bmp, raw_bmp + (w * h));
+        }
+        if (raw_bmp) {
+            stbtt_FreeBitmap(raw_bmp, nullptr);
+        }
+        cg.valid = true;
+        auto [ins_it, _] = cache.emplace(cp, std::move(cg));
+        return &ins_it->second;
     }
 };
 
-static FreeTypeFont g_ft;
+static StbFontEngine g_ft;
 
 // Convert Shift-JIS (CP932) bytes to UTF-8 string
 std::string cp932_to_utf8(const uint8_t* data, size_t len) {
@@ -94,6 +206,21 @@ std::string cp932_to_utf8(const uint8_t* data, size_t len) {
     }
     if (actual_len == 0) return "";
 
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(932, 0, reinterpret_cast<const char*>(data), static_cast<int>(actual_len), nullptr, 0);
+    if (wlen <= 0) {
+        return std::string(reinterpret_cast<const char*>(data), actual_len);
+    }
+    std::wstring wstr(static_cast<size_t>(wlen), L'\0');
+    MultiByteToWideChar(932, 0, reinterpret_cast<const char*>(data), static_cast<int>(actual_len), wstr.data(), wlen);
+    int ulen = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), wlen, nullptr, 0, nullptr, nullptr);
+    if (ulen <= 0) {
+        return std::string(reinterpret_cast<const char*>(data), actual_len);
+    }
+    std::string out(static_cast<size_t>(ulen), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wstr.data(), wlen, out.data(), ulen, nullptr, nullptr);
+    return out;
+#else
     iconv_t cd = iconv_open("UTF-8", "CP932");
     if (cd == reinterpret_cast<iconv_t>(-1)) {
         return std::string(reinterpret_cast<const char*>(data), actual_len);
@@ -107,11 +234,27 @@ std::string cp932_to_utf8(const uint8_t* data, size_t len) {
     iconv_close(cd);
     out.resize(out.size() - outbytes);
     return out;
+#endif
 }
 
 // Convert UTF-8 string back to CP932 bytes
 std::vector<uint8_t> utf8_to_cp932(const std::string& utf8) {
     if (utf8.empty()) return {};
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    if (wlen <= 0) {
+        return std::vector<uint8_t>(utf8.begin(), utf8.end());
+    }
+    std::wstring wstr(static_cast<size_t>(wlen), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), wstr.data(), wlen);
+    int clen = WideCharToMultiByte(932, 0, wstr.data(), wlen, nullptr, 0, nullptr, nullptr);
+    if (clen <= 0) {
+        return std::vector<uint8_t>(utf8.begin(), utf8.end());
+    }
+    std::vector<uint8_t> out(static_cast<size_t>(clen), 0);
+    WideCharToMultiByte(932, 0, wstr.data(), wlen, reinterpret_cast<char*>(out.data()), clen, nullptr, nullptr);
+    return out;
+#else
     iconv_t cd = iconv_open("CP932", "UTF-8");
     if (cd == reinterpret_cast<iconv_t>(-1)) {
         return std::vector<uint8_t>(utf8.begin(), utf8.end());
@@ -125,6 +268,7 @@ std::vector<uint8_t> utf8_to_cp932(const std::string& utf8) {
     iconv_close(cd);
     out.resize(out.size() - outbytes);
     return out;
+#endif
 }
 
 // Decode UTF-8 into Unicode codepoints (UTF-32) for accurate Java char indexing
@@ -1603,9 +1747,14 @@ enum BindAction : int {
     ACT_SOFT1,
     ACT_SOFT2,
     ACT_POUND,
+    ACT_KEY1,
+    ACT_KEY4,
     ACT_TURBO,
     ACT_COUNT
 };
+
+static constexpr int PAD_BTN_LT = 100;
+static constexpr int PAD_BTN_RT = 101;
 
 struct ActionBinding {
     const char* cfg_id;
@@ -1652,8 +1801,8 @@ struct UiInputManager {
     std::string soft_label_right;
 
     // Network & PvP settings (persisted in controls.cfg, overridable via CLI)
-    bool online_mode = true;
-    std::string server_url = "111.229.100.54:8765";
+    bool online_mode = false;
+    std::string server_url = "127.0.0.1:8765";
     std::string player_uid = generate_random_uid();
     std::string player_name = "ROCKMAN";
     bool is_lon_game = false;
@@ -1686,15 +1835,17 @@ struct UiInputManager {
     }
 
     void reset_defaults() {
-        binds[ACT_UP]     = {"up",     "上移",     0x11, {SDLK_UP,    SDLK_w}, SDL_CONTROLLER_BUTTON_DPAD_UP};
-        binds[ACT_DOWN]   = {"down",   "下移",     0x13, {SDLK_DOWN,  SDLK_s}, SDL_CONTROLLER_BUTTON_DPAD_DOWN};
-        binds[ACT_LEFT]   = {"left",   "左移",     0x10, {SDLK_LEFT,  SDLK_a}, SDL_CONTROLLER_BUTTON_DPAD_LEFT};
-        binds[ACT_RIGHT]  = {"right",  "右移",     0x12, {SDLK_RIGHT, SDLK_d}, SDL_CONTROLLER_BUTTON_DPAD_RIGHT};
-        binds[ACT_SELECT] = {"select", "决定/A",   0x14, {SDLK_z,     SDLK_j}, SDL_CONTROLLER_BUTTON_A};
-        binds[ACT_CANCEL] = {"cancel", "取消/B",   0x0A, {SDLK_x,     SDLK_k}, SDL_CONTROLLER_BUTTON_B};
-        binds[ACT_SOFT1]  = {"soft1",  "左软键/L", 0x15, {SDLK_q,     SDLK_u}, SDL_CONTROLLER_BUTTON_LEFTSHOULDER};
-        binds[ACT_SOFT2]  = {"soft2",  "右软键/R", 0x16, {SDLK_e,     SDLK_i}, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER};
-        binds[ACT_POUND]  = {"pound",  "井号/#",   0x0B, {SDLK_c,     SDLK_l}, SDL_CONTROLLER_BUTTON_X};
+        binds[ACT_UP]     = {"up",     "上移",     0x11, {SDLK_UP,    SDLK_w},        SDL_CONTROLLER_BUTTON_DPAD_UP};
+        binds[ACT_DOWN]   = {"down",   "下移",     0x13, {SDLK_DOWN,  SDLK_s},        SDL_CONTROLLER_BUTTON_DPAD_DOWN};
+        binds[ACT_LEFT]   = {"left",   "左移",     0x10, {SDLK_LEFT,  SDLK_a},        SDL_CONTROLLER_BUTTON_DPAD_LEFT};
+        binds[ACT_RIGHT]  = {"right",  "右移",     0x12, {SDLK_RIGHT, SDLK_d},        SDL_CONTROLLER_BUTTON_DPAD_RIGHT};
+        binds[ACT_SELECT] = {"select", "决定/A",   0x14, {SDLK_z,     SDLK_j},        SDL_CONTROLLER_BUTTON_A};
+        binds[ACT_CANCEL] = {"cancel", "取消/B",   0x0A, {SDLK_x,     SDLK_k},        SDL_CONTROLLER_BUTTON_B};
+        binds[ACT_SOFT1]  = {"soft1",  "左软键/L", 0x15, {SDLK_q,     SDLK_u},        SDL_CONTROLLER_BUTTON_LEFTSHOULDER};
+        binds[ACT_SOFT2]  = {"soft2",  "右软键/R", 0x16, {SDLK_e,     SDLK_i},        SDL_CONTROLLER_BUTTON_RIGHTSHOULDER};
+        binds[ACT_POUND]  = {"pound",  "井号/#",   0x0B, {SDLK_c,     SDLK_l},        SDL_CONTROLLER_BUTTON_X};
+        binds[ACT_KEY1]   = {"key1",   "上翻页/1", 0x01, {SDLK_1,     SDLK_PAGEUP},   PAD_BTN_LT};
+        binds[ACT_KEY4]   = {"key4",   "下翻页/4", 0x04, {SDLK_4,     SDLK_PAGEDOWN}, PAD_BTN_RT};
         binds[ACT_TURBO]  = {"turbo",  "按住倍速", -1,   {SDLK_TAB,   SDLK_BACKQUOTE}, SDL_CONTROLLER_BUTTON_Y};
     }
 
@@ -1741,11 +1892,15 @@ struct UiInputManager {
 
     static int parse_pad_str(const std::string& v) {
         if (v.empty() || v == "None" || v == "none") return SDL_CONTROLLER_BUTTON_INVALID;
+        if (v == "lefttrigger"  || v == "LT" || v == "lt" || v == "L2" || v == "l2") return PAD_BTN_LT;
+        if (v == "righttrigger" || v == "RT" || v == "rt" || v == "R2" || v == "r2") return PAD_BTN_RT;
         return static_cast<int>(SDL_GameControllerGetButtonFromString(v.c_str()));
     }
 
     static std::string format_pad_cfg(int btn) {
         if (btn < 0) return "None";
+        if (btn == PAD_BTN_LT) return "lefttrigger";
+        if (btn == PAD_BTN_RT) return "righttrigger";
         const char* nm = SDL_GameControllerGetStringForButton(static_cast<SDL_GameControllerButton>(btn));
         return (nm && nm[0]) ? std::string(nm) : "None";
     }
@@ -1764,6 +1919,10 @@ struct UiInputManager {
             case SDLK_LALT:      return "LAlt";
             case SDLK_RALT:      return "RAlt";
             case SDLK_BACKQUOTE: return "`";
+            case SDLK_PAGEUP:    return "PgUp";
+            case SDLK_PAGEDOWN:  return "PgDn";
+            case SDLK_HOME:      return "Home";
+            case SDLK_END:       return "End";
             case SDLK_UP:        return "Up";
             case SDLK_DOWN:      return "Down";
             case SDLK_LEFT:      return "Left";
@@ -1796,6 +1955,8 @@ struct UiInputManager {
             case SDL_CONTROLLER_BUTTON_DPAD_DOWN:     return "DpDn";
             case SDL_CONTROLLER_BUTTON_DPAD_LEFT:     return "DpLt";
             case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:    return "DpRt";
+            case PAD_BTN_LT:                          return "LT";
+            case PAD_BTN_RT:                          return "RT";
             default: return "---";
         }
     }
@@ -1825,6 +1986,8 @@ struct UiInputManager {
             apply_cli_overrides();
             return;
         }
+        bool seen_key[ACT_COUNT][2] = {};
+        bool seen_pad[ACT_COUNT] = {};
         std::string line;
         while (std::getline(f, line)) {
             std::string s = trim(line);
@@ -1855,9 +2018,30 @@ struct UiInputManager {
             } else {
                 for (int i = 0; i < ACT_COUNT; ++i) {
                     std::string pfx = std::string(binds[i].cfg_id) + "_";
-                    if (key == pfx + "key1") binds[i].keys[0] = parse_key_str(val);
-                    else if (key == pfx + "key2") binds[i].keys[1] = parse_key_str(val);
-                    else if (key == pfx + "pad")  binds[i].pad_btn = parse_pad_str(val);
+                    if (key == pfx + "key1") { binds[i].keys[0] = parse_key_str(val); seen_key[i][0] = true; }
+                    else if (key == pfx + "key2") { binds[i].keys[1] = parse_key_str(val); seen_key[i][1] = true; }
+                    else if (key == pfx + "pad")  { binds[i].pad_btn = parse_pad_str(val); seen_pad[i] = true; }
+                }
+            }
+        }
+        // Ensure older configs without newly-added actions don't collide with explicit user bindings
+        for (int i = 0; i < ACT_COUNT; ++i) {
+            for (int s = 0; s < 2; ++s) {
+                if (seen_key[i][s] && binds[i].keys[s] != SDLK_UNKNOWN) {
+                    for (int j = 0; j < ACT_COUNT; ++j) {
+                        for (int t = 0; t < 2; ++t) {
+                            if ((j != i || t != s) && !seen_key[j][t] && binds[j].keys[t] == binds[i].keys[s]) {
+                                binds[j].keys[t] = SDLK_UNKNOWN;
+                            }
+                        }
+                    }
+                }
+            }
+            if (seen_pad[i] && binds[i].pad_btn >= 0) {
+                for (int j = 0; j < ACT_COUNT; ++j) {
+                    if (j != i && !seen_pad[j] && binds[j].pad_btn == binds[i].pad_btn) {
+                        binds[j].pad_btn = SDL_CONTROLLER_BUTTON_INVALID;
+                    }
                 }
             }
         }
@@ -1865,24 +2049,47 @@ struct UiInputManager {
     }
 
     void save_config() const {
-        std::ofstream f(config_path, std::ios::trunc);
-        if (!f) return;
-        f << "# rmexe-mobile-recomp keybindings, frame rate, network & emulator settings\n";
+        int master_vol = 100;
+        bool is_muted = false;
         {
             std::lock_guard<std::mutex> lk(g_audio.mtx);
-            f << "master_volume=" << g_audio.master_volume << "\n";
-            f << "muted=" << (g_audio.muted ? 1 : 0) << "\n";
+            master_vol = g_audio.master_volume;
+            is_muted = g_audio.muted;
         }
-        f << "high_fps_mode=" << (high_fps_mode ? 1 : 0) << "\n";
-        f << "show_softkey_bar=" << (show_softkey_bar ? 1 : 0) << "\n";
-        f << "online_mode=" << (online_mode ? 1 : 0) << "\n";
-        f << "server_url=" << server_url << "\n";
-        f << "player_uid=" << player_uid << "\n";
-        f << "player_name=" << player_name << "\n\n";
+
+        std::ostringstream out;
+        out << "# rmexe-mobile-recomp keybindings, frame rate, network & emulator settings\n";
+        out << "master_volume=" << master_vol << "\n";
+        out << "muted=" << (is_muted ? 1 : 0) << "\n";
+        out << "high_fps_mode=" << (high_fps_mode ? 1 : 0) << "\n";
+        out << "show_softkey_bar=" << (show_softkey_bar ? 1 : 0) << "\n";
+        out << "online_mode=" << (online_mode ? 1 : 0) << "\n";
+        out << "server_url=" << server_url << "\n";
+        out << "player_uid=" << player_uid << "\n";
+        out << "player_name=" << player_name << "\n\n";
         for (int i = 0; i < ACT_COUNT; ++i) {
-            f << binds[i].cfg_id << "_key1=" << format_key_cfg(binds[i].keys[0]) << "\n";
-            f << binds[i].cfg_id << "_key2=" << format_key_cfg(binds[i].keys[1]) << "\n";
-            f << binds[i].cfg_id << "_pad="  << format_pad_cfg(binds[i].pad_btn) << "\n";
+            out << binds[i].cfg_id << "_key1=" << format_key_cfg(binds[i].keys[0]) << "\n";
+            out << binds[i].cfg_id << "_key2=" << format_key_cfg(binds[i].keys[1]) << "\n";
+            out << binds[i].cfg_id << "_pad="  << format_pad_cfg(binds[i].pad_btn) << "\n";
+        }
+
+        const std::string data = out.str();
+        const std::string tmp_path = config_path + ".tmp";
+        {
+            std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
+            if (!f) return;
+            f.write(data.data(), static_cast<std::streamsize>(data.size()));
+            if (!f.good()) {
+                std::remove(tmp_path.c_str());
+                return;
+            }
+        }
+        std::error_code ec;
+        std::filesystem::rename(tmp_path, config_path, ec);
+        if (ec) {
+            std::ofstream f(config_path, std::ios::binary | std::ios::trunc);
+            if (f) f.write(data.data(), static_cast<std::streamsize>(data.size()));
+            std::remove(tmp_path.c_str());
         }
     }
 
@@ -1946,16 +2153,11 @@ struct UiInputManager {
         auto cps = utf8_to_codepoints(utf8);
         int w = 0;
         for (uint32_t cp : cps) {
-            if (g_ft.ft_face && g_ft.load_char && g_ft.load_char(g_ft.ft_face, cp, 4) == 0) {
-                const uint8_t* face_bytes = reinterpret_cast<const uint8_t*>(g_ft.ft_face);
-                const uint8_t* glyph_ptr = *reinterpret_cast<const uint8_t* const*>(face_bytes + 0x98);
-                if (glyph_ptr) {
-                    int32_t adv_x = *reinterpret_cast<const int32_t*>(glyph_ptr + 0x80) >> 6;
-                    w += (adv_x > 0) ? adv_x : ((cp < 0x80) ? 6 : 12);
-                    continue;
-                }
+            if (const auto* gl = g_ft.get_glyph(cp)) {
+                w += gl->adv_x;
+            } else {
+                w += (cp < 0x80) ? 6 : 12;
             }
-            w += (cp < 0x80) ? 6 : 12;
         }
         return w;
     }
@@ -1970,45 +2172,30 @@ struct UiInputManager {
         int pen_x = x;
 
         for (uint32_t cp : cps) {
-            bool ok = false;
-            if (g_ft.ft_face && g_ft.load_char && g_ft.load_char(g_ft.ft_face, cp, 4) == 0) {
-                const uint8_t* face_bytes = reinterpret_cast<const uint8_t*>(g_ft.ft_face);
-                const uint8_t* glyph_ptr = *reinterpret_cast<const uint8_t* const*>(face_bytes + 0x98);
-                if (glyph_ptr) {
-                    int32_t adv_x = *reinterpret_cast<const int32_t*>(glyph_ptr + 0x80) >> 6;
-                    uint32_t rows = *reinterpret_cast<const uint32_t*>(glyph_ptr + 0x98);
-                    uint32_t width = *reinterpret_cast<const uint32_t*>(glyph_ptr + 0x9c);
-                    int32_t pitch = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xa0);
-                    const uint8_t* gbuf = *reinterpret_cast<const uint8_t* const*>(glyph_ptr + 0xa8);
-                    int32_t bmp_left = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xc0);
-                    int32_t bmp_top = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xc4);
-
-                    if (gbuf && rows < 64 && width < 64) {
-                        for (uint32_t ry = 0; ry < rows; ++ry) {
-                            int dy = baseline_y - bmp_top + static_cast<int>(ry);
-                            if (dy < 0 || dy >= bh) continue;
-                            for (uint32_t rx = 0; rx < width; ++rx) {
-                                int dx = pen_x + bmp_left + static_cast<int>(rx);
-                                if (dx < 0 || dx >= bw) continue;
-                                uint32_t ga = (static_cast<uint32_t>(gbuf[ry * pitch + rx]) * a_col) / 255;
-                                if (ga > 32) {
-                                    uint32_t dst = buf[dy * bw + dx];
-                                    uint32_t dr = (dst >> 16) & 0xFF;
-                                    uint32_t dg = (dst >> 8) & 0xFF;
-                                    uint32_t db = dst & 0xFF;
-                                    uint32_t nr = (sr * ga + dr * (255 - ga)) / 255;
-                                    uint32_t ng = (sg * ga + dg * (255 - ga)) / 255;
-                                    uint32_t nb = (sb * ga + db * (255 - ga)) / 255;
-                                    buf[dy * bw + dx] = 0xFF000000u | (nr << 16) | (ng << 8) | nb;
-                                }
+            if (const auto* gl = g_ft.get_glyph(cp)) {
+                if (!gl->bmp.empty() && gl->rows > 0 && gl->width > 0) {
+                    for (int ry = 0; ry < gl->rows; ++ry) {
+                        int dy = baseline_y + gl->yoff + ry;
+                        if (dy < 0 || dy >= bh) continue;
+                        for (int rx = 0; rx < gl->width; ++rx) {
+                            int dx = pen_x + gl->xoff + rx;
+                            if (dx < 0 || dx >= bw) continue;
+                            uint32_t ga = (static_cast<uint32_t>(gl->bmp[ry * gl->width + rx]) * a_col) / 255;
+                            if (ga > 32) {
+                                uint32_t dst = buf[dy * bw + dx];
+                                uint32_t dr = (dst >> 16) & 0xFF;
+                                uint32_t dg = (dst >> 8) & 0xFF;
+                                uint32_t db = dst & 0xFF;
+                                uint32_t nr = (sr * ga + dr * (255 - ga)) / 255;
+                                uint32_t ng = (sg * ga + dg * (255 - ga)) / 255;
+                                uint32_t nb = (sb * ga + db * (255 - ga)) / 255;
+                                buf[dy * bw + dx] = 0xFF000000u | (nr << 16) | (ng << 8) | nb;
                             }
                         }
                     }
-                    pen_x += (adv_x > 0) ? adv_x : ((cp < 0x80) ? 6 : 12);
-                    ok = true;
                 }
-            }
-            if (!ok) {
+                pen_x += gl->adv_x;
+            } else {
                 pen_x += (cp < 0x80) ? 6 : 12;
             }
         }
@@ -2153,13 +2340,13 @@ struct UiInputManager {
     // 4: 主音量
     // 5: 帧率模式 (60 FPS / 15 FPS)
     // 6: 底部软键栏
-    // 7..16: Keybindings (ACT_COUNT = 10)
-    // 17: 恢复默认按键配置
-    // 18: 返回游戏 (Resume)
-    // 19: 保存进度并退出
+    // 7..18: Keybindings (ACT_COUNT = 12)
+    // 19: 恢复默认按键配置
+    // 20: 返回游戏 (Resume)
+    // 21: 保存进度并退出
     static constexpr int BIND_START_ROW = 7;
-    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 17
-    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 20
+    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 19
+    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 22
     static constexpr int VISIBLE_ROWS = 9;
 
     bool overlay_open = false;
@@ -2217,8 +2404,8 @@ struct UiInputManager {
             return;
         }
         const std::vector<std::string> presets = {
-            "111.229.100.54:8765",
-            "127.0.0.1:8765"
+            "127.0.0.1:8765",
+            "localhost:8765"
         };
         int cur = -1;
         for (size_t i = 0; i < presets.size(); ++i) {
@@ -2278,6 +2465,10 @@ struct UiInputManager {
     }
 
     void exec_pvp_action() {
+        if (is_lon_game) {
+            show_toast("LoN 实时双人对战暂未开放 (请使用幻影网络 PoN)", 120);
+            return;
+        }
         if (g_pvp.active()) {
             uint32_t old_rm = g_pvp.room_id();
             if (g_pvp.match_started()) {
@@ -2406,6 +2597,18 @@ struct UiInputManager {
                     save_config();
                 }
                 overlay_waiting_bind = false;
+            } else if (ev.type == SDL_CONTROLLERAXISMOTION &&
+                       (ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ||
+                        ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) &&
+                       ev.caxis.value > 20000) {
+                int bind_idx = overlay_sel_row - BIND_START_ROW;
+                if (bind_idx >= 0 && bind_idx < ACT_COUNT) {
+                    int trig_btn = (ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT) ? PAD_BTN_LT : PAD_BTN_RT;
+                    assign_pad_unique(bind_idx, trig_btn);
+                    overlay_sel_col = 2;
+                    save_config();
+                }
+                overlay_waiting_bind = false;
             }
         } else {
             auto adjust_row_lr = [&](int dir) {
@@ -2418,9 +2621,11 @@ struct UiInputManager {
                 } else if (overlay_sel_row == 3) {
                     toggle_net_mode();
                 } else if (overlay_sel_row == 4) {
-                    std::lock_guard<std::mutex> lk(g_audio.mtx);
-                    g_audio.muted = false;
-                    g_audio.master_volume = std::clamp(g_audio.master_volume + dir * 5, 0, 100);
+                    {
+                        std::lock_guard<std::mutex> lk(g_audio.mtx);
+                        g_audio.muted = false;
+                        g_audio.master_volume = std::clamp(g_audio.master_volume + dir * 5, 0, 100);
+                    }
                     save_config();
                 } else if (overlay_sel_row == 5) {
                     toggle_fps_mode();
@@ -2571,7 +2776,10 @@ struct UiInputManager {
                 draw_ui_text(display_buf, 240, 260, "联机对战", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFFFE484u);
                 std::string pstr;
                 uint32_t pcol = 0xFFFFD874u;
-                if (g_pvp.active()) {
+                if (is_lon_game) {
+                    pstr = "[ 暂仅支持幻影网络 PoN ]";
+                    pcol = 0xFF8EA0BCu;
+                } else if (g_pvp.active()) {
                     pstr = g_pvp.match_started()
                         ? ("[ 退出对战 #" + std::to_string(g_pvp.room_id()) + " ]")
                         : ("[ 取消等待 #" + std::to_string(g_pvp.room_id()) + " ]");
@@ -2846,40 +3054,23 @@ static void blit_text_buf(uint32_t* dst_buf, int dst_w, int dst_h,
     uint8_t sb = color & 0xFF;
 
     for (uint32_t cp : cps) {
-        bool rendered_ft = false;
-        if (g_ft.ft_face && g_ft.load_char) {
-            if (g_ft.load_char(g_ft.ft_face, cp, 4) == 0) {
-                const uint8_t* face_bytes = reinterpret_cast<const uint8_t*>(g_ft.ft_face);
-                const uint8_t* glyph_ptr = *reinterpret_cast<const uint8_t* const*>(face_bytes + 0x98);
-                if (glyph_ptr) {
-                    int32_t adv_x = *reinterpret_cast<const int32_t*>(glyph_ptr + 0x80) >> 6;
-                    uint32_t rows = *reinterpret_cast<const uint32_t*>(glyph_ptr + 0x98);
-                    uint32_t width = *reinterpret_cast<const uint32_t*>(glyph_ptr + 0x9c);
-                    int32_t pitch = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xa0);
-                    const uint8_t* buf = *reinterpret_cast<const uint8_t* const*>(glyph_ptr + 0xa8);
-                    int32_t bmp_left = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xc0);
-                    int32_t bmp_top = *reinterpret_cast<const int32_t*>(glyph_ptr + 0xc4);
-
-                    if (buf && rows < 64 && width < 64) {
-                        for (uint32_t ry = 0; ry < rows; ++ry) {
-                            int dy = baseline_y - bmp_top + static_cast<int>(ry);
-                            if (dy < 0 || dy >= dst_h) continue;
-                            for (uint32_t rx = 0; rx < width; ++rx) {
-                                int dx = pen_x + bmp_left + static_cast<int>(rx);
-                                if (dx < 0 || dx >= dst_w) continue;
-                                uint8_t alpha = buf[ry * pitch + rx];
-                                if (alpha > 96) {
-                                    dst_buf[dy * dst_w + dx] = 0xFF000000u | (sr << 16) | (sg << 8) | sb;
-                                }
-                            }
+        if (const auto* gl = g_ft.get_glyph(cp)) {
+            if (!gl->bmp.empty() && gl->rows > 0 && gl->width > 0) {
+                for (int ry = 0; ry < gl->rows; ++ry) {
+                    int dy = baseline_y + gl->yoff + ry;
+                    if (dy < 0 || dy >= dst_h) continue;
+                    for (int rx = 0; rx < gl->width; ++rx) {
+                        int dx = pen_x + gl->xoff + rx;
+                        if (dx < 0 || dx >= dst_w) continue;
+                        uint8_t alpha = gl->bmp[ry * gl->width + rx];
+                        if (alpha > 96) {
+                            dst_buf[dy * dst_w + dx] = 0xFF000000u | (sr << 16) | (sg << 8) | sb;
                         }
                     }
-                    pen_x += (adv_x > 0) ? adv_x : ((cp < 0x80) ? 6 : 12);
-                    rendered_ft = true;
                 }
             }
-        }
-        if (!rendered_ft) {
+            pen_x += gl->adv_x;
+        } else {
             int adv = (cp < 0x80) ? 6 : 12;
             if (cp > 0x20) {
                 for (int gy = 0; gy < 10; ++gy) {
@@ -3219,12 +3410,26 @@ static FrameInterpolator g_interp;
 DojaRuntime::DojaRuntime() {
     g_runtime = this;
     heap_.reserve(65536);
+    audio_presenters_.reserve(kPermanentAudioPresenters + kDynamicAudioPresenterRing);
     // Index 0 is null
     heap_.push_back(HeapObject{});
     // Index 1 is shared Exception / System.out placeholder
     HeapObject exc{};
     exc.kind = ObjKind::ExceptionObj;
     heap_.push_back(exc);
+}
+
+Ref DojaRuntime::audio_presenter_sound_ref(Ref ap_ref) const {
+    if ((ap_ref & 0x70000000) != kAudioPresenterTag) return 0;
+    size_t idx = static_cast<size_t>(ap_ref & 0x0FFFFFFF);
+    if (idx >= audio_presenters_.size()) return 0;
+    return audio_presenters_[idx].sound_ref;
+}
+
+int DojaRuntime::last_played_port_sound_id(int port) const {
+    if (port < 0 || port >= MldAudioEngine::NUM_PORTS) return -1;
+    std::lock_guard<std::mutex> lk(g_audio.mtx);
+    return g_audio.ports[port].sound_id;
 }
 
 DojaRuntime::~DojaRuntime() {
@@ -3426,13 +3631,17 @@ void DojaRuntime::set_config_path(const std::string& path) {
     }
 }
 
-bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, const std::string& /*jam_path*/, int scale) {
-    jar_path_ = jar_path;
-    sp_path_ = sp_path;
-    sav_path_ = g_ui.custom_sav_path.empty() ? (sp_path + ".sav") : g_ui.custom_sav_path;
+bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, const std::string& /*jam_path*/, int scale, const std::string& window_title) {
+    std::string base_dir = get_exe_base_dir();
+    jar_path_ = resolve_runtime_path(jar_path, base_dir);
+    sp_path_ = resolve_runtime_path(sp_path, base_dir);
+    sav_path_ = g_ui.custom_sav_path.empty() ? (sp_path_ + ".sav") : g_ui.custom_sav_path;
+    if (g_ui.config_path == "controls.cfg" && !std::filesystem::exists(g_ui.config_path) && !base_dir.empty()) {
+        g_ui.config_path = (std::filesystem::path(base_dir) / "controls.cfg").string();
+    }
     window_scale_ = std::max(1, scale);
 
-    g_ft.init();
+    g_ft.init(base_dir);
 
     // Load ScratchPad (.sp) in memory (Copy-on-Write)
     std::ifstream sp_file(sp_path_, std::ios::binary);
@@ -3451,7 +3660,11 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
         if (ver == "10001") is_lon = true;
     }
     g_ui.is_lon_game = is_lon;
-    g_capcom_local.set_db_path("capcom_local.db");
+    std::string db_path = "capcom_local.db";
+    if (!std::filesystem::exists(db_path) && !base_dir.empty()) {
+        db_path = (std::filesystem::path(base_dir) / "capcom_local.db").string();
+    }
+    g_capcom_local.set_db_path(db_path);
     if (sp_data_.size() > sp_header_offset_) {
         g_capcom_local.register_sp_image(
             is_lon,
@@ -3477,8 +3690,13 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
 
     // Initialize SDL2 window & renderer (unless headless scale <= 0)
     if (scale > 0) {
+#ifdef SDL_HINT_TIMER_RESOLUTION
+        // Request 1ms OS timer resolution on Windows so unfocused windows in multi-instance PvP
+        // never degrade to 15.625ms sleep granularity during CpCanvas.exe() frame pacing
+        SDL_SetHint(SDL_HINT_TIMER_RESOLUTION, "1");
+#endif
         SDL_SetHint(SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE, "1");
-        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
+        if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
             std::cerr << "SDL_Init warning: " << SDL_GetError() << "\n";
         } else {
 #ifdef __linux__
@@ -3486,15 +3704,18 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
 #endif
             std::signal(SIGINT, on_termination_signal);
             std::signal(SIGTERM, on_termination_signal);
+#ifdef SIGHUP
             std::signal(SIGHUP, on_termination_signal);
+#endif
             g_ui.load_config();
             if (!std::ifstream(g_ui.config_path).good()) {
                 g_ui.save_config();
             }
             g_ui.open_controllers();
             int init_h = g_ui.show_softkey_bar ? 260 : 240;
+            const char* wtitle = window_title.empty() ? "Rockman EXE Mobile Recomp (PoN / LoN)" : window_title.c_str();
             SDL_Window* win = SDL_CreateWindow(
-                "Rockman EXE Mobile Recomp (PoN / LoN)",
+                wtitle,
                 SDL_WINDOWPOS_CENTERED,
                 SDL_WINDOWPOS_CENTERED,
                 240 * window_scale_,
@@ -3976,6 +4197,16 @@ void DojaRuntime::poll_events() {
                 g_ui.binds[ACT_DOWN].axis_down = (ev.caxis.value >  DEADZONE);
                 sync_action_edge(ACT_UP);
                 sync_action_edge(ACT_DOWN);
+            } else if (ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ||
+                       ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) {
+                int trig_btn = (ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT) ? PAD_BTN_LT : PAD_BTN_RT;
+                bool trig_down = (ev.caxis.value > DEADZONE);
+                for (int i = 0; i < ACT_COUNT; ++i) {
+                    if (g_ui.binds[i].pad_btn == trig_btn) {
+                        g_ui.binds[i].pad_down = trig_down;
+                        sync_action_edge(i);
+                    }
+                }
             }
         }
     }
@@ -3983,10 +4214,20 @@ void DojaRuntime::poll_events() {
 
 void DojaRuntime::present_screen() {
     ++frame_count_;
-    // Support deterministic synthetic UI hotkeys in --inject-key (100=F1, 101=Enter, 102=Down)
+    // Support deterministic synthetic UI hotkeys in --inject-key
+    // (100=F1, 101=Enter, 102=Down, 103=Left, 104=Right, 105=Up)
     for (const auto& kv : injected_keys_) {
         if (kv.start_frame == frame_count_ && kv.doja_key >= 100) {
-            SDL_Keycode sym = (kv.doja_key == 100) ? SDLK_F1 : ((kv.doja_key == 101) ? SDLK_RETURN : SDLK_DOWN);
+            SDL_Keycode sym = SDLK_DOWN;
+            switch (kv.doja_key) {
+                case 100: sym = SDLK_F1; break;
+                case 101: sym = SDLK_RETURN; break;
+                case 102: sym = SDLK_DOWN; break;
+                case 103: sym = SDLK_LEFT; break;
+                case 104: sym = SDLK_RIGHT; break;
+                case 105: sym = SDLK_UP; break;
+                default: break;
+            }
             if (sdl_window_) {
                 SDL_Event kev{};
                 kev.type = SDL_KEYDOWN;
@@ -3998,7 +4239,7 @@ void DojaRuntime::present_screen() {
                 // Headless mode fallback for automated UI overlay testing
                 if (sym == SDLK_F1) {
                     if (g_ui.overlay_open) g_ui.close_overlay();
-                    else if (g_pvp.active()) { keypad_state_ = 0; g_ui.open_overlay(false); }
+                    else { keypad_state_ = 0; g_ui.open_overlay(false); }
                 } else if (g_ui.overlay_open) {
                     SDL_Event kev{};
                     kev.type = SDL_KEYDOWN;
@@ -4041,21 +4282,32 @@ void DojaRuntime::present_screen() {
     if (sdl_renderer_ && sdl_texture_) {
         SDL_Renderer* ren = static_cast<SDL_Renderer*>(sdl_renderer_);
         SDL_Texture* tex = static_cast<SDL_Texture*>(sdl_texture_);
-        bool interp_active = g_ui.high_fps_mode && !fast_forward_ && (!g_ui.is_turbo_held() || g_pvp.active());
+        SDL_Window* win = static_cast<SDL_Window*>(sdl_window_);
+        bool win_minimized = win && ((SDL_GetWindowFlags(win) & SDL_WINDOW_MINIMIZED) != 0);
+        bool interp_active = !win_minimized && g_ui.high_fps_mode && !fast_forward_ &&
+                             (!g_ui.is_turbo_held() || g_pvp.active());
         g_interp.on_screen_unlock(framebuffer_, interp_active);
 
-        const uint32_t* present_fb = framebuffer_;
-        if (interp_active && g_interp.can_interpolate && g_interp.any_motion) {
-            g_interp.rasterize_subframe(*this, 0.25f);
-            present_fb = g_interp.interp_fb;
+        if (!(win_minimized && g_pvp.active())) {
+            const uint32_t* present_fb = framebuffer_;
+            if (interp_active && g_interp.can_interpolate && g_interp.any_motion) {
+                g_interp.rasterize_subframe(*this, 0.25f);
+                present_fb = g_interp.interp_fb;
+            }
+            g_ui.compose_display_buffer(present_fb, keypad_state_, true);
+            int logical_h = g_ui.show_softkey_bar ? 260 : 240;
+            SDL_Rect src_rect{0, 0, 240, logical_h};
+            SDL_UpdateTexture(tex, nullptr, g_ui.display_buf, 240 * sizeof(uint32_t));
+            SDL_RenderClear(ren);
+            SDL_RenderCopy(ren, tex, &src_rect, nullptr);
+            SDL_RenderPresent(ren);
+        } else if (g_ui.toast_frames > 0) {
+            --g_ui.toast_frames;
         }
-        g_ui.compose_display_buffer(present_fb, keypad_state_, true);
-        int logical_h = g_ui.show_softkey_bar ? 260 : 240;
-        SDL_Rect src_rect{0, 0, 240, logical_h};
-        SDL_UpdateTexture(tex, nullptr, g_ui.display_buf, 240 * sizeof(uint32_t));
-        SDL_RenderClear(ren);
-        SDL_RenderCopy(ren, tex, &src_rect, nullptr);
-        SDL_RenderPresent(ren);
+        // Stamp unlock timestamp AFTER VSync present completes so CpCanvas.sePlay() -> Thread.yield()
+        // (called immediately after Graphics.unlock() during Buster Charging SE loops) sees ~0ms elapsed
+        // and never triggers an extra blocking SDL_RenderPresent!
+        g_interp.tick_unlock_tp = std::chrono::steady_clock::now();
     } else {
         g_interp.reset();
         if (g_ui.toast_frames > 0) --g_ui.toast_frames;
@@ -4144,18 +4396,25 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 return Slot(0);
             }
-            // During CpCanvas's ~62.5 ms wait between 15 Hz logic ticks, present smooth
-            // 60 FPS interpolated sub-frames (alpha = 0.50, 0.75, 1.00) when 60 FPS mode is active
-            if (g_ui.high_fps_mode && sdl_renderer_ && sdl_texture_ && g_interp.subframes_presented < 4) {
+            // During CpCanvas's ~62.0 ms wait between 16 Hz logic ticks, present smooth
+            // 60 FPS interpolated sub-frames when 60 FPS mode is active.
+            // In online PvP, stop sub-frame VSync presents after sub-frame 2 (< 35ms after unlock VSync)
+            // so a 60 Hz VSync boundary never overshoots CpCanvas.exe()'s 62ms tick clock (66.7ms vs 62.0ms).
+            SDL_Window* ywin = static_cast<SDL_Window*>(sdl_window_);
+            bool y_minimized = ywin && ((SDL_GetWindowFlags(ywin) & SDL_WINDOW_MINIMIZED) != 0);
+            int max_sf = g_pvp.active() ? 3 : 4;
+            if (!y_minimized && g_ui.high_fps_mode && sdl_renderer_ && sdl_texture_ &&
+                g_interp.subframes_presented < max_sf) {
                 auto now_tp = std::chrono::steady_clock::now();
                 double elapsed_ms = std::chrono::duration<double, std::milli>(now_tp - g_interp.tick_unlock_tp).count();
-                static constexpr double kSubTargetsMs[4] = {0.0, 15.5, 31.0, 46.5};
-                int next_sf = g_interp.subframes_presented; // 1 -> 2 -> 3
-                if (elapsed_ms >= kSubTargetsMs[next_sf]) {
+                static constexpr double kSubTargetsMs[4] = {0.0, 14.0, 28.5, 43.0};
+                int next_sf = g_interp.subframes_presented; // 1 -> 2 (-> 3 in offline mode)
+                double max_allowed_ms = g_pvp.active() ? 35.0 : 52.0;
+                if (elapsed_ms >= kSubTargetsMs[next_sf] && elapsed_ms < max_allowed_ms) {
                     g_interp.subframes_presented = next_sf + 1;
                     const uint32_t* sub_fb = framebuffer_;
-                    if (g_interp.can_interpolate && g_interp.any_motion && next_sf < 3) {
-                        float alpha = std::clamp(static_cast<float>(elapsed_ms / 62.0), 0.25f, 1.0f);
+                    if (g_interp.can_interpolate && g_interp.any_motion && next_sf < (max_sf - 1)) {
+                        float alpha = std::clamp(static_cast<float>((elapsed_ms + 15.5) / 62.0), 0.25f, 1.0f);
                         g_interp.rasterize_subframe(*this, alpha);
                         sub_fb = g_interp.interp_fb;
                     }
@@ -4804,44 +5063,58 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             if (port < 0 || port >= 4) {
                 throw JavaException(1);
             }
-            HeapObject ap{};
-            ap.kind = ObjKind::AudioPresenter;
-            ap.aux_i32 = port;      // Hardware port (0 = BGM, 1..3 = SE)
-            ap.origin_x = 0;        // Bound MediaSound Ref
-            ap.origin_y = 100;      // Volume (0..100)
-            Ref r = static_cast<Ref>(heap_.size());
-            heap_.push_back(std::move(ap));
-            return Slot(r);
+            // Keep AudioPresenter handles outside heap_ so rollback heap truncation never invalidates
+            // CpCanvas.m_audio_se[1..3], while giving every startup BGM/jingle presenter (audio[0..15],
+            // m_audio[0..29]) its own permanent independent slot so setSound() bindings never alias!
+            size_t idx = 0;
+            if (audio_presenters_.size() < kPermanentAudioPresenters + kDynamicAudioPresenterRing) {
+                idx = audio_presenters_.size();
+                audio_presenters_.push_back(AudioPresenterSlot{port, 0, 100});
+                if (idx >= kPermanentAudioPresenters) {
+                    dynamic_audio_presenter_cursor_ = (idx - kPermanentAudioPresenters + 1) % kDynamicAudioPresenterRing;
+                }
+            } else {
+                idx = kPermanentAudioPresenters + dynamic_audio_presenter_cursor_;
+                dynamic_audio_presenter_cursor_ = (dynamic_audio_presenter_cursor_ + 1) % kDynamicAudioPresenterRing;
+                audio_presenters_[idx] = AudioPresenterSlot{port, 0, 100};
+            }
+            return Slot(kAudioPresenterTag | static_cast<Ref>(idx));
         }
-        if (args[0].r <= 0) return Slot(0);
-        HeapObject& ap = get(args[0].r);
+        if ((args[0].r & 0x70000000) != kAudioPresenterTag) {
+            return Slot(0);
+        }
+        size_t idx = static_cast<size_t>(args[0].r & 0x0FFFFFFF);
+        if (idx >= audio_presenters_.size()) {
+            return Slot(0);
+        }
+        AudioPresenterSlot& ap = audio_presenters_[idx];
         if (m == "setSound") {
-            ap.origin_x = args[1].r;
+            ap.sound_ref = args[1].r;
             return Slot(0);
         }
         if (m == "setAttribute") {
             if (suppress_av_) return Slot(0);
             if (args[1].i == 4) {
-                ap.origin_y = std::clamp(args[2].i, 0, 100);
-                g_audio.set_port_volume(ap.aux_i32, args[0].r, ap.origin_y);
+                ap.volume = std::clamp(args[2].i, 0, 100);
+                g_audio.set_port_volume(ap.port, args[0].r, ap.volume);
             }
             return Slot(0);
         }
         if (m == "play") {
             if (suppress_av_) return Slot(0);
-            if (ap.origin_x > 0) {
-                int snd_id = get(ap.origin_x).aux_i32;
-                g_audio.play_port(ap.aux_i32, snd_id, ap.origin_y, args[0].r, current_time_millis());
+            if (ap.sound_ref > 0 && static_cast<size_t>(ap.sound_ref) < heap_.size()) {
+                int snd_id = heap_[ap.sound_ref].aux_i32;
+                g_audio.play_port(ap.port, snd_id, ap.volume, args[0].r, current_time_millis());
             }
             return Slot(0);
         }
         if (m == "stop") {
             if (suppress_av_) return Slot(0);
-            g_audio.stop_port(ap.aux_i32, args[0].r);
+            g_audio.stop_port(ap.port, args[0].r);
             return Slot(0);
         }
         if (m == "getCurrentTime") {
-            return Slot(g_audio.get_current_time(ap.aux_i32, args[0].r, current_time_millis()));
+            return Slot(g_audio.get_current_time(ap.port, args[0].r, current_time_millis()));
         }
     }
 

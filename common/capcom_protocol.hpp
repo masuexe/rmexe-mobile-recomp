@@ -16,12 +16,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include "platform_socket.hpp"
 
 namespace rmexe::net {
 
@@ -172,7 +167,11 @@ inline void push_le16(std::vector<uint8_t>& buf, uint16_t u) {
 inline int32_t current_yyyymmdd() {
     std::time_t now = std::time(nullptr);
     std::tm lt{};
+#ifdef _WIN32
+    localtime_s(&lt, &now);
+#else
     localtime_r(&now, &lt);
+#endif
     return (lt.tm_year + 1900) * 10000 + (lt.tm_mon + 1) * 100 + lt.tm_mday;
 }
 
@@ -723,6 +722,8 @@ inline bool http_request_tcp(
     uint16_t port = 8765;
     if (!parse_host_port(server_host_port, host, port)) return false;
 
+    plat::ensure_sockets_init();
+
     struct addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -732,36 +733,27 @@ inline bool http_request_tcp(
         return false;
     }
 
-    int fd = -1;
+    plat::sock_t fd = plat::kInvalidSocket;
     for (struct addrinfo* rp = res; rp != nullptr; rp = rp->ai_next) {
-        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (fd < 0) continue;
+        fd = ::socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd == plat::kInvalidSocket) continue;
 
-        int flags = fcntl(fd, F_GETFL, 0);
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        plat::set_socket_nonblocking(fd, true);
 
-        int rc = ::connect(fd, rp->ai_addr, rp->ai_addrlen);
+        int rc = ::connect(fd, rp->ai_addr, static_cast<int>(rp->ai_addrlen));
         if (rc == 0) {
-            fcntl(fd, F_SETFL, flags);
+            plat::set_socket_nonblocking(fd, false);
             break;
         }
-        if (errno == EINPROGRESS) {
-            struct pollfd pfd{fd, POLLOUT, 0};
-            if (poll(&pfd, 1, timeout_ms) > 0) {
-                int so_err = 0;
-                socklen_t slen = sizeof(so_err);
-                getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &slen);
-                if (so_err == 0) {
-                    fcntl(fd, F_SETFL, flags);
-                    break;
-                }
-            }
+        if (plat::connect_in_progress() && plat::wait_connect_ready(fd, timeout_ms)) {
+            plat::set_socket_nonblocking(fd, false);
+            break;
         }
-        ::close(fd);
-        fd = -1;
+        plat::close_socket(fd);
+        fd = plat::kInvalidSocket;
     }
     freeaddrinfo(res);
-    if (fd < 0) return false;
+    if (fd == plat::kInvalidSocket) return false;
 
     std::string uri = extract_target_uri(target_url);
     std::ostringstream req;
@@ -781,8 +773,8 @@ inline bool http_request_tcp(
         size_t sent = 0;
         while (sent < len) {
             struct pollfd pfd{fd, POLLOUT, 0};
-            if (poll(&pfd, 1, timeout_ms) <= 0) return false;
-            ssize_t n = ::send(fd, ptr + sent, len - sent, MSG_NOSIGNAL);
+            if (plat::poll_sockets(&pfd, 1, timeout_ms) <= 0) return false;
+            ptrdiff_t n = plat::sock_send(fd, ptr + sent, len - sent);
             if (n <= 0) return false;
             sent += static_cast<size_t>(n);
         }
@@ -791,7 +783,7 @@ inline bool http_request_tcp(
 
     if (!write_all(reinterpret_cast<const uint8_t*>(head_str.data()), head_str.size()) ||
         (!body.empty() && !write_all(body.data(), body.size()))) {
-        ::close(fd);
+        plat::close_socket(fd);
         return false;
     }
 
@@ -800,13 +792,13 @@ inline bool http_request_tcp(
     uint8_t buf[4096];
     while (true) {
         struct pollfd pfd{fd, POLLIN, 0};
-        int pr = poll(&pfd, 1, timeout_ms);
+        int pr = plat::poll_sockets(&pfd, 1, timeout_ms);
         if (pr <= 0) break;
-        ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+        ptrdiff_t n = plat::sock_recv(fd, buf, sizeof(buf));
         if (n <= 0) break;
         raw.insert(raw.end(), buf, buf + n);
     }
-    ::close(fd);
+    plat::close_socket(fd);
 
     if (raw.size() < 12) return false;
     std::string_view sv(reinterpret_cast<const char*>(raw.data()), raw.size());

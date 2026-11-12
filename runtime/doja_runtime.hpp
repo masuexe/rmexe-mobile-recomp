@@ -147,7 +147,7 @@ public:
     DojaRuntime();
     ~DojaRuntime();
 
-    bool init(const std::string& jar_path, const std::string& sp_path, const std::string& jam_path, int scale = 3);
+    bool init(const std::string& jar_path, const std::string& sp_path, const std::string& jam_path, int scale = 3, const std::string& window_title = "");
     void shutdown();
 
     // Arena / Object allocation
@@ -206,6 +206,7 @@ public:
         dump_ppm_path_ = dump_ppm_path;
     }
     void set_fast_forward(bool ff) { fast_forward_ = ff; }
+    bool fast_forward() const { return fast_forward_; }
     void set_config_path(const std::string& path);
     void inject_key_at_frame(int frame, int doja_key) {
         injected_keys_.push_back({frame, frame, doja_key});
@@ -226,6 +227,10 @@ public:
     int take_cli_pvp_action(uint32_t& room_id_out);
     void set_pvp_match_active(bool active) { pvp_match_active_ = active; }
     bool pvp_match_active() const { return pvp_match_active_; }
+    void set_pvp_self_test(bool en) { pvp_self_test_ = en; }
+    bool pvp_self_test() const { return pvp_self_test_; }
+    void set_pvp_auto_bot(bool en) { pvp_auto_bot_ = en; }
+    bool pvp_auto_bot() const { return pvp_auto_bot_; }
     void set_suppress_av(bool sup) { suppress_av_ = sup; }
     bool suppress_av() const { return suppress_av_; }
     void set_keypad_override(bool enabled, int32_t mask) {
@@ -238,6 +243,9 @@ public:
     void restore_full_snapshot(const FullHeapSnapshot& in);
     void save_combat_snapshot(FastCombatSnapshot& out, size_t min_ref = 1) const;
     void restore_combat_snapshot(const FastCombatSnapshot& in);
+    size_t heap_size() const { return heap_.size(); }
+    Ref audio_presenter_sound_ref(Ref ap_ref) const;
+    int last_played_port_sound_id(int port) const;
 
     // Framebuffer HUD overlay drawing helpers (240x240 screen space)
     void fb_fill_rect_alpha(int rx, int ry, int rw, int rh, uint32_t argb);
@@ -247,12 +255,23 @@ public:
     void show_ui_toast(const std::string& msg, int frames = 90);
 
 private:
+    struct AudioPresenterSlot {
+        int32_t port = 0;
+        Ref sound_ref = 0;
+        int32_t volume = 100;
+    };
+    static constexpr Ref kAudioPresenterTag = 0x20000000;
+    static constexpr size_t kPermanentAudioPresenters = 256;
+    static constexpr size_t kDynamicAudioPresenterRing = 256;
+
     std::vector<HeapObject> heap_;
     Ref current_app_ref_ = 0;
     Ref current_canvas_ref_ = 0;
     Ref screen_graphics_ref_ = 0;
     Ref default_font_ref_ = 0;
     Ref sys_out_ref_ = 0;
+    std::vector<AudioPresenterSlot> audio_presenters_;
+    size_t dynamic_audio_presenter_cursor_ = 0;
 
     std::string jar_path_;
     std::string sp_path_;
@@ -274,6 +293,8 @@ private:
     std::string dump_ppm_path_;
     std::vector<InjectedKeySpan> injected_keys_;
     bool pvp_match_active_ = false;
+    bool pvp_self_test_ = false;
+    bool pvp_auto_bot_ = false;
     bool suppress_av_ = false;
     bool keypad_override_enabled_ = false;
     int32_t keypad_override_mask_ = 0;

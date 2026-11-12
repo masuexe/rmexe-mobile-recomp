@@ -8,14 +8,6 @@
 #include <string>
 #include <vector>
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 namespace {
 
 volatile std::sig_atomic_t g_running = 1;
@@ -25,20 +17,13 @@ void handle_sig(int) {
 }
 
 struct TcpClientConn {
-    int fd = -1;
+    rmexe::plat::sock_t fd = rmexe::plat::kInvalidSocket;
     uint64_t created_ms = 0;
     std::vector<uint8_t> in_buf;
     std::vector<uint8_t> out_buf;
     size_t out_sent = 0;
     bool response_ready = false;
 };
-
-void set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0) {
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    }
-}
 
 std::vector<uint8_t> serialize_http_response(const rmexe::net::HttpResponse& resp) {
     const char* reason = (resp.status_code == 200) ? "OK" :
@@ -173,17 +158,17 @@ int main(int argc, char** argv) {
         }
     }
 
+    rmexe::plat::ensure_sockets_init();
     rmexe::pvp::PvpServerEngine pvp_engine;
 
     // 1. Bind TCP Listening Socket (HTTP/1.1: Capcom i-mode + PvP Matchmaking REST API)
-    int tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (tcp_fd < 0) {
+    rmexe::plat::sock_t tcp_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_fd == rmexe::plat::kInvalidSocket) {
         std::cerr << "[rmexe_server] Failed to create TCP socket\n";
         return 1;
     }
-    int one = 1;
-    setsockopt(tcp_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    set_nonblocking(tcp_fd);
+    rmexe::plat::set_socket_reuseaddr(tcp_fd);
+    rmexe::plat::set_socket_nonblocking(tcp_fd, true);
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -195,24 +180,25 @@ int main(int argc, char** argv) {
     if (bind(tcp_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
         listen(tcp_fd, 64) != 0) {
         std::cerr << "[rmexe_server] Failed to bind/listen TCP on " << bind_ip << ":" << port << "\n";
-        ::close(tcp_fd);
+        rmexe::plat::close_socket(tcp_fd);
         return 1;
     }
 
     // 2. Bind UDP Socket on the EXACT SAME PORT (Real-Time PvP NetBattle Frame-Sync & Relay)
-    int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp_fd < 0) {
+    rmexe::plat::sock_t udp_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_fd == rmexe::plat::kInvalidSocket) {
         std::cerr << "[rmexe_server] Failed to create UDP socket\n";
-        ::close(tcp_fd);
+        rmexe::plat::close_socket(tcp_fd);
         return 1;
     }
-    setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    set_nonblocking(udp_fd);
+    rmexe::plat::set_socket_reuseaddr(udp_fd);
+    rmexe::plat::set_socket_nonblocking(udp_fd, true);
+    rmexe::plat::disable_udp_connreset(udp_fd);
 
     if (bind(udp_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         std::cerr << "[rmexe_server] Failed to bind UDP on " << bind_ip << ":" << port << "\n";
-        ::close(udp_fd);
-        ::close(tcp_fd);
+        rmexe::plat::close_socket(udp_fd);
+        rmexe::plat::close_socket(tcp_fd);
         return 1;
     }
 
@@ -235,9 +221,9 @@ int main(int argc, char** argv) {
             pfds.push_back(pollfd{c.fd, ev, 0});
         }
 
-        int ready = poll(pfds.data(), pfds.size(), 100);
+        int ready = rmexe::plat::poll_sockets(pfds.data(), pfds.size(), 100);
         if (ready < 0) {
-            if (errno == EINTR) continue;
+            if (rmexe::plat::socket_interrupted()) continue;
             break;
         }
 
@@ -247,7 +233,7 @@ int main(int argc, char** argv) {
             while (true) {
                 sockaddr_storage src{};
                 socklen_t slen = sizeof(src);
-                ssize_t n = ::recvfrom(udp_fd, ubuf, sizeof(ubuf), 0, reinterpret_cast<sockaddr*>(&src), &slen);
+                ptrdiff_t n = rmexe::plat::sock_recvfrom(udp_fd, ubuf, sizeof(ubuf), reinterpret_cast<sockaddr*>(&src), &slen);
                 if (n <= 0) break;
                 pvp_engine.handle_udp_datagram(udp_fd, ubuf, static_cast<size_t>(n), src, slen);
             }
@@ -258,17 +244,22 @@ int main(int argc, char** argv) {
             while (true) {
                 sockaddr_in caddr{};
                 socklen_t clen = sizeof(caddr);
-                int cfd = ::accept(tcp_fd, reinterpret_cast<sockaddr*>(&caddr), &clen);
-                if (cfd < 0) break;
-                setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-                set_nonblocking(cfd);
+                rmexe::plat::sock_t cfd = ::accept(tcp_fd, reinterpret_cast<sockaddr*>(&caddr), &clen);
+                if (cfd == rmexe::plat::kInvalidSocket) break;
+                int nodelay = 1;
+#ifdef _WIN32
+                ::setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
+#else
+                ::setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+#endif
+                rmexe::plat::set_socket_nonblocking(cfd, true);
                 if (clients.size() < 256) {
                     TcpClientConn cc{};
                     cc.fd = cfd;
                     cc.created_ms = rmexe::pvp::steady_millis();
                     clients.push_back(std::move(cc));
                 } else {
-                    ::close(cfd);
+                    rmexe::plat::close_socket(cfd);
                 }
             }
         }
@@ -284,7 +275,7 @@ int main(int argc, char** argv) {
                 drop = true;
             } else if (!c.response_ready && (rev & POLLIN)) {
                 uint8_t rbuf[4096];
-                ssize_t n = ::recv(c.fd, rbuf, sizeof(rbuf), 0);
+                ptrdiff_t n = rmexe::plat::sock_recv(c.fd, rbuf, sizeof(rbuf));
                 if (n <= 0) {
                     drop = true;
                 } else {
@@ -326,7 +317,7 @@ int main(int argc, char** argv) {
                     }
                 }
             } else if (c.response_ready && (rev & POLLOUT)) {
-                ssize_t n = ::send(c.fd, c.out_buf.data() + c.out_sent, c.out_buf.size() - c.out_sent, MSG_NOSIGNAL);
+                ptrdiff_t n = rmexe::plat::sock_send(c.fd, c.out_buf.data() + c.out_sent, c.out_buf.size() - c.out_sent);
                 if (n <= 0) {
                     drop = true;
                 } else {
@@ -342,7 +333,7 @@ int main(int argc, char** argv) {
             }
 
             if (drop) {
-                ::close(c.fd);
+                rmexe::plat::close_socket(c.fd);
                 clients.erase(clients.begin() + static_cast<std::ptrdiff_t>(i));
             } else {
                 ++i;
@@ -357,10 +348,10 @@ int main(int argc, char** argv) {
     }
 
     for (const auto& c : clients) {
-        if (c.fd >= 0) ::close(c.fd);
+        rmexe::plat::close_socket(c.fd);
     }
-    ::close(udp_fd);
-    ::close(tcp_fd);
+    rmexe::plat::close_socket(udp_fd);
+    rmexe::plat::close_socket(tcp_fd);
     std::cout << "[rmexe_server] Shut down cleanly.\n";
     return 0;
 }
