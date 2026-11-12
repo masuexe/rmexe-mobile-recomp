@@ -109,6 +109,7 @@ struct SideContext {
     int32_t waza_wait = 0;
     int32_t zoku = 0;
 
+    uint32_t fol_used_mask = 0;
     int32_t prev_input_mask = 0;
 };
 
@@ -209,6 +210,7 @@ struct PvpEngineState {
     int custom_timer_ticks = 0;
     std::array<int32_t, 10> local_cas_tip{};
     std::array<int32_t, 10> local_cas_ok{};
+    uint32_t local_permanently_consumed_mask = 0;
     PvpCombatCore pre_custom_core{};
     std::vector<int64_t> pre_custom_statics{};
     FastCombatSnapshot pre_custom_snap{};
@@ -231,6 +233,9 @@ struct PvpEngineState {
     uint32_t first_unconfirmed_turn = 0;
     uint32_t max_scheduled_turn = 0;
     uint32_t last_hash_checked_turn = 0;
+    bool round_needs_initial_schedule = true;
+    int32_t round_initial_remote_pred = 0;
+    int32_t round_held_edge_suppress_mask = 0;
     int desync_warnings = 0;
     int stall_frames = 0;
     TrillTimeSyncThrottler throttler{};
@@ -252,6 +257,100 @@ static int64_t steady_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
 }
 
+static uint32_t read_folder_used_mask(DojaRuntime& rt, Ref fol_obj) {
+    if (fol_obj <= 0) {
+        return 0;
+    }
+    Ref used_arr = rt.field_i32(fol_obj, 1);
+    if (used_arr <= 0) {
+        return 0;
+    }
+    int32_t n = std::min<int32_t>(30, rt.array_length(used_arr));
+    uint32_t mask = 0;
+    for (int32_t i = 0; i < n; ++i) {
+        if (rt.iaload(used_arr, i) != 0) {
+            mask |= (1u << i);
+        }
+    }
+    return mask;
+}
+
+static void sync_folder_used_from_mask(DojaRuntime& rt, Ref fol_obj, uint32_t mask) {
+    if (fol_obj <= 0) {
+        return;
+    }
+    mask &= 0x3FFFFFFFu;
+    Ref used_arr = rt.field_i32(fol_obj, 1);
+    if (used_arr <= 0) {
+        return;
+    }
+    int32_t n = std::min<int32_t>(30, rt.array_length(used_arr));
+    int32_t zan = 30;
+    for (int32_t i = 0; i < n; ++i) {
+        int32_t u = ((mask >> i) & 1u) ? 1 : 0;
+        rt.iaload(used_arr, i) = u;
+        if (u) {
+            --zan;
+        }
+    }
+    rt.field_i32(fol_obj, 2) = zan;
+}
+
+static uint32_t compute_custom_tray_slot_mask(DojaRuntime& rt) {
+    if (sf_app_CpCanvas_cas_tip <= 0) {
+        return 0;
+    }
+    int32_t clen = std::min<int32_t>(10, rt.array_length(sf_app_CpCanvas_cas_tip));
+    uint32_t mask = 0;
+    for (int32_t i = 0; i < clen; ++i) {
+        int32_t ct = rt.iaload(sf_app_CpCanvas_cas_tip, i);
+        if (ct >= 1 && ct <= 30) {
+            mask |= (1u << (ct - 1));
+        }
+    }
+    return mask;
+}
+
+// Keep cas_tip[0..9] (1..30 or -1), fol_tip_no[0..9] (0..29 or -1), cas_ok[0..9], and Folder.used[0..29]
+// strictly synchronized so empty tray slots can never be selected or shuffled back into Folder.used,
+// and permanently consumed chips can never reappear across rounds or Shuffle.
+static void sanitize_custom_tray_and_folder(DojaRuntime& rt, uint32_t& perm_consumed_mask) {
+    if (sf_app_CpCanvas_cas_tip > 0) {
+        int32_t clen = rt.array_length(sf_app_CpCanvas_cas_tip);
+        int32_t flen = (sf_app_CpCanvas_fol_tip_no > 0) ? rt.array_length(sf_app_CpCanvas_fol_tip_no) : 0;
+        int32_t olen = (sf_app_CpCanvas_cas_ok > 0) ? rt.array_length(sf_app_CpCanvas_cas_ok) : 0;
+        for (int32_t i = 0; i < clen; ++i) {
+            int32_t ct = rt.iaload(sf_app_CpCanvas_cas_tip, i);
+            if (i < 10 && ct >= 1 && ct <= 30) {
+                if (i < flen) {
+                    rt.iaload(sf_app_CpCanvas_fol_tip_no, i) = ct - 1;
+                }
+            } else {
+                rt.iaload(sf_app_CpCanvas_cas_tip, i) = -1;
+                if (i < flen) {
+                    rt.iaload(sf_app_CpCanvas_fol_tip_no, i) = -1;
+                }
+                if (i < olen) {
+                    rt.iaload(sf_app_CpCanvas_cas_ok, i) = 0;
+                }
+            }
+        }
+    }
+    uint32_t tray_mask = compute_custom_tray_slot_mask(rt);
+    Ref fol_obj = (sf_app_CpCanvas_fol > 0) ? rt.iaload(sf_app_CpCanvas_fol, 0) : 0;
+    if (sf_app_CpCanvas_cas_cnt > 0 || sf_app_CpCanvas_pa_cnt2 > 0 || sf_app_CpCanvas_scene == 1) {
+        perm_consumed_mask = (perm_consumed_mask | (read_folder_used_mask(rt, fol_obj) & ~tray_mask)) & 0x3FFFFFFFu;
+    }
+    uint32_t authoritative_used = (perm_consumed_mask | tray_mask) & 0x3FFFFFFFu;
+    sync_folder_used_from_mask(rt, fol_obj, authoritative_used);
+    if (sf_app_CpCanvas_regu_flg != 0 && fol_obj > 0) {
+        int32_t regu_slot = rt.field_i32(fol_obj, 8);
+        if (regu_slot < 0 || regu_slot >= 30 || ((authoritative_used >> regu_slot) & 1u) != 0) {
+            sf_app_CpCanvas_regu_flg = 0;
+        }
+    }
+}
+
 static void save_side(DojaRuntime& rt, int idx) {
     SideContext& s = g_pvp_eng.core.sides[idx];
     s.rock_ref = sf_app_CpCanvas_rock;
@@ -260,6 +359,9 @@ static void save_side(DojaRuntime& rt, int idx) {
     s.skill_kouka_ref = sf_app_CpCanvas_skill_kouka;
     if (sf_app_CpCanvas_fol > 0) {
         s.fol_ref = rt.iaload(sf_app_CpCanvas_fol, 0);
+    }
+    if (s.fol_ref > 0) {
+        s.fol_used_mask = read_folder_used_mask(rt, s.fol_ref);
     }
     s.rock_pow_ref = sf_app_Rock_pow;
     s.rock_ani_id_ref = sf_app_Rock_ani_id;
@@ -343,6 +445,9 @@ static void load_side(DojaRuntime& rt, int idx) {
     sf_app_CpCanvas_now_fol = 0;
     if (sf_app_CpCanvas_fol > 0 && s.fol_ref > 0) {
         rt.iaload(sf_app_CpCanvas_fol, 0) = s.fol_ref;
+    }
+    if (s.fol_ref > 0) {
+        sync_folder_used_from_mask(rt, s.fol_ref, s.fol_used_mask);
     }
     sf_app_Rock_pow = s.rock_pow_ref;
     sf_app_Rock_ani_id = s.rock_ani_id_ref;
@@ -466,8 +571,7 @@ static void mirror_board(DojaRuntime& rt) {
         for (int i = 0; i < 6; ++i) {
             Ref ok = rt.iaload(sf_app_CpCanvas_oki, i);
             if (ok <= 0 || rt.field_i32(ok, 1) == 0) continue;
-            rt.field_i32(ok, 9) = 5 - rt.field_i32(ok, 9);    // pos_x
-            rt.field_i32(ok, 11) = -rt.field_i32(ok, 11);     // pos_dx
+            rt.field_i32(ok, 9) = 5 - rt.field_i32(ok, 9);    // pos_x (CpCanvas.drawImg2 already reverses pos_dx via flp)
             rt.field_i32(ok, 13) = 1 - rt.field_i32(ok, 13);  // flp
             int32_t r_ata = rt.field_i32(ok, 5);
             int32_t t_ata = rt.field_i32(ok, 6);
@@ -654,10 +758,12 @@ static void init_side_context(DojaRuntime& rt, Ref cp, int idx, const pvp::PvpFi
     SideContext& s = g_pvp_eng.core.sides[idx];
     s = SideContext{};
 
-    // Allocate per-side Folder, tip_list[30], skill_kouka[29], Rock, Attack[30], and Rock static arrays
-    s.tip_list_ref = rt.alloc_int_array(30);
+    // Allocate per-side Folder, 1-based tip_list[1..30], skill_kouka[29], Rock, Attack[30], and Rock static arrays
+    // (1-based indices ensure every drawn cas_tip[i] is 1..30 > 0, matching BattleTip's `cas_tip <= 0` empty check)
+    s.tip_list_ref = rt.alloc_int_array(31);
+    rt.iaload(s.tip_list_ref, 0) = 0;
     for (int i = 0; i < 30; ++i) {
-        rt.iaload(s.tip_list_ref, i) = b.folder_packed[i];
+        rt.iaload(s.tip_list_ref, i + 1) = b.folder_packed[i];
     }
 
     s.fol_ref = rt.alloc_object(8, 9, 0); // app/Folder (class_id=8, 9 fields)
@@ -666,7 +772,7 @@ static void init_side_context(DojaRuntime& rt, Ref cp, int idx, const pvp::PvpFi
     Ref fol_tip_id = rt.field_i32(s.fol_ref, 0);
     Ref fol_used = rt.field_i32(s.fol_ref, 1);
     for (int i = 0; i < 30; ++i) {
-        rt.iaload(fol_tip_id, i) = i;
+        rt.iaload(fol_tip_id, i) = i + 1;
         rt.iaload(fol_used, i) = 0;
     }
     rt.field_i32(s.fol_ref, 2) = 30; // tip_zan
@@ -841,6 +947,7 @@ static void init_pvp_battle_arena(DojaRuntime& rt, Ref cp) {
     g_pvp_eng.remote_confirmed.fill(false);
     g_pvp_eng.local_cas_tip.fill(-1);
     g_pvp_eng.local_cas_ok.fill(0);
+    g_pvp_eng.local_permanently_consumed_mask = 0;
     for (auto& sl : g_pvp_eng.rb_ring) sl.turn = UINT32_MAX;
     for (auto& em : g_pvp_eng.turn_emitted_se) {
         em.turn = UINT32_MAX;
@@ -850,8 +957,27 @@ static void init_pvp_battle_arena(DojaRuntime& rt, Ref cp) {
     g_pvp_eng.first_unconfirmed_turn = 0;
     g_pvp_eng.max_scheduled_turn = 0;
     g_pvp_eng.last_hash_checked_turn = 0;
+    g_pvp_eng.round_needs_initial_schedule = true;
+    g_pvp_eng.round_initial_remote_pred = 0;
+    g_pvp_eng.round_held_edge_suppress_mask = 0;
     g_pvp_eng.desync_warnings = 0;
     g_pvp_eng.stall_frames = 0;
+}
+
+static int32_t compute_round_initial_remote_buster_pred(int rem_idx) {
+    const SideContext& rem = g_pvp_eng.core.sides[rem_idx];
+    if (rem.key_cnt <= 0) {
+        return 0;
+    }
+    constexpr int32_t kPureBusterBits = (1 << 11) | (1 << 9) | (1 << 10) | (1 << 7);
+    int32_t held_buster = rem.prev_input_mask & kPureBusterBits;
+    if (held_buster != 0) {
+        return held_buster;
+    }
+    if (rem.tip_no < 0 && (rem.prev_input_mask & (1 << 20)) != 0) {
+        return (1 << 20);
+    }
+    return (1 << 10);
 }
 
 static void set_rock_palette_fast(DojaRuntime& rt, int32_t zoku);
@@ -993,32 +1119,52 @@ static void enter_custom_screen_phase(DojaRuntime& rt, Ref cp) {
         if (g_pvp_eng.core.custom_round == 1) {
             g_pvp_eng.local_cas_tip.fill(-1);
             g_pvp_eng.local_cas_ok.fill(0);
+            g_pvp_eng.local_permanently_consumed_mask = 0;
         }
         for (int32_t i = 0; i < clen; ++i) {
-            rt.iaload(sf_app_CpCanvas_cas_tip, i) = (i < 10) ? g_pvp_eng.local_cas_tip[i] : -1;
+            int32_t ct = (i < 10) ? g_pvp_eng.local_cas_tip[i] : -1;
+            bool valid_ct = (ct >= 1 && ct <= 30);
+            rt.iaload(sf_app_CpCanvas_cas_tip, i) = valid_ct ? ct : -1;
             if (sf_app_CpCanvas_cas_ok > 0 && i < rt.array_length(sf_app_CpCanvas_cas_ok)) {
-                rt.iaload(sf_app_CpCanvas_cas_ok, i) = (i < 10) ? g_pvp_eng.local_cas_ok[i] : 0;
+                rt.iaload(sf_app_CpCanvas_cas_ok, i) = valid_ct ? 1 : 0;
+            }
+            if (sf_app_CpCanvas_fol_tip_no > 0 && i < rt.array_length(sf_app_CpCanvas_fol_tip_no)) {
+                rt.iaload(sf_app_CpCanvas_fol_tip_no, i) = valid_ct ? (ct - 1) : -1;
             }
         }
     }
-    if (g_pvp_eng.core.custom_round > 1 && sf_app_CpCanvas_cas_tip > 0 && sf_app_CpCanvas_fol_tip_no > 0) {
-        // Keep fol_tip_no aligned with compacted cas_tip slots (fol_tip_id[k] == k in PvP) so ADD in Round 2+ returns the right chip
-        int32_t n = std::min<int32_t>(rt.array_length(sf_app_CpCanvas_cas_tip), rt.array_length(sf_app_CpCanvas_fol_tip_no));
-        for (int32_t i = 0; i < n; ++i) {
-            int32_t ct = rt.iaload(sf_app_CpCanvas_cas_tip, i);
-            if (ct >= 0) rt.iaload(sf_app_CpCanvas_fol_tip_no, i) = ct;
-        }
-    }
+
+    g_pvp_eng.local_permanently_consumed_mask =
+        (g_pvp_eng.local_permanently_consumed_mask |
+         (g_pvp_eng.core.sides[loc_i].fol_used_mask & ~compute_custom_tray_slot_mask(rt))) &
+        0x3FFFFFFFu;
+    sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
 
     Ref fol_obj = rt.iaload(sf_app_CpCanvas_fol, 0);
     fn_app_Folder_RandSet___I__V(rt, fol_obj, sf_app_CpCanvas_max_sel);
+    sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
+    if (sf_app_CpCanvas_max_sel <= 0) {
+        sf_app_CpCanvas_sel_cas_mode = 1;
+        sf_app_CpCanvas_sel_cas_tip = 0;
+    }
 }
 
 static pvp::PvpCustomCommit capture_local_custom_commit(DojaRuntime& rt) {
+    sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
+    if (sf_app_CpCanvas_cas_tip > 0) {
+        int32_t clen = std::min<int32_t>(10, rt.array_length(sf_app_CpCanvas_cas_tip));
+        for (int32_t i = 0; i < 10; ++i) {
+            int32_t ct = (i < clen) ? rt.iaload(sf_app_CpCanvas_cas_tip, i) : -1;
+            bool valid_ct = (ct >= 1 && ct <= 30);
+            g_pvp_eng.local_cas_tip[i] = valid_ct ? ct : -1;
+            g_pvp_eng.local_cas_ok[i] = valid_ct ? 1 : 0;
+        }
+    }
+
     pvp::PvpCustomCommit c{};
     c.turn_no = g_pvp_eng.core.custom_round;
     c.tip_no = static_cast<int8_t>(std::clamp(sf_app_Rock_tip_no, -1, 8));
-    c.max_sel = static_cast<uint8_t>(std::clamp(sf_app_CpCanvas_max_sel, 1, 10));
+    c.max_sel = static_cast<uint8_t>(std::clamp(sf_app_CpCanvas_max_sel, 0, 10));
     c.regu_flg = static_cast<uint8_t>(sf_app_CpCanvas_regu_flg ? 1 : 0);
     c.sec_cha = static_cast<uint8_t>(std::clamp(sf_app_CpCanvas_sec_cha, 0, 255));
     c.pa_no = static_cast<int16_t>(sf_app_CpCanvas_pa_no);
@@ -1034,24 +1180,15 @@ static pvp::PvpCustomCommit capture_local_custom_commit(DojaRuntime& rt) {
         }
     }
 
-    uint32_t mask = 0;
     Ref fol_obj = rt.iaload(sf_app_CpCanvas_fol, 0);
-    if (fol_obj > 0) {
-        Ref used_arr = rt.field_i32(fol_obj, 1);
-        for (int i = 0; i < 30; ++i) {
-            if (rt.iaload(used_arr, i) != 0) {
-                mask |= (1u << i);
-            }
-        }
-    }
-    c.fol_used_mask = mask;
+    c.fol_used_mask = read_folder_used_mask(rt, fol_obj);
     return c;
 }
 
 static void apply_custom_commit_to_side(DojaRuntime& rt, int idx, const pvp::PvpCustomCommit& c) {
     load_side(rt, idx);
     sf_app_Rock_tip_no = c.tip_no;
-    sf_app_CpCanvas_max_sel = std::clamp<int32_t>(c.max_sel, 1, 10);
+    sf_app_CpCanvas_max_sel = std::clamp<int32_t>(c.max_sel, 0, 10);
     sf_app_CpCanvas_regu_flg = c.regu_flg ? 1 : 0;
     sf_app_CpCanvas_sec_cha = c.sec_cha;
     sf_app_CpCanvas_pa_no = c.pa_no;
@@ -1077,16 +1214,7 @@ static void apply_custom_commit_to_side(DojaRuntime& rt, int idx, const pvp::Pvp
     sf_app_Rock_tip_no = valid_cnt - 1;
 
     Ref fol_obj = rt.iaload(sf_app_CpCanvas_fol, 0);
-    if (fol_obj > 0) {
-        Ref used_arr = rt.field_i32(fol_obj, 1);
-        int zan = 30;
-        for (int i = 0; i < 30; ++i) {
-            int u = ((c.fol_used_mask >> i) & 1u) ? 1 : 0;
-            rt.iaload(used_arr, i) = u;
-            if (u) --zan;
-        }
-        rt.field_i32(fol_obj, 2) = zan;
-    }
+    sync_folder_used_from_mask(rt, fol_obj, c.fol_used_mask);
 
     sf_app_Rock_tmp_ata = -1;
     sf_app_Rock_waza_flg = -1;
@@ -1121,6 +1249,8 @@ static uint16_t compute_combat_state_hash(DojaRuntime& rt) {
         mix(sc.move_flg);
         mix(sc.tip_no);
         mix(sc.next_tip);
+        mix(sc.key_cnt);
+        mix(static_cast<int32_t>(sc.fol_used_mask));
         mix(sc.bari);
         mix(sc.han);
         mix(sc.wana);
@@ -1954,17 +2084,16 @@ static void draw_mirrored_opponent_attacks(DojaRuntime& rt, int opp_idx, int lay
         if (target_row >= 0 && rt.field_i32(a, 4) != target_row) continue;
 
         int32_t orig_px = rt.field_i32(a, 3);
-        int32_t orig_dx = rt.field_i32(a, 5);
         int32_t orig_flp = rt.field_i32(a, 40);
 
+        // CpCanvas.drawImg2 already reverses Attack.dx (field 5) when flp flips (0 <-> 1);
+        // keep Attack.dx unchanged so parabolic / sliding projectiles never double-negate dx!
         rt.field_i32(a, 3) = 5 - orig_px;
-        rt.field_i32(a, 5) = -orig_dx;
         rt.field_i32(a, 40) = 1 - orig_flp;
 
         draw_attack_readonly(rt, a, layer);
 
         rt.field_i32(a, 3) = orig_px;
-        rt.field_i32(a, 5) = orig_dx;
         rt.field_i32(a, 40) = orig_flp;
     }
 }
@@ -2076,14 +2205,11 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
             load_side(rt, opp_i);
             set_rock_palette_fast(rt, sf_app_Rock_zoku);
             int32_t saved_px = sf_app_Rock_pos_x;
-            int32_t saved_dx = sf_app_Rock_dx;
             sf_app_Rock_pos_x = 5 - saved_px;
-            sf_app_Rock_dx = -saved_dx;
-            g_pvp_rock_flip_override = 0; // Face Left!
+            g_pvp_rock_flip_override = 0; // Face Left (drawImg2 flips Rock.dx via flp=0)
             fn_app_Rock_Draw___I__V(rt, sf_app_CpCanvas_rock, 0);
             g_pvp_rock_flip_override = -1;
             sf_app_Rock_pos_x = saved_px;
-            sf_app_Rock_dx = saved_dx;
         }
 
         // Local Rock (left side, facing right)
@@ -2637,6 +2763,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
     int tid_invis = -1;
     int tid_multihit_stop = -1;
     int tid_multihit_navi = -1;
+    int tid_throw_bomb = -1;
 
     struct PanelSnap {
         int32_t jin, jou, ana, mag, aria, bom;
@@ -2701,6 +2828,10 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                     for (int ai = 0; ai < 30; ++ai) {
                         Ref a = rt.iaload(s0.ata_arr, ai);
                         if (a > 0 && rt.field_i32(a, 38) != 0) {
+                            if (sf_app_CpCanvas_stop_cnt == 0 && rt.field_i32(a, 1) == 13 &&
+                                rt.field_i32(a, 5) != 0 && tid_throw_bomb < 0) {
+                                tid_throw_bomb = tid;
+                            }
                             if (rt.field_i32(a, 19) != 0) {
                                 saw_break_ata = true;
                             }
@@ -4136,6 +4267,385 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                          " P0.wana=" + std::to_string(g_pvp_eng.core.sides[0].wana));
             }
         }
+
+        // E5: 30-Chip Folder Depletion Across Custom Screen Rounds + Shuffle + Regular Chip + Empty Tray (max_sel == 0)
+        {
+            reset_test_arena(600, 600, 0, 0, 1);
+            // Configure P0 with 30 asterisk-code ('*' = 26) Cannon chips, Regular chip at slot 14, and Shuffle skill (sec_cha = 1)
+            pvp::PvpFighterBuild dep_b0 = g_pvp_eng.builds[0];
+            for (int i = 0; i < 30; ++i) {
+                dep_b0.folder_packed[i] = (2 << 8) | 26;
+            }
+            dep_b0.regu_flg = 1;
+            dep_b0.regu_id = 14;
+            dep_b0.skill_kouka[0] = 0;
+            dep_b0.skill_kouka[1] = 0;
+            dep_b0.skill_kouka[15] = 1; // Shuffle skill enabled once per battle
+            g_pvp_eng.builds[0] = dep_b0;
+            init_pvp_battle_arena(rt, cp);
+            g_pvp_eng.local_idx = 0;
+
+            auto commit_p0_round = [&](const pvp::PvpCustomCommit& c0) {
+                pvp::PvpCustomCommit c1{};
+                c1.turn_no = g_pvp_eng.core.custom_round;
+                c1.tip_no = -1;
+                c1.max_sel = 5;
+                c1.pa_no = -1;
+                for (int i = 0; i < 9; ++i) c1.rock_tip_ids[i] = -1;
+
+                g_pvp_eng.core = g_pvp_eng.pre_custom_core;
+                generated_restore_statics(g_pvp_eng.pre_custom_statics);
+                rt.restore_combat_snapshot(g_pvp_eng.pre_custom_snap);
+                g_pvp_eng.local_idx = 0;
+                ensure_board_orient(rt, 0);
+                apply_custom_commit_to_side(rt, 0, c0);
+                apply_custom_commit_to_side(rt, 1, c1);
+                g_pvp_eng.phase = Phase::COMBAT;
+            };
+
+            uint32_t consumed_slots_seen = 0;
+            bool duplicate_slot_drawn = false;
+
+            auto step_bt_until_ready = [&]() {
+                for (int w = 0; w < 8 && sf_app_CpCanvas_cas_cnt < 0; ++w) {
+                    sf_app_CpCanvas_key = 0;
+                    rt.set_keypad_override(true, 0);
+                    fn_app_CpCanvas_BattleTip_____V(rt, cp);
+                    rt.set_keypad_override(false, 0);
+                    sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
+                }
+            };
+
+            for (int rnd = 1; rnd <= 6; ++rnd) {
+                enter_custom_screen_phase(rt, cp);
+                step_bt_until_ready();
+                if (rnd == 1 && rt.iaload(sf_app_CpCanvas_cas_tip, 0) != 15) {
+                    fail_msg("SuiteE-ReguSlotDraw",
+                             "Expected Regular chip slot 14 (cas_tip=15) in slot 0 on Round 1, got " +
+                             std::to_string(rt.iaload(sf_app_CpCanvas_cas_tip, 0)));
+                }
+                // Verify zero already-consumed folder slots appear in cas_tip
+                for (int i = 0; i < 10; ++i) {
+                    int32_t ct = rt.iaload(sf_app_CpCanvas_cas_tip, i);
+                    if (ct >= 1 && ct <= 30 && ((consumed_slots_seen >> (ct - 1)) & 1u) != 0) {
+                        duplicate_slot_drawn = true;
+                    }
+                }
+
+                if (rnd == 2) {
+                    // Select slot 0 then cancel (SOFT1 = 1<<21), then exercise Shuffle (sec_cha=1, sel_cas_mode=2)
+                    sf_app_CpCanvas_sel_cas_mode = 0;
+                    sf_app_CpCanvas_sel_cas_tip = 0;
+                    sf_app_CpCanvas_key = (1 << 20);
+                    rt.set_keypad_override(true, sf_app_CpCanvas_key);
+                    fn_app_CpCanvas_BattleTip_____V(rt, cp);
+                    rt.set_keypad_override(false, 0);
+                    sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
+
+                    sf_app_CpCanvas_key = (1 << 21); // SOFT1 = Cancel selection back to sel_cnt == 0
+                    rt.set_keypad_override(true, sf_app_CpCanvas_key);
+                    fn_app_CpCanvas_BattleTip_____V(rt, cp);
+                    rt.set_keypad_override(false, 0);
+                    sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
+
+                    sf_app_CpCanvas_sec_cha = 1;     // Enable Shuffle on Round 2 to test consumed-slot immunity
+                    sf_app_CpCanvas_sel_cas_mode = 2; // Highlight Shuffle
+                    sf_app_CpCanvas_key = (1 << 20);
+                    rt.set_keypad_override(true, sf_app_CpCanvas_key);
+                    fn_app_CpCanvas_BattleTip_____V(rt, cp);
+                    rt.set_keypad_override(false, 0);
+                    sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
+                    step_bt_until_ready();
+
+                    // Verify Shuffle did NOT resurrect any Round-1 consumed chips!
+                    for (int i = 0; i < 10; ++i) {
+                        int32_t ct = rt.iaload(sf_app_CpCanvas_cas_tip, i);
+                        if (ct >= 1 && ct <= 30 && ((consumed_slots_seen >> (ct - 1)) & 1u) != 0) {
+                            duplicate_slot_drawn = true;
+                        }
+                    }
+                }
+
+                // Record and select all 5 drawn chips in slots 0..4, then confirm OK
+                for (int s = 0; s < 5; ++s) {
+                    int32_t ct = rt.iaload(sf_app_CpCanvas_cas_tip, s);
+                    if (ct < 1 || ct > 30) {
+                        fail_msg("SuiteE-FolderDrawCount",
+                                 "Expected valid cas_tip in slot " + std::to_string(s) + " on round " + std::to_string(rnd));
+                    } else {
+                        if (((consumed_slots_seen >> (ct - 1)) & 1u) != 0) {
+                            duplicate_slot_drawn = true;
+                        }
+                        consumed_slots_seen |= (1u << (ct - 1));
+                    }
+                    sf_app_CpCanvas_sel_cas_mode = 0;
+                    sf_app_CpCanvas_sel_cas_tip = s;
+                    sf_app_CpCanvas_key = (1 << 20);
+                    rt.set_keypad_override(true, sf_app_CpCanvas_key);
+                    fn_app_CpCanvas_BattleTip_____V(rt, cp);
+                    rt.set_keypad_override(false, 0);
+                    sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
+                }
+
+                for (int f = 0; f < 30 && sf_app_CpCanvas_scene != 1; ++f) {
+                    if (f == 0) {
+                        sf_app_CpCanvas_sel_cas_mode = 1;
+                        sf_app_CpCanvas_key = (1 << 20);
+                    } else {
+                        sf_app_CpCanvas_key = 0;
+                    }
+                    rt.set_keypad_override(true, sf_app_CpCanvas_key);
+                    fn_app_CpCanvas_BattleTip_____V(rt, cp);
+                    rt.set_keypad_override(false, 0);
+                    sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
+                }
+                pvp::PvpCustomCommit raw_c0 = capture_local_custom_commit(rt);
+                std::vector<uint8_t> wire = raw_c0.serialize();
+                pvp::PvpCustomCommit c0{};
+                pvp::PvpCustomCommit::deserialize(wire.data(), wire.size(), c0);
+                commit_p0_round(c0);
+            }
+
+            if (duplicate_slot_drawn || consumed_slots_seen != 0x3FFFFFFFu) {
+                fail_msg("SuiteE-FolderDepletion30Chips",
+                         "Expected all 30 unique folder slots consumed exactly once (mask=" +
+                         std::to_string(consumed_slots_seen) + ", dup=" + std::to_string(duplicate_slot_drawn) + ")");
+            }
+
+            // Round 7: All 30 chips depleted -> max_sel must be 0, tray must be empty, D-pad safe, OK exits cleanly
+            enter_custom_screen_phase(rt, cp);
+            step_bt_until_ready();
+            bool any_chip_in_r7 = false;
+            for (int i = 0; i < 10; ++i) {
+                if (rt.iaload(sf_app_CpCanvas_cas_tip, i) >= 1) any_chip_in_r7 = true;
+            }
+            if (sf_app_CpCanvas_max_sel != 0 || any_chip_in_r7 || sf_app_CpCanvas_sel_cas_mode != 1) {
+                fail_msg("SuiteE-EmptyFolderRound7",
+                         "Expected max_sel=0 & empty tray in Round 7, got max_sel=" +
+                         std::to_string(sf_app_CpCanvas_max_sel) + " any_chip=" + std::to_string(any_chip_in_r7));
+            }
+            // Test D-pad navigation with max_sel == 0 (must not underflow sel_cas_tip to -1 or throw)
+            const int dpad_keys[4] = {(1 << 16), (1 << 18), (1 << 17), (1 << 19)};
+            for (int dk : dpad_keys) {
+                int32_t bt_k = dk;
+                if (sf_app_CpCanvas_max_sel <= 0) {
+                    sf_app_CpCanvas_sel_cas_mode = 1;
+                    sf_app_CpCanvas_sel_cas_tip = 0;
+                    bt_k &= ~((1 << 16) | (1 << 17) | (1 << 18) | (1 << 19));
+                }
+                sf_app_CpCanvas_key = bt_k;
+                rt.set_keypad_override(true, dk);
+                fn_app_CpCanvas_BattleTip_____V(rt, cp);
+                rt.set_keypad_override(false, 0);
+                sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
+            }
+            for (int f = 0; f < 30 && sf_app_CpCanvas_scene != 1; ++f) {
+                sf_app_CpCanvas_key = (f == 0) ? (1 << 20) : 0;
+                rt.set_keypad_override(true, sf_app_CpCanvas_key);
+                fn_app_CpCanvas_BattleTip_____V(rt, cp);
+                rt.set_keypad_override(false, 0);
+                sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
+            }
+            pvp::PvpCustomCommit empty_c0 = capture_local_custom_commit(rt);
+            commit_p0_round(empty_c0);
+            if (empty_c0.max_sel != 0 || g_pvp_eng.core.sides[0].max_sel != 0) {
+                fail_msg("SuiteE-EmptyMaxSelCommit",
+                         "Expected max_sel=0 preserved across commit, got " +
+                         std::to_string(g_pvp_eng.core.sides[0].max_sel));
+            }
+        }
+
+        // E6: Cross-Round Buster Charge Continuation + Held KEY_SELECT Suppress Guard + Round-Start Rollback
+        {
+            reset_test_arena(500, 500, 1, 0, 5); // P0 Heat element, Buster lv=5 / Charge lv=5 (cha_thresh = 17)
+            g_pvp_eng.local_idx = 0;
+            queue_tips_fifo(0, {});
+            queue_tips_fifo(1, {});
+
+            // Charge Buster in Round 1 for 10 frames (key_cnt reaches 11 < 17, bas_no >= 0, P1 HP stays 500)
+            for (int k = 0; k < 10; ++k) {
+                step_pvp_combat_tick(rt, cp, (1 << 10), 0);
+            }
+            int32_t r1_key_cnt = g_pvp_eng.core.sides[0].key_cnt;
+            if (r1_key_cnt < 8 || r1_key_cnt >= 17 || g_pvp_eng.core.sides[1].hp != 500) {
+                fail_msg("SuiteE-CrossRoundChargeSetup",
+                         "Expected partial Buster charge in Round 1 (key_cnt=" + std::to_string(r1_key_cnt) +
+                         ", P1.hp=" + std::to_string(g_pvp_eng.core.sides[1].hp) + ")");
+            }
+
+            // Open Custom Screen, commit 1 Cannon chip on P0 while P0 keeps Buster (1<<10) + OK Select (1<<20) held!
+            enter_custom_screen_phase(rt, cp);
+            pvp::PvpCustomCommit c0{}, c1{};
+            c0.turn_no = g_pvp_eng.core.custom_round;
+            c0.tip_no = 0;
+            c0.max_sel = 5;
+            c0.pa_no = -1;
+            for (int i = 0; i < 9; ++i) c0.rock_tip_ids[i] = -1;
+            c0.rock_tip_ids[0] = 2; // Cannon queued
+            c1 = c0;
+            c1.tip_no = -1;
+
+            g_pvp_eng.core = g_pvp_eng.pre_custom_core;
+            generated_restore_statics(g_pvp_eng.pre_custom_statics);
+            rt.restore_combat_snapshot(g_pvp_eng.pre_custom_snap);
+            g_pvp_eng.local_idx = 0;
+            ensure_board_orient(rt, 0);
+            apply_custom_commit_to_side(rt, 0, c0);
+            apply_custom_commit_to_side(rt, 1, c1);
+            int32_t p1_initial_rem_pred = compute_round_initial_remote_buster_pred(0);
+            if (p1_initial_rem_pred != (1 << 10)) {
+                fail_msg("SuiteE-CrossRoundRemotePredSeed",
+                         "Expected opponent client to seed round_initial_remote_pred=(1<<10) for charging P0, got " +
+                         std::to_string(p1_initial_rem_pred));
+            }
+            g_pvp_eng.core.sides[0].prev_input_mask = 0;
+            g_pvp_eng.core.sides[1].prev_input_mask = 0;
+            sf_app_CpCanvas_cus_gage = 0;
+            sf_app_CpCanvas_scene = 1;
+
+            uint32_t r2_start = g_pvp_eng.core.combat_turn;
+            g_pvp_eng.round_start_turn = r2_start;
+            g_pvp_eng.first_unconfirmed_turn = r2_start;
+            g_pvp_eng.max_scheduled_turn = r2_start;
+            g_pvp_eng.round_needs_initial_schedule = true;
+            for (auto& em : g_pvp_eng.turn_emitted_se) {
+                em.turn = UINT32_MAX;
+                em.count = 0;
+            }
+            int32_t held_at_transition = (1 << 10) | (1 << 20); // Both Buster & Confirm-OK held!
+            int32_t suppress_bits = (0xF << 16) | (1 << 21) | (1 << 22) |
+                                    (g_pvp_eng.core.sides[0].tip_no >= 0 ? (1 << 20) : 0);
+            g_pvp_eng.round_held_edge_suppress_mask = held_at_transition & suppress_bits;
+
+            // Verify Peer 1's speculative frame 0 (using p1_initial_rem_pred before P0's UDP packet arrives)
+            // keeps P0 charging silently with ZERO phantom Buster / Charge Shot sound effects!
+            save_rollback_slot(rt, r2_start, p1_initial_rem_pred, 0, true);
+            step_pvp_combat_tick(rt, cp, p1_initial_rem_pred, 0);
+            const auto& r2_em = g_pvp_eng.turn_emitted_se[r2_start % kRollbackWindow];
+            if (g_pvp_eng.core.sides[0].key_cnt != r1_key_cnt + 1 || (r2_em.turn == r2_start && r2_em.count != 0)) {
+                fail_msg("SuiteE-CrossRoundOpponentNoPhantomShotSE",
+                         "Opponent speculative frame 0 fired or emitted phantom SE (key_cnt=" +
+                         std::to_string(g_pvp_eng.core.sides[0].key_cnt) + ", se_count=" +
+                         std::to_string(r2_em.count) + ")");
+            }
+            if (!restore_rollback_slot(rt, r2_start)) {
+                fail_msg("SuiteE-RoundStartRollback", "Failed to restore rollback slot at round_start_turn");
+            }
+            for (auto& em : g_pvp_eng.turn_emitted_se) {
+                em.turn = UINT32_MAX;
+                em.count = 0;
+            }
+
+            // Now step Round 2 frames 0..9 with live held_at_transition filtered by round_held_edge_suppress_mask
+            for (int f = 0; f < 10; ++f) {
+                int32_t raw_m = held_at_transition;
+                g_pvp_eng.round_held_edge_suppress_mask &= raw_m;
+                int32_t eff_m = raw_m & ~g_pvp_eng.round_held_edge_suppress_mask;
+                step_pvp_combat_tick(rt, cp, eff_m, 0);
+            }
+            if (g_pvp_eng.core.sides[0].tip_no != 0 ||
+                g_pvp_eng.core.sides[0].key_cnt <= 17 ||
+                g_pvp_eng.core.sides[1].hp != 500) {
+                fail_msg("SuiteE-CrossRoundChargeContinue",
+                         "Expected Buster charge to continue past threshold (>17) without firing chip or pea-shot (key_cnt=" +
+                         std::to_string(g_pvp_eng.core.sides[0].key_cnt) + ", tip_no=" +
+                         std::to_string(g_pvp_eng.core.sides[0].tip_no) + ", P1.hp=" +
+                         std::to_string(g_pvp_eng.core.sides[1].hp) + ")");
+            }
+
+            // Release Buster -> must fire full Heat Charge Shot (> 10 dmg, NOT 5-dmg uncharged buster!)
+            for (int f = 0; f < 16; ++f) {
+                step_pvp_combat_tick(rt, cp, 0, 0);
+            }
+            int32_t charge_dmg = 500 - g_pvp_eng.core.sides[1].hp;
+            if (charge_dmg < 40) {
+                fail_msg("SuiteE-CrossRoundChargeRelease",
+                         "Expected full Charge Shot damage (>=40) after releasing cross-round charge, got dmg=" +
+                         std::to_string(charge_dmg));
+            }
+        }
+
+        // E7: Opponent Thrown Bomb (MiniBomb) Mirrored Parabolic Flight Smoothness (Zero Sub-Panel Teleports)
+        if (tid_throw_bomb > 0) {
+            auto trace_bomb_flight_centroids = [&](int thrower_side) -> std::vector<double> {
+                reset_test_arena(500, 500, 0, 0, 1);
+                g_pvp_eng.local_idx = 0; // Always render from P0's local perspective!
+                queue_tips_fifo(thrower_side, {static_cast<int16_t>(tid_throw_bomb)});
+                queue_tips_fifo(1 - thrower_side, {});
+
+                std::vector<double> xs;
+                for (int k = 0; k < 40; ++k) {
+                    int32_t m0 = (thrower_side == 0 && k == 0) ? (1 << 20) : 0;
+                    int32_t m1 = (thrower_side == 1 && k == 0) ? (1 << 20) : 0;
+                    step_pvp_combat_tick(rt, cp, m0, m1);
+
+                    // Check if thrown projectile is active in air on thrower_side
+                    Ref ata_arr = g_pvp_eng.core.sides[thrower_side].ata_arr;
+                    Ref bomb_a = 0;
+                    for (int ai = 0; ai < 30; ++ai) {
+                        Ref a = rt.iaload(ata_arr, ai);
+                        if (a > 0 && rt.field_i32(a, 38) != 0 && rt.field_i32(a, 1) == 13) {
+                            bomb_a = a;
+                            break;
+                        }
+                    }
+                    if (bomb_a <= 0) continue;
+
+                    // Render with bomb visible vs hidden to isolate exact bomb sprite pixels on screen!
+                    render_pvp_combat_frame(rt, cp);
+                    std::vector<uint32_t> with_bomb(fb, fb + 240 * 240);
+
+                    int32_t saved_on = rt.field_i32(bomb_a, 38);
+                    rt.field_i32(bomb_a, 38) = 0;
+                    render_pvp_combat_frame(rt, cp);
+                    rt.field_i32(bomb_a, 38) = saved_on;
+
+                    double sum_x = 0.0;
+                    int diff_cnt = 0;
+                    for (int y = 40; y < 220; ++y) {
+                        for (int x = 0; x < 240; ++x) {
+                            if (with_bomb[y * 240 + x] != fb[y * 240 + x]) {
+                                sum_x += static_cast<double>(x);
+                                ++diff_cnt;
+                            }
+                        }
+                    }
+                    if (diff_cnt >= 8) {
+                        xs.push_back(sum_x / static_cast<double>(diff_cnt));
+                    }
+                }
+                return xs;
+            };
+
+            std::vector<double> p0_xs = trace_bomb_flight_centroids(0);
+            std::vector<double> p1_xs = trace_bomb_flight_centroids(1);
+            if (p0_xs.size() < 8 || p0_xs.size() != p1_xs.size()) {
+                fail_msg("SuiteE-BombFlightFrames",
+                         "Expected >=8 matching bomb flight frames, got p0=" +
+                         std::to_string(p0_xs.size()) + " p1=" + std::to_string(p1_xs.size()));
+            } else {
+                for (size_t i = 0; i < p1_xs.size(); ++i) {
+                    // Opponent's mirrored bomb X + Local's bomb X must sum to screen width (239.0) within 2px
+                    double mirror_sum = p0_xs[i] + p1_xs[i];
+                    if (std::abs(mirror_sum - 239.0) > 2.5) {
+                        fail_msg("SuiteE-BombMirrorSymmetry",
+                                 "Opponent bomb X not symmetric with local bomb at frame " + std::to_string(i) +
+                                 " (p0_x=" + std::to_string(p0_xs[i]) + ", p1_x=" + std::to_string(p1_xs[i]) + ")");
+                        break;
+                    }
+                    if (i > 0) {
+                        double step_dx = p1_xs[i] - p1_xs[i - 1];
+                        // Opponent throws right-to-left: step_dx must be smoothly negative (~ -10px/tick), never positive or -70px jump!
+                        if (step_dx > -2.0 || step_dx < -22.0) {
+                            fail_msg("SuiteE-BombSmoothFlight",
+                                     "Opponent bomb teleported/reversed at frame " + std::to_string(i) +
+                                     " (step_dx=" + std::to_string(step_dx) + ")");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
     std::printf("[PvP SELF-TEST] Suite E complete: Native virus-battle Time-Freeze dimming & announcement verified (failures=%d)\n",
                 failures);
@@ -4341,6 +4851,13 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
                 }
             }
 
+            sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
+            if (sf_app_CpCanvas_max_sel <= 0) {
+                sf_app_CpCanvas_sel_cas_mode = 1;
+                sf_app_CpCanvas_sel_cas_tip = 0;
+                bt_key &= ~((1 << 16) | (1 << 17) | (1 << 18) | (1 << 19));
+            }
+
             // Auto-confirm when 30-second Custom timer expires
             if (--g_pvp_eng.custom_timer_ticks <= 0) {
                 if (sf_app_CpCanvas_cas_cnt > 0 || sf_app_CpCanvas_pa_cnt2 > 0) {
@@ -4356,7 +4873,7 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
                         int32_t clim = rt.array_length(sf_app_CpCanvas_cas_tip);
                         for (int32_t i = 0; i < lim; ++i) {
                             int32_t st = rt.iaload(sf_app_CpCanvas_set_tip, i);
-                            if (st >= 0 && st < clim && rt.iaload(sf_app_CpCanvas_cas_tip, st) >= 0) {
+                            if (st >= 0 && st < clim && rt.iaload(sf_app_CpCanvas_cas_tip, st) >= 1) {
                                 rt.iaload(sf_app_CpCanvas_set_tip, valid_sel++) = st;
                             }
                         }
@@ -4365,10 +4882,10 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
                     if (valid_sel > 0) {
                         fn_app_CpCanvas_TipIn_____V(rt, cp);
                         for (int32_t i = 0; i < 10; ++i) {
-                            if (rt.iaload(sf_app_CpCanvas_cas_tip, i) < 0) {
+                            if (rt.iaload(sf_app_CpCanvas_cas_tip, i) < 1) {
                                 for (int32_t j = i + 1; j < 10; ++j) {
                                     int32_t ct = rt.iaload(sf_app_CpCanvas_cas_tip, j);
-                                    if (ct >= 0) {
+                                    if (ct >= 1) {
                                         rt.iaload(sf_app_CpCanvas_cas_tip, i) = ct;
                                         rt.iaload(sf_app_CpCanvas_cas_ok, i) = 1;
                                         rt.iaload(sf_app_CpCanvas_cas_tip, j) = -1;
@@ -4387,11 +4904,19 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
                     sf_app_CpCanvas_key = 0;
                     sf_app_CpCanvas_scene = 1;
                 }
+                sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
             } else {
                 sf_app_CpCanvas_key = bt_key;
                 rt.set_keypad_override(true, local_mask);
                 fn_app_CpCanvas_BattleTip_____V(rt, cp);
                 rt.set_keypad_override(false, 0);
+                sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
+                if (sf_app_CpCanvas_max_sel <= 0) {
+                    if (sf_app_CpCanvas_sel_cas_mode == 0) {
+                        sf_app_CpCanvas_sel_cas_mode = 1;
+                    }
+                    sf_app_CpCanvas_sel_cas_tip = 0;
+                }
                 // Hide the "[S] 逃げる" softkey label in PvP Custom Screen
                 if (sf_app_CpCanvas_soft_id > 0 && rt.array_length(sf_app_CpCanvas_soft_id) > 1) {
                     rt.iaload(sf_app_CpCanvas_soft_id, 1) = 0;
@@ -4420,15 +4945,6 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
             if (sf_app_CpCanvas_scene == 1) {
                 // Local player confirmed chips ("OK!") -> Capture commit & save local leftover tray!
                 g_pvp_eng.local_commit = capture_local_custom_commit(rt);
-                if (sf_app_CpCanvas_cas_tip > 0) {
-                    int32_t clen = std::min<int32_t>(10, rt.array_length(sf_app_CpCanvas_cas_tip));
-                    for (int32_t i = 0; i < 10; ++i) {
-                        g_pvp_eng.local_cas_tip[i] = (i < clen) ? rt.iaload(sf_app_CpCanvas_cas_tip, i) : -1;
-                        g_pvp_eng.local_cas_ok[i] = (sf_app_CpCanvas_cas_ok > 0 && i < rt.array_length(sf_app_CpCanvas_cas_ok))
-                            ? rt.iaload(sf_app_CpCanvas_cas_ok, i)
-                            : 0;
-                    }
-                }
                 g_pvp_eng.local_custom_done = true;
                 g_pvp_eng.last_sync_send_ms = 0;
             }
@@ -4470,6 +4986,13 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
                 apply_custom_commit_to_side(rt, 0, c0);
                 apply_custom_commit_to_side(rt, 1, c1);
 
+                // If the remote fighter ended the previous round holding a Buster charge (key_cnt > 0),
+                // predict that they keep Buster held on round_start_turn until their Round-N+1 UDP input
+                // arrives — preventing a speculative frame-0 release from playing a phantom Buster / Charge
+                // Shot sound effect on the local speakers!
+                g_pvp_eng.round_initial_remote_pred =
+                    compute_round_initial_remote_buster_pred(1 - loc_i);
+
                 g_pvp_eng.core.sides[0].prev_input_mask = 0;
                 g_pvp_eng.core.sides[1].prev_input_mask = 0;
                 sf_app_CpCanvas_cus_gage = 0;
@@ -4477,7 +5000,10 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
                 sf_app_CpCanvas_stop_cnt = 0;
                 sf_app_CpCanvas_stop_time = 0;
 
-                // Reset rollback ring & per-round tracking at the start of each combat round
+                // Reset rollback ring & per-round tracking at the start of each combat round.
+                // Leave cur_t unconfirmed/unscheduled so frame 0 of the round captures live held Buster input
+                // (allowing cross-round Buster charge continuation just like native PoN virus battles), while
+                // suppressing edge-triggered D-pad/Softkey/Chip-Select keys still held from confirming "OK".
                 for (auto& sl : g_pvp_eng.rb_ring) sl.turn = UINT32_MAX;
                 for (auto& em : g_pvp_eng.turn_emitted_se) {
                     em.turn = UINT32_MAX;
@@ -4486,15 +5012,22 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
                 uint32_t cur_t = g_pvp_eng.core.combat_turn;
                 const size_t hist_n = g_pvp_eng.local_inputs.size();
                 g_pvp_eng.round_start_turn = cur_t;
-                g_pvp_eng.first_unconfirmed_turn = cur_t + 1;
+                g_pvp_eng.first_unconfirmed_turn = cur_t;
                 g_pvp_eng.max_scheduled_turn = cur_t;
+                g_pvp_eng.round_needs_initial_schedule = true;
+                int32_t held_now = rt.poll_local_pvp_keypad();
+                int32_t suppress_bits = (0xF << 16) | (1 << 21) | (1 << 22);
+                if (g_pvp_eng.core.sides[loc_i].tip_no >= 0) {
+                    suppress_bits |= (1 << 20);
+                }
+                g_pvp_eng.round_held_edge_suppress_mask = held_now & suppress_bits;
                 g_pvp_eng.stall_frames = 0;
                 g_pvp_eng.throttler.reset();
                 for (uint32_t d = 0; d <= kInputDelayFrames + 8; ++d) {
                     size_t slot = (cur_t + d) % hist_n;
                     g_pvp_eng.local_inputs[slot] = 0;
-                    g_pvp_eng.predicted_remote[slot] = 0;
-                    g_pvp_eng.remote_confirmed[slot] = (d == 0);
+                    g_pvp_eng.predicted_remote[slot] = g_pvp_eng.round_initial_remote_pred;
+                    g_pvp_eng.remote_confirmed[slot] = false;
                 }
 
                 g_pvp_eng.phase = Phase::COMBAT;
@@ -4535,10 +5068,14 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
             return true;
         }
         if (rt.pvp_auto_bot()) {
+            g_pvp_eng.round_held_edge_suppress_mask = 0;
             raw_local = compute_auto_bot_combat_input(rt);
             if ((cur_t & 3u) == 0u) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
+        } else {
+            g_pvp_eng.round_held_edge_suppress_mask &= raw_local;
+            raw_local &= ~g_pvp_eng.round_held_edge_suppress_mask;
         }
 
         const size_t hist_n = g_pvp_eng.local_inputs.size();
@@ -4546,6 +5083,13 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
         bool pending_transition = (g_pvp_eng.core.open_custom_req || g_pvp_eng.core.winner != -2);
 
         // Schedule new local inputs immutably: never overwrite an already-scheduled turn during a stall!
+        if (!pending_transition && g_pvp_eng.round_needs_initial_schedule) {
+            size_t s0 = cur_t % hist_n;
+            g_pvp_eng.local_inputs[s0] = raw_local;
+            g_pvp_eng.remote_confirmed[s0] = false;
+            g_pvp_eng.max_scheduled_turn = cur_t;
+            g_pvp_eng.round_needs_initial_schedule = false;
+        }
         uint32_t target_sched = pending_transition
             ? (cur_t > g_pvp_eng.round_start_turn ? cur_t - 1 : g_pvp_eng.round_start_turn)
             : (cur_t + kInputDelayFrames);
@@ -4613,7 +5157,7 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
                 } else {
                     rem_m = (t > g_pvp_eng.round_start_turn)
                         ? g_pvp_eng.predicted_remote[(t - 1) % hist_n]
-                        : 0;
+                        : g_pvp_eng.round_initial_remote_pred;
                     g_pvp_eng.predicted_remote[idx] = rem_m;
                     is_pred = true;
                 }
@@ -4628,7 +5172,7 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
             }
             cur_t = g_pvp_eng.core.combat_turn;
             for (uint32_t u = cur_t; u < prev_cur_t; ++u) {
-                if (u > g_pvp_eng.round_start_turn) {
+                if (u >= g_pvp_eng.round_start_turn) {
                     g_pvp_eng.remote_confirmed[u % hist_n] = false;
                 }
             }
@@ -4788,7 +5332,7 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
         if (!cur_rem_confirmed) {
             cur_rem_mask = (cur_t > g_pvp_eng.round_start_turn)
                 ? g_pvp_eng.predicted_remote[(cur_t - 1) % hist_n]
-                : 0;
+                : g_pvp_eng.round_initial_remote_pred;
         }
 
         g_pvp_eng.predicted_remote[cur_slot] = cur_rem_mask;
