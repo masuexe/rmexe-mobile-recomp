@@ -1805,6 +1805,7 @@ struct UiInputManager {
     std::string server_url = "127.0.0.1:8765";
     std::string player_uid = generate_random_uid();
     std::string player_name = "ROCKMAN";
+    bool pvp_bo3_mode = false;
     bool is_lon_game = false;
     int pvp_menu_choice = 0; // 0 = Create Room, 1 = Join Room
 
@@ -1812,6 +1813,8 @@ struct UiInputManager {
     bool cli_online_mode = false;
     bool has_cli_fps_override = false;
     bool cli_high_fps_mode = true;
+    bool has_cli_pvp_bo3 = false;
+    bool cli_pvp_bo3 = false;
     std::string cli_server_url;
     std::string cli_player_uid;
     std::string cli_player_name;
@@ -1976,8 +1979,12 @@ struct UiInputManager {
         if (has_cli_fps_override) {
             high_fps_mode = cli_high_fps_mode;
         }
+        if (has_cli_pvp_bo3) {
+            pvp_bo3_mode = cli_pvp_bo3;
+        }
         if (!cli_player_uid.empty()) player_uid = cli_player_uid;
         if (!cli_player_name.empty()) player_name = cli_player_name;
+        g_pvp.set_preferred_format(pvp_bo3_mode ? pvp::PVP_FORMAT_TRIPLE : pvp::PVP_FORMAT_SINGLE);
     }
 
     void load_config() {
@@ -2015,6 +2022,8 @@ struct UiInputManager {
                 player_uid = val;
             } else if (key == "player_name" && !val.empty()) {
                 player_name = val;
+            } else if (key == "pvp_bo3_mode") {
+                pvp_bo3_mode = (std::atoi(val.c_str()) != 0);
             } else {
                 for (int i = 0; i < ACT_COUNT; ++i) {
                     std::string pfx = std::string(binds[i].cfg_id) + "_";
@@ -2066,7 +2075,8 @@ struct UiInputManager {
         out << "online_mode=" << (online_mode ? 1 : 0) << "\n";
         out << "server_url=" << server_url << "\n";
         out << "player_uid=" << player_uid << "\n";
-        out << "player_name=" << player_name << "\n\n";
+        out << "player_name=" << player_name << "\n";
+        out << "pvp_bo3_mode=" << (pvp_bo3_mode ? 1 : 0) << "\n\n";
         for (int i = 0; i < ACT_COUNT; ++i) {
             out << binds[i].cfg_id << "_key1=" << format_key_cfg(binds[i].keys[0]) << "\n";
             out << binds[i].cfg_id << "_key2=" << format_key_cfg(binds[i].keys[1]) << "\n";
@@ -2334,19 +2344,20 @@ struct UiInputManager {
 
     // Layout order (Online & PvP right at top for instant access!):
     // 0: 联机对战 (Create / Quick Join / Room List / Exit Match)
-    // 1: 服务器地址 (Enter to type/paste IP:Port, Left/Right preset toggle)
-    // 2: 玩家昵称 (Enter to type/paste nickname)
-    // 3: 通信模式 (Online Server / Local Offline)
-    // 4: 主音量
-    // 5: 帧率模式 (60 FPS / 15 FPS)
-    // 6: 底部软键栏
-    // 7..18: Keybindings (ACT_COUNT = 12)
-    // 19: 恢复默认按键配置
-    // 20: 返回游戏 (Resume)
-    // 21: 保存进度并退出
-    static constexpr int BIND_START_ROW = 7;
-    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 19
-    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 22
+    // 1: 对战赛制 (一回战 Single / 三回战 BO3·三局两胜)
+    // 2: 服务器地址 (Enter to type/paste IP:Port, Left/Right preset toggle)
+    // 3: 玩家昵称 (Enter to type/paste nickname)
+    // 4: 通信模式 (Online Server / Local Offline)
+    // 5: 主音量
+    // 6: 帧率模式 (60 FPS / 15 FPS)
+    // 7: 底部软键栏
+    // 8..19: Keybindings (ACT_COUNT = 12)
+    // 20: 恢复默认按键配置
+    // 21: 返回游戏 (Resume)
+    // 22: 保存进度并退出
+    static constexpr int BIND_START_ROW = 8;
+    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 20
+    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 23
     static constexpr int VISIBLE_ROWS = 9;
 
     bool overlay_open = false;
@@ -2422,6 +2433,17 @@ struct UiInputManager {
         show_toast(high_fps_mode ? "帧率模式: 60 FPS (丝滑插值)" : "帧率模式: 15 FPS (原版帧率)", 90);
     }
 
+    void toggle_pvp_format() {
+        if (g_pvp.active()) {
+            show_toast("对战房间进行中，无法更改赛制", 90);
+            return;
+        }
+        pvp_bo3_mode = !pvp_bo3_mode;
+        g_pvp.set_preferred_format(pvp_bo3_mode ? pvp::PVP_FORMAT_TRIPLE : pvp::PVP_FORMAT_SINGLE);
+        save_config();
+        show_toast(pvp_bo3_mode ? "对战赛制: 三回战 (BO3·三局两胜)" : "对战赛制: 一回战 (Single)", 90);
+    }
+
     void toggle_net_mode() {
         if (g_pvp.active()) {
             show_toast("请先在第一行退出当前对战房间", 90);
@@ -2483,8 +2505,10 @@ struct UiInputManager {
         save_config();
         std::string gm = is_lon_game ? "lon" : "pon";
         if (pvp_menu_choice == 0) {
+            g_pvp.set_preferred_format(pvp_bo3_mode ? pvp::PVP_FORMAT_TRIPLE : pvp::PVP_FORMAT_SINGLE);
             if (g_pvp.create_room(server_url, player_uid, player_name, gm)) {
-                show_toast("已创建房间 #" + std::to_string(g_pvp.room_id()) + " 等待挑战者...", 180);
+                std::string fmt_tag = g_pvp.is_triple_battle() ? " [三回战]" : "";
+                show_toast("已创建房间 #" + std::to_string(g_pvp.room_id()) + fmt_tag + " 等待挑战者...", 180);
                 close_overlay();
             } else {
                 show_toast("创建失败: 无法连接 " + server_url, 120);
@@ -2617,19 +2641,21 @@ struct UiInputManager {
                     int max_choices = 2 + static_cast<int>(overlay_open_rooms.size());
                     pvp_menu_choice = (pvp_menu_choice + dir + max_choices) % max_choices;
                 } else if (overlay_sel_row == 1) {
+                    toggle_pvp_format();
+                } else if (overlay_sel_row == 2) {
                     cycle_server_preset(dir);
-                } else if (overlay_sel_row == 3) {
-                    toggle_net_mode();
                 } else if (overlay_sel_row == 4) {
+                    toggle_net_mode();
+                } else if (overlay_sel_row == 5) {
                     {
                         std::lock_guard<std::mutex> lk(g_audio.mtx);
                         g_audio.muted = false;
                         g_audio.master_volume = std::clamp(g_audio.master_volume + dir * 5, 0, 100);
                     }
                     save_config();
-                } else if (overlay_sel_row == 5) {
-                    toggle_fps_mode();
                 } else if (overlay_sel_row == 6) {
+                    toggle_fps_mode();
+                } else if (overlay_sel_row == 7) {
                     show_softkey_bar = !show_softkey_bar;
                     apply_softbar_geometry(win, ren, scale);
                     save_config();
@@ -2641,6 +2667,8 @@ struct UiInputManager {
                 if (overlay_sel_row == 0) {
                     exec_pvp_action();
                 } else if (overlay_sel_row == 1) {
+                    toggle_pvp_format();
+                } else if (overlay_sel_row == 2) {
                     if (g_pvp.active()) {
                         show_toast("请先退出当前对战房间再修改地址", 90);
                     } else {
@@ -2649,22 +2677,22 @@ struct UiInputManager {
                         overlay_ignore_next_textinput = true;
                         SDL_StartTextInput();
                     }
-                } else if (overlay_sel_row == 2) {
+                } else if (overlay_sel_row == 3) {
                     overlay_text_edit_mode = 2;
                     overlay_text_edit_buf = player_name;
                     overlay_ignore_next_textinput = true;
                     SDL_StartTextInput();
-                } else if (overlay_sel_row == 3) {
-                    toggle_net_mode();
                 } else if (overlay_sel_row == 4) {
+                    toggle_net_mode();
+                } else if (overlay_sel_row == 5) {
                     {
                         std::lock_guard<std::mutex> lk(g_audio.mtx);
                         g_audio.muted = !g_audio.muted;
                     }
                     save_config();
-                } else if (overlay_sel_row == 5) {
-                    toggle_fps_mode();
                 } else if (overlay_sel_row == 6) {
+                    toggle_fps_mode();
+                } else if (overlay_sel_row == 7) {
                     show_softkey_bar = !show_softkey_bar;
                     apply_softbar_geometry(win, ren, scale);
                     save_config();
@@ -2790,27 +2818,42 @@ struct UiInputManager {
                     pstr = "< 快速加入配对 >";
                 } else if (static_cast<size_t>(pvp_menu_choice - 2) < overlay_open_rooms.size()) {
                     const auto& rm = overlay_open_rooms[static_cast<size_t>(pvp_menu_choice - 2)];
-                    pstr = "< #" + std::to_string(rm.room_id) + " " + rm.host + " >";
+                    std::string tag = (rm.match_format == pvp::PVP_FORMAT_TRIPLE) ? "[3战]" : "[1战]";
+                    pstr = "< " + tag + "#" + std::to_string(rm.room_id) + " " + rm.host + " >";
                     pcol = 0xFF74D8FFu;
                 } else {
                     pstr = "< 快速加入配对 >";
                 }
                 draw_ui_text(display_buf, 240, 260, pstr, 84, ry + 12, pcol);
             } else if (r == 1) {
+                draw_ui_text(display_buf, 240, 260, "对战赛制", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                std::string fstr;
+                uint32_t fcol = 0xFF88FFAAu;
+                if (g_pvp.active()) {
+                    bool is_bo3 = g_pvp.is_triple_battle();
+                    fstr = is_bo3 ? "三回战 (BO3·三局两胜)" : "一回战 (Single)";
+                    fcol = is_bo3 ? 0xFFFFD874u : 0xFF88FFAAu;
+                } else {
+                    fstr = pvp_bo3_mode ? "< 三回战 (BO3·三局两胜) >" : "< 一回战 (Single) >";
+                    fcol = pvp_bo3_mode ? 0xFFFFD874u : 0xFF88FFAAu;
+                }
+                int fx = std::max(64, std::min(84, 228 - measure_ui_text(fstr)));
+                draw_ui_text(display_buf, 240, 260, fstr, fx, ry + 12, fcol);
+            } else if (r == 2) {
                 draw_ui_text(display_buf, 240, 260, "服务器地址", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string disp_srv = server_url;
                 if (disp_srv.size() > 21) disp_srv = disp_srv.substr(0, 20) + "..";
                 std::string ustr = "[" + disp_srv + "]";
                 draw_ui_text(display_buf, 240, 260, ustr, 76, ry + 12, is_sel ? 0xFF88EEFFu : 0xFF74D8FFu);
-            } else if (r == 2) {
+            } else if (r == 3) {
                 draw_ui_text(display_buf, 240, 260, "玩家昵称", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string nstr = "[" + player_name + "]";
                 draw_ui_text(display_buf, 240, 260, nstr, 84, ry + 12, is_sel ? 0xFFFFEC88u : 0xFF88FFAAu);
-            } else if (r == 3) {
+            } else if (r == 4) {
                 draw_ui_text(display_buf, 240, 260, "通信模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string nstr = online_mode ? "< 在线服务器 >" : "< 本地离线模拟 >";
                 draw_ui_text(display_buf, 240, 260, nstr, 86, ry + 12, online_mode ? 0xFF74D8FFu : 0xFF98A8C0u);
-            } else if (r == 4) {
+            } else if (r == 5) {
                 int vol = 100;
                 bool muted = false;
                 {
@@ -2821,11 +2864,11 @@ struct UiInputManager {
                 draw_ui_text(display_buf, 240, 260, "主音量", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string vstr = muted ? ("< 静音 (" + std::to_string(vol) + "%) >") : ("< " + std::to_string(vol) + "% >");
                 draw_ui_text(display_buf, 240, 260, vstr, 102, ry + 12, muted ? 0xFFFF8888u : 0xFF88FFAAu);
-            } else if (r == 5) {
+            } else if (r == 6) {
                 draw_ui_text(display_buf, 240, 260, "帧率模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string fstr = high_fps_mode ? "< 60 FPS 丝滑插值 >" : "< 15 FPS 原版帧率 >";
                 draw_ui_text(display_buf, 240, 260, fstr, 84, ry + 12, high_fps_mode ? 0xFF88FFAAu : 0xFFFFD874u);
-            } else if (r == 6) {
+            } else if (r == 7) {
                 draw_ui_text(display_buf, 240, 260, "底部软键栏", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string sstr = show_softkey_bar ? "< 开启 >" : "< 关闭 >";
                 draw_ui_text(display_buf, 240, 260, sstr, 110, ry + 12, show_softkey_bar ? 0xFF88FFAAu : 0xFF98A8C0u);
@@ -2870,8 +2913,14 @@ struct UiInputManager {
         // Footer instructions
         fill_rect_alpha(display_buf, 240, 260, 6, 196, 228, 1, 0xFF324672u);
         if (overlay_sel_row == 1) {
-            draw_ui_text(display_buf, 240, 260, "Enter:手动输入/粘贴地址  ←→:预设切换", 6, 211, 0xFF88EEFFu);
+            if (live_pvp) {
+                draw_ui_text(display_buf, 240, 260, "当前房间赛制已锁定 (退出房间后可修改)", 6, 211, 0xFF88FFAAu);
+            } else {
+                draw_ui_text(display_buf, 240, 260, "←→/Enter:建房赛制 一回战 / 三回战(BO3·加入时随房主)", 6, 211, 0xFFFFD874u);
+            }
         } else if (overlay_sel_row == 2) {
+            draw_ui_text(display_buf, 240, 260, "Enter:手动输入/粘贴地址  ←→:预设切换", 6, 211, 0xFF88EEFFu);
+        } else if (overlay_sel_row == 3) {
             draw_ui_text(display_buf, 240, 260, "Enter:输入/粘贴昵称 (自动保存)", 14, 211, 0xFFFFEC88u);
         } else if (overlay_sel_row == 0) {
             if (live_pvp) {
@@ -3464,6 +3513,18 @@ void set_cli_pvp_action(int mode, uint32_t room_id) {
     g_ui.cli_pvp_join_retries = 0;
 }
 
+void set_cli_pvp_bo3(bool v) {
+    g_ui.has_cli_pvp_bo3 = true;
+    g_ui.cli_pvp_bo3 = v;
+    if (v) {
+        g_ui.pvp_bo3_mode = true;
+        g_pvp.set_preferred_format(pvp::PVP_FORMAT_TRIPLE);
+    } else {
+        g_ui.pvp_bo3_mode = false;
+        g_pvp.set_preferred_format(pvp::PVP_FORMAT_SINGLE);
+    }
+}
+
 pvp::PvpClientSession& DojaRuntime::pvp_session() {
     return g_pvp;
 }
@@ -3478,9 +3539,12 @@ int DojaRuntime::take_cli_pvp_action(uint32_t& room_id_out) {
     g_ui.online_mode = true;
     if (g_ui.cli_pvp_mode == 1) {
         g_ui.cli_pvp_mode = 0;
+        bool use_bo3 = g_ui.has_cli_pvp_bo3 ? g_ui.cli_pvp_bo3 : g_ui.pvp_bo3_mode;
+        g_pvp.set_preferred_format(use_bo3 ? pvp::PVP_FORMAT_TRIPLE : pvp::PVP_FORMAT_SINGLE);
         if (g_pvp.create_room(g_ui.server_url, g_ui.player_uid, g_ui.player_name, gm)) {
             room_id_out = g_pvp.room_id();
-            g_ui.show_toast("已创建房间 #" + std::to_string(room_id_out) + " 等待加入...", 180);
+            std::string fmt_tag = g_pvp.is_triple_battle() ? " [三回战]" : "";
+            g_ui.show_toast("已创建房间 #" + std::to_string(room_id_out) + fmt_tag + " 等待加入...", 180);
             return 1;
         }
         return -1;

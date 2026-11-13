@@ -16,6 +16,8 @@ Runs:
      - Match 1: PoN JP vs PoN JP
      - Match 2: PoN EN vs PoN EN
      - Match 3: PoN JP vs PoN EN (Cross-Region NetBattle!)
+     - Match 4: PoN JP Real-Time 16Hz + Buster Charge + Asymmetric Freeze Sync
+     - Match 5: PoN JP vs PoN EN [BO3 Triple Battle]
      Verifies clean match completion, matching winner/turn counts, and ZERO `[PvP DESYNC]` warnings.
 """
 
@@ -40,6 +42,7 @@ BUILD_DIR = ROOT_DIR / "build"
 RESULT_RE = re.compile(
     r"\[PvP BOT RESULT\]\s+local_idx=(-?\d+)\s+winner=(-?\d+)\s+turns=(\d+)\s+"
     r"rounds=(\d+)\s+hp0=(-?\d+)\s+hp1=(-?\d+)\s+desyncs=(\d+)"
+    r"(?:\s+bo3=(\d+)\s+games=(\d+)\s+w0=(\d+)\s+w1=(\d+))?"
 )
 
 
@@ -94,6 +97,7 @@ def run_live_udp_match(
     match_idx: int,
     realtime_clock: bool = False,
     inject_stalls: bool = False,
+    bo3: bool = False,
 ) -> None:
     print(
         f"=== [2.{match_idx}] Live UDP Match: {match_label} ({p0_bin.name} vs {p1_bin.name}) ===",
@@ -104,8 +108,8 @@ def run_live_udp_match(
     cfg0 = tmp_dir / f"m{match_idx}_p0.cfg"
     cfg1 = tmp_dir / f"m{match_idx}_p1.cfg"
 
-    mode_args0 = ["--scale", "1", "--config", str(cfg0)] if realtime_clock else ["--headless", "--fast-forward"]
-    mode_args1 = ["--scale", "1", "--config", str(cfg1)] if realtime_clock else ["--headless", "--fast-forward"]
+    mode_args0 = ["--scale", "1", "--config", str(cfg0)] if realtime_clock else ["--headless", "--fast-forward", "--config", str(cfg0)]
+    mode_args1 = ["--scale", "1", "--config", str(cfg1)] if realtime_clock else ["--headless", "--fast-forward", "--config", str(cfg1)]
 
     cmd0 = [
         str(p0_bin),
@@ -121,6 +125,8 @@ def run_live_udp_match(
         "--pvp-auto-bot",
         "--pvp-create",
     ]
+    if bo3:
+        cmd0.append("--pvp-bo3")
     t0 = time.monotonic()
     p0 = subprocess.Popen(
         cmd0,
@@ -132,6 +138,7 @@ def run_live_udp_match(
     )
 
     room_id = None
+    room_fmt = None
     deadline = time.monotonic() + 12.0
     while time.monotonic() < deadline:
         if p0.poll() is not None:
@@ -142,6 +149,7 @@ def run_live_udp_match(
             rooms = data.get("rooms", [])
             if rooms:
                 room_id = int(rooms[0]["room_id"])
+                room_fmt = rooms[0].get("format")
                 break
         except Exception:
             pass
@@ -150,6 +158,13 @@ def run_live_udp_match(
     if room_id is None:
         p0.kill()
         raise RuntimeError(f"Timed out waiting for {p0_bin.name} to open a PoN room on {server_addr}")
+
+    expected_fmt = "bo3" if bo3 else "single"
+    if room_fmt != expected_fmt:
+        p0.kill()
+        raise RuntimeError(
+            f"Room #{room_id} format mismatch in {match_label}: expected {expected_fmt!r}, got {room_fmt!r}"
+        )
 
     cmd1 = [
         str(p1_bin),
@@ -186,7 +201,7 @@ def run_live_udp_match(
             out, err = proc.communicate()
             res_box[slot] = {"out": out, "err": err, "t_end": time.monotonic(), "timeout": True}
 
-    max_wait = 90.0 if realtime_clock else 45.0
+    max_wait = 90.0 if (realtime_clock or bo3) else 45.0
     th0 = threading.Thread(target=wait_proc, args=(p0, 0, max_wait), daemon=True)
     th1 = threading.Thread(target=wait_proc, args=(p1, 1, max_wait), daemon=True)
     th0.start()
@@ -237,8 +252,8 @@ def run_live_udp_match(
     if not m0 or not m1:
         raise RuntimeError(f"Missing [PvP BOT RESULT] line:\nP0:\n{out0}\nP1:\n{out1}")
 
-    r0 = tuple(int(x) for x in m0.groups())
-    r1 = tuple(int(x) for x in m1.groups())
+    r0 = tuple(int(x) for x in m0.groups()[:7])
+    r1 = tuple(int(x) for x in m1.groups()[:7])
     # (local_idx, winner, turns, rounds, hp0, hp1, desyncs)
     print(f"  P0: {m0.group(0)}")
     print(f"  P1: {m1.group(0)}")
@@ -251,13 +266,32 @@ def run_live_udp_match(
         raise RuntimeError(
             f"End-of-match state mismatch in {match_label}: P0={r0} vs P1={r1}"
         )
+
+    bo3_info = ""
+    if bo3:
+        if m0.group(7) is None or m1.group(7) is None:
+            raise RuntimeError(f"Missing BO3 fields (bo3/games/w0/w1) in [PvP BOT RESULT] for {match_label}")
+        b0 = tuple(int(x) for x in m0.groups()[7:])
+        b1 = tuple(int(x) for x in m1.groups()[7:])
+        if b0 != b1:
+            raise RuntimeError(f"BO3 summary mismatch in {match_label}: P0={b0} vs P1={b1}")
+        bo3_flag, games_cnt, w0_cnt, w1_cnt = b0
+        if bo3_flag != 1 or games_cnt < 2:
+            raise RuntimeError(
+                f"Expected BO3 match with games >= 2 in {match_label}: bo3={bo3_flag}, games={games_cnt}, w0={w0_cnt}, w1={w1_cnt}"
+            )
+        bo3_info = f", bo3=1, games={games_cnt}, score={w0_cnt}-{w1_cnt}"
+    elif m0.group(7) is not None and m1.group(7) is not None:
+        if int(m0.group(7)) != 0 or int(m1.group(7)) != 0:
+            raise RuntimeError(f"Unexpected bo3=1 in single-battle match {match_label}")
+
     if realtime_clock and exit_skew_s > 0.75:
         raise RuntimeError(
             f"Real-time clock drift too high in {match_label}: exit_skew={exit_skew_s:.3f}s (> 0.75s)"
         )
     print(
         f"  -> {match_label} PASSED in {dt:.2f}s "
-        f"(room #{room_id}, winner=P{r0[1]}, turns={r0[2]}, rounds={r0[3]}, "
+        f"(room #{room_id}, winner=P{r0[1]}, turns={r0[2]}, rounds={r0[3]}{bo3_info}, "
         f"exit_skew={exit_skew_s:.3f}s, desyncs=0)!\n",
         flush=True,
     )
@@ -321,6 +355,15 @@ def main() -> int:
                 4,
                 realtime_clock=True,
                 inject_stalls=True,
+            )
+            run_live_udp_match(
+                "PoN JP vs PoN EN [BO3 Triple Battle]",
+                pon_jp,
+                pon_en,
+                server_addr,
+                tmp_dir,
+                5,
+                bo3=True,
             )
         finally:
             srv_proc.terminate()

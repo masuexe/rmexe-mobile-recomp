@@ -313,6 +313,8 @@ private:
 
 extern DojaRuntime* g_runtime;
 
+void set_cli_pvp_bo3(bool v);
+
 // Generated code entry points
 void generated_static_init(DojaRuntime& rt);
 Ref generated_create_app_main(DojaRuntime& rt);

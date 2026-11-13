@@ -34,6 +34,11 @@ enum PvpPktType : uint8_t {
     PKT_MATCH_END     = 15,
 };
 
+constexpr uint8_t PVP_FORMAT_SINGLE = 0;
+constexpr uint8_t PVP_FORMAT_TRIPLE = 1;
+constexpr uint8_t PVP_HDR_FLAG_TRIPLE = 0x01;
+constexpr uint8_t PVP_HDR_FLAG_FMT_KNOWN = 0x02;
+
 // Player's .sav Fighter Build (HP, Buster levels, Element, NaviCust skills, 30-chip Folder + Regular)
 struct PvpFighterBuild {
     int32_t max_hp = 100;
@@ -142,6 +147,7 @@ struct PvpRoomInfo {
     uint32_t room_id = 0;
     std::string game;
     std::string host;
+    uint8_t match_format = PVP_FORMAT_SINGLE;
 };
 
 // 28-byte wire-safe network-order UDP packet header
@@ -277,6 +283,7 @@ public:
     struct Room {
         uint32_t room_id = 0;
         std::string game = "pon"; // "pon" or "lon"
+        uint8_t match_format = PVP_FORMAT_SINGLE;
         uint32_t rng_seed = 0;
         bool match_started = false;
         uint64_t created_ms = 0;
@@ -287,6 +294,12 @@ public:
     PvpServerEngine() : rng_(std::random_device{}()) {}
 
     void set_udp_fd(plat::sock_t fd) { udp_fd_ = fd; }
+    void set_legacy_wire_compat_for_test(bool v) { legacy_wire_test_ = v; }
+    void set_drop_commit_to_slot_for_test(uint8_t target_slot, int drop_count) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        drop_commit_target_slot_ = target_slot;
+        drop_commit_remaining_ = drop_count;
+    }
 
     void periodic_maintenance() {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -298,12 +311,15 @@ public:
         return path.rfind("/pvp/", 0) == 0;
     }
 
-    net::HttpResponse handle_http(const std::string& method, const std::string& url) {
+    net::HttpResponse handle_http(const std::string& method, const std::string& url, const std::vector<uint8_t>& body = {}) {
         std::lock_guard<std::mutex> lk(mtx_);
         prune_stale_rooms_unlocked();
 
         std::string path = net::extract_path_only(url);
         auto params = net::parse_query_params(url);
+        auto format_str = [](uint8_t fmt) -> const char* {
+            return (fmt == PVP_FORMAT_TRIPLE) ? "bo3" : "single";
+        };
 
         net::HttpResponse resp;
         resp.status_code = 200;
@@ -333,7 +349,11 @@ public:
                 first = false;
                 js << "{\"room_id\":" << rm.room_id
                    << ",\"game\":\"" << json_escape(rm.game) << "\""
-                   << ",\"host\":\"" << json_escape(rm.peers[0].name) << "\"}";
+                   << ",\"host\":\"" << json_escape(rm.peers[0].name) << "\"";
+                if (!legacy_wire_test_) {
+                    js << ",\"format\":\"" << format_str(rm.match_format) << "\"";
+                }
+                js << "}";
             }
             js << "]}";
         } else if (path == "/pvp/create" && net::iequals(method, "POST")) {
@@ -355,10 +375,17 @@ public:
                 if (rooms_.empty()) next_room_id_ = 1001;
             }
 
+            std::string req_fmt = params.count("format") ? params["format"] : "";
+            if (req_fmt.empty() && !body.empty()) {
+                std::string bstr(reinterpret_cast<const char*>(body.data()), body.size());
+                req_fmt = json_extract_str(bstr, "format");
+            }
+
             uint32_t rid = next_room_id_++;
             Room rm{};
             rm.room_id = rid;
             rm.game = params.count("game") && !params["game"].empty() ? params["game"] : "pon";
+            rm.match_format = (req_fmt == "bo3" || req_fmt == "triple") ? PVP_FORMAT_TRIPLE : PVP_FORMAT_SINGLE;
             rm.rng_seed = rng_() | 1u;
             rm.created_ms = steady_millis();
             rm.peers[0].occupied = true;
@@ -368,9 +395,14 @@ public:
             rm.peers[0].last_seen_ms = rm.created_ms;
 
             uint32_t tok = rm.peers[0].token;
+            uint8_t fmt = rm.match_format;
             rooms_[rid] = std::move(rm);
             js << "{\"ok\":true,\"room_id\":" << rid
-               << ",\"slot\":1,\"token\":" << tok << "}";
+               << ",\"slot\":1,\"token\":" << tok;
+            if (!legacy_wire_test_) {
+                js << ",\"format\":\"" << format_str(fmt) << "\"";
+            }
+            js << "}";
         } else if (path == "/pvp/join" && net::iequals(method, "POST")) {
             uint32_t rid = params.count("room") ? static_cast<uint32_t>(std::strtoul(params["room"].c_str(), nullptr, 10)) : 0;
             Room* target = nullptr;
@@ -400,7 +432,11 @@ public:
                 target->peers[1].last_seen_ms = steady_millis();
                 js << "{\"ok\":true,\"room_id\":" << target->room_id
                    << ",\"slot\":2,\"token\":" << target->peers[1].token
-                   << ",\"host\":\"" << json_escape(target->peers[0].name) << "\"}";
+                   << ",\"host\":\"" << json_escape(target->peers[0].name) << "\"";
+                if (!legacy_wire_test_) {
+                    js << ",\"format\":\"" << format_str(target->match_format) << "\"";
+                }
+                js << "}";
             }
         } else if (path == "/pvp/leave") {
             uint32_t rid = params.count("room") ? static_cast<uint32_t>(std::strtoul(params["room"].c_str(), nullptr, 10)) : 0;
@@ -462,9 +498,13 @@ public:
 
         switch (hdr.pkt_type) {
             case PKT_BIND: {
+                const uint8_t fmt_flag = legacy_wire_test_
+                    ? 0
+                    : static_cast<uint8_t>(PVP_HDR_FLAG_FMT_KNOWN | ((rm.match_format == PVP_FORMAT_TRIPLE) ? PVP_HDR_FLAG_TRIPLE : 0));
                 PvpPacketHeader ack{};
                 ack.pkt_type = PKT_BIND_ACK;
                 ack.slot = hdr.slot;
+                ack.flags = fmt_flag;
                 ack.room_id = rm.room_id;
                 ack.token = me.token;
                 ack.frame_or_seq = rm.rng_seed;
@@ -478,6 +518,7 @@ public:
                         PvpPacketHeader st{};
                         st.pkt_type = PKT_MATCH_START;
                         st.slot = static_cast<uint8_t>(p + 1);
+                        st.flags = fmt_flag;
                         st.room_id = rm.room_id;
                         st.token = rm.peers[p].token;
                         st.frame_or_seq = rm.rng_seed;
@@ -554,12 +595,24 @@ public:
                     auto awire = ack.serialize();
                     plat::sock_sendto(udp_fd, awire.data(), awire.size(), reinterpret_cast<const sockaddr*>(&src_addr), src_len);
                     if (opp.occupied && opp.udp_bound) {
-                        plat::sock_sendto(udp_fd, data, len,
-                                          reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
+                        if (drop_commit_target_slot_ != 0 &&
+                            (opp_idx + 1) == drop_commit_target_slot_ &&
+                            drop_commit_remaining_ > 0) {
+                            --drop_commit_remaining_;
+                        } else {
+                            plat::sock_sendto(udp_fd, data, len,
+                                              reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
+                        }
                     }
                     if (opp.has_commit && opp.commit_turn == cturn && !opp.commit_wire.empty()) {
-                        plat::sock_sendto(udp_fd, opp.commit_wire.data(), opp.commit_wire.size(),
-                                          reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                        if (drop_commit_target_slot_ != 0 &&
+                            hdr.slot == drop_commit_target_slot_ &&
+                            drop_commit_remaining_ > 0) {
+                            --drop_commit_remaining_;
+                        } else {
+                            plat::sock_sendto(udp_fd, opp.commit_wire.data(), opp.commit_wire.size(),
+                                              reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                        }
                     }
                 }
                 break;
@@ -597,6 +650,7 @@ public:
             case PKT_INPUT_REQ: {
                 uint16_t turn = static_cast<uint16_t>(hdr.keypad_mask & 0xFFFF);
                 uint32_t want_f = hdr.frame_or_seq;
+                bool any_replayed = false;
                 // Replay up to 32 cached inputs from opp starting at want_f in 8-frame wire-compatible chunks!
                 for (uint32_t chunk = 0; chunk < 4; ++chunk) {
                     uint32_t base_f = want_f + chunk * 8;
@@ -610,6 +664,7 @@ public:
                         top_f = f;
                     }
                     if (found_masks.empty()) break;
+                    any_replayed = true;
                     std::vector<uint8_t> pl;
                     net::push_be16(pl, turn);
                     pl.push_back(static_cast<uint8_t>(found_masks.size()));
@@ -627,6 +682,11 @@ public:
                     auto rwire = rep.serialize(pl.data(), pl.size());
                     plat::sock_sendto(udp_fd, rwire.data(), rwire.size(), reinterpret_cast<const sockaddr*>(&src_addr), src_len);
                     if (found_masks.size() < 8) break;
+                }
+                if (!any_replayed && me.has_commit && me.commit_turn == turn &&
+                    !me.commit_wire.empty() && opp.occupied && opp.udp_bound) {
+                    plat::sock_sendto(udp_fd, me.commit_wire.data(), me.commit_wire.size(),
+                                      reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
                 }
                 if (opp.occupied && opp.udp_bound) {
                     plat::sock_sendto(udp_fd, data, len,
@@ -663,6 +723,9 @@ private:
     std::mutex mtx_;
     std::mt19937 rng_;
     plat::sock_t udp_fd_ = plat::kInvalidSocket;
+    bool legacy_wire_test_ = false;
+    uint8_t drop_commit_target_slot_ = 0;
+    int drop_commit_remaining_ = 0;
     uint32_t next_room_id_ = 1001;
     std::unordered_map<uint32_t, Room> rooms_;
 
@@ -750,6 +813,14 @@ public:
     bool local_build_acked() const { return local_build_acked_; }
     const PvpFighterBuild& remote_build() const { return remote_build_; }
 
+    void set_preferred_format(uint8_t fmt) {
+        preferred_format_ = (fmt == PVP_FORMAT_TRIPLE) ? PVP_FORMAT_TRIPLE : PVP_FORMAT_SINGLE;
+    }
+    uint8_t preferred_format() const { return preferred_format_; }
+    bool is_triple_battle() const { return active_match_format_ == PVP_FORMAT_TRIPLE; }
+    bool peer_supports_bo3() const { return peer_fmt_capable_; }
+    void set_send_legacy_build_for_test(bool v) { send_legacy_build_test_ = v; }
+
     static bool check_server_status(const std::string& server_host_port, std::string& summary_out) {
         net::HttpResponse resp;
         if (!net::http_request_tcp(server_host_port, "GET", "/pvp/status", {}, {}, resp, 1500) ||
@@ -786,6 +857,8 @@ public:
             ri.room_id = static_cast<uint32_t>(std::strtoul(json_extract_str(item, "room_id").c_str(), nullptr, 10));
             ri.game = json_extract_str(item, "game");
             ri.host = json_extract_str(item, "host");
+            std::string fmt = json_extract_str(item, "format");
+            ri.match_format = (fmt == "bo3" || fmt == "triple") ? PVP_FORMAT_TRIPLE : PVP_FORMAT_SINGLE;
             if (ri.room_id != 0) out_rooms.push_back(std::move(ri));
             pos = rb + 1;
         }
@@ -794,11 +867,16 @@ public:
 
     bool create_room(const std::string& server_host_port, const std::string& uid, const std::string& name, const std::string& game = "pon") {
         close_udp();
+        const char* fmt_s = (preferred_format_ == PVP_FORMAT_TRIPLE) ? "bo3" : "single";
         std::string uri = "/pvp/create?uid=" + net::url_encode(uid) +
                           "&name=" + net::url_encode(name) +
-                          "&game=" + net::url_encode(game);
+                          "&game=" + net::url_encode(game) +
+                          "&format=" + fmt_s;
+        std::string body_str = std::string("{\"format\":\"") + fmt_s + "\"}";
+        std::vector<uint8_t> req_body(body_str.begin(), body_str.end());
+        std::unordered_map<std::string, std::string> req_hdrs{{"Content-Type", "application/json"}};
         net::HttpResponse resp;
-        if (!net::http_request_tcp(server_host_port, "POST", uri, {}, {}, resp, 2000) || resp.status_code != 200) {
+        if (!net::http_request_tcp(server_host_port, "POST", uri, req_hdrs, req_body, resp, 2000) || resp.status_code != 200) {
             return false;
         }
         std::string js(reinterpret_cast<const char*>(resp.body.data()), resp.body.size());
@@ -808,6 +886,10 @@ public:
         room_id_ = static_cast<uint32_t>(std::strtoul(json_extract_str(js, "room_id").c_str(), nullptr, 10));
         token_   = static_cast<uint32_t>(std::strtoul(json_extract_str(js, "token").c_str(), nullptr, 10));
         slot_    = 1;
+        std::string rfmt = json_extract_str(js, "format");
+        if (rfmt == "bo3" || rfmt == "triple") active_match_format_ = PVP_FORMAT_TRIPLE;
+        else if (rfmt == "single") active_match_format_ = PVP_FORMAT_SINGLE;
+        else active_match_format_ = preferred_format_;
         opponent_name_.clear();
         server_addr_str_ = server_host_port;
         return open_and_bind_udp(server_host_port);
@@ -832,6 +914,8 @@ public:
         room_id_       = static_cast<uint32_t>(std::strtoul(json_extract_str(js, "room_id").c_str(), nullptr, 10));
         token_         = static_cast<uint32_t>(std::strtoul(json_extract_str(js, "token").c_str(), nullptr, 10));
         opponent_name_ = json_extract_str(js, "host");
+        std::string rfmt = json_extract_str(js, "format");
+        active_match_format_ = (rfmt == "bo3" || rfmt == "triple") ? PVP_FORMAT_TRIPLE : PVP_FORMAT_SINGLE;
         slot_          = 2;
         server_addr_str_ = server_host_port;
         return open_and_bind_udp(server_host_port);
@@ -843,6 +927,11 @@ public:
         PvpPacketHeader h{};
         h.pkt_type = PKT_BUILD_SYNC;
         h.slot = slot_;
+        if (!send_legacy_build_test_) {
+            uint8_t my_fmt = (slot_ == 1) ? active_match_format_ : preferred_format_;
+            h.flags = static_cast<uint8_t>(PVP_HDR_FLAG_FMT_KNOWN |
+                      ((my_fmt == PVP_FORMAT_TRIPLE) ? PVP_HDR_FLAG_TRIPLE : 0));
+        }
         h.room_id = room_id_;
         h.token = token_;
         auto wire = h.serialize(pl.data(), pl.size());
@@ -1060,8 +1149,22 @@ public:
             if (h.pkt_type == PKT_BIND_ACK) {
                 udp_bound_ = true;
                 rng_seed_ = h.frame_or_seq;
+                if (!has_host_build_fmt_) {
+                    if (h.flags & PVP_HDR_FLAG_FMT_KNOWN) {
+                        active_match_format_ = (h.flags & PVP_HDR_FLAG_TRIPLE) ? PVP_FORMAT_TRIPLE : PVP_FORMAT_SINGLE;
+                    } else if (h.flags & PVP_HDR_FLAG_TRIPLE) {
+                        active_match_format_ = PVP_FORMAT_TRIPLE;
+                    }
+                }
             } else if (h.pkt_type == PKT_MATCH_START) {
                 rng_seed_ = h.frame_or_seq;
+                if (!has_host_build_fmt_) {
+                    if (h.flags & PVP_HDR_FLAG_FMT_KNOWN) {
+                        active_match_format_ = (h.flags & PVP_HDR_FLAG_TRIPLE) ? PVP_FORMAT_TRIPLE : PVP_FORMAT_SINGLE;
+                    } else if (h.flags & PVP_HDR_FLAG_TRIPLE) {
+                        active_match_format_ = PVP_FORMAT_TRIPLE;
+                    }
+                }
                 if (payload && h.payload_len > 0) {
                     opponent_name_.assign(reinterpret_cast<const char*>(payload), h.payload_len);
                 }
@@ -1078,6 +1181,16 @@ public:
                         opponent_name_ = remote_build_.player_name;
                     }
                     has_remote_build_ = true;
+                    peer_fmt_capable_ = (h.flags & PVP_HDR_FLAG_FMT_KNOWN) != 0;
+                    if (!peer_fmt_capable_) {
+                        has_host_build_fmt_ = true;
+                        active_match_format_ = PVP_FORMAT_SINGLE;
+                    } else if (h.slot == 1) {
+                        has_host_build_fmt_ = true;
+                        active_match_format_ = (h.flags & PVP_HDR_FLAG_TRIPLE) ? PVP_FORMAT_TRIPLE : PVP_FORMAT_SINGLE;
+                    } else if (slot_ == 1) {
+                        has_host_build_fmt_ = true;
+                    }
                     PvpPacketHeader ack{};
                     ack.pkt_type = PKT_BUILD_ACK;
                     ack.slot = slot_;
@@ -1240,6 +1353,11 @@ private:
     uint32_t room_id_ = 0;
     uint32_t token_ = 0;
     uint8_t slot_ = 0;
+    uint8_t preferred_format_ = PVP_FORMAT_SINGLE;
+    uint8_t active_match_format_ = PVP_FORMAT_SINGLE;
+    bool peer_fmt_capable_ = false;
+    bool has_host_build_fmt_ = false;
+    bool send_legacy_build_test_ = false;
     uint32_t rng_seed_ = 0;
     bool udp_bound_ = false;
     bool match_started_ = false;
@@ -1268,6 +1386,9 @@ private:
     std::deque<std::vector<uint8_t>> remote_states_;
 
     void reset_match_buffers() {
+        active_match_format_ = PVP_FORMAT_SINGLE;
+        peer_fmt_capable_ = false;
+        has_host_build_fmt_ = false;
         match_started_ = false;
         peer_disconnected_ = false;
         remote_match_ended_ = false;

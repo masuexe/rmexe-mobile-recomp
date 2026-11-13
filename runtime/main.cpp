@@ -73,6 +73,8 @@ int main(int argc, char** argv) {
         } else if (arg == "--pvp-create") {
             if (!explicit_server) rmexe::set_network_server("", true);
             rmexe::set_cli_pvp_action(1, 0);
+        } else if (arg == "--pvp-bo3") {
+            rmexe::set_cli_pvp_bo3(true);
         } else if (arg == "--pvp-join" && i + 1 < argc) {
             if (!explicit_server) rmexe::set_network_server("", true);
             uint32_t rid = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
@@ -124,6 +126,7 @@ int main(int argc, char** argv) {
                       << "  --config <path>       Path to keybinding config  (default: controls.cfg)\n"
                       << "  --server <host:port>  Connect to rmexe_server    (e.g. 127.0.0.1:8765)\n"
                       << "  --pvp-create          Auto-create an online PvP NetBattle room on boot\n"
+                      << "  --pvp-bo3             Use Triple Battle (BO3 / Best-of-3) format when creating a room\n"
                       << "  --pvp-join <room_id>  Auto-join PvP room <room_id> (0 = quick match)\n"
                       << "  --pvp-self-test       Run headless 213-chip PvP symmetry & GGPO rollback suite\n"
                       << "  --pvp-auto-bot        Drive automated PvP inputs in --pvp-create/--pvp-join\n"

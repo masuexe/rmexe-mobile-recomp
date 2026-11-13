@@ -296,7 +296,7 @@ int main(int argc, char** argv) {
                                                  std::to_string(capcom_service.account_count()) + "}";
                                 resp.body.assign(js.begin(), js.end());
                             } else if (pvp_engine.is_pvp_http_path(uri)) {
-                                resp = pvp_engine.handle_http(method, uri);
+                                resp = pvp_engine.handle_http(method, uri, req_body);
                             } else {
                                 resp = capcom_service.handle_request(method, uri, req_hdrs, req_body);
                             }
