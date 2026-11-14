@@ -136,6 +136,7 @@ enum TfFlag : uint16_t {
     kTfFlagTrapArm        = 1 << 0,
     kTfFlagPassiveElem    = 1 << 1,
     kTfFlagStolenAntiNavi = 1 << 2,
+    kTfFlagCutInChain     = 1 << 3,
 };
 
 struct TfSlot {
@@ -2749,6 +2750,7 @@ static void step_pvp_combat_tick(DojaRuntime& rt, Ref cp, int32_t p0_mask, int32
                 cur.tf_state = TF_STACKED;
                 opp_slot.tf_state = TF_BANNER_OPEN;
                 opp_slot.ann_cnt = 1;
+                opp_slot.flags |= kTfFlagCutInChain;
                 g_pvp_eng.core.tf_slots[opp] = opp_slot; // Overwrites any TF_STACKED on opp (A1 -> B1 -> A2)
                 g_pvp_eng.core.tf_turn_owner = static_cast<int8_t>(opp);
                 g_pvp_eng.core.stop_owner = opp;
@@ -3161,6 +3163,140 @@ static void draw_opponent_nondim_chip_hud(DojaRuntime& rt, const SideContext& op
     }
 }
 
+static void draw_tf_cutin_fx_sprite(DojaRuntime& rt, int interrupted_ch, int seq_idx) {
+    if (seq_idx < 0 || (interrupted_ch != 0 && interrupted_ch != 1) || sf_app_CpCanvas_g <= 0) return;
+
+    // PoN's native 2x-weakness "!!" effect (Rock.EffSet(39) -> Attack.EffSet):
+    // eff_mo[39 * 3 + {0, 1, 2}] = {img_grp=38, anim_id=6, wait_id=20} in both JP & EN.
+    constexpr int32_t kWeaknessEffId = 39;
+    if (sf_app_CpCanvas_eff_mo <= 0 || sf_app_CpCanvas_wait_data <= 0 ||
+        sf_app_CpCanvas_image <= 0 || sf_app_CpCanvas_ani <= 0 ||
+        sf_app_CpCanvas_a_dx <= 0 || sf_app_CpCanvas_a_dy <= 0 ||
+        sf_app_CpCanvas_gx <= 0 || sf_app_CpCanvas_gy <= 0 ||
+        sf_app_CpCanvas_sx <= 0 || sf_app_CpCanvas_sy <= 0) {
+        return;
+    }
+    if (kWeaknessEffId * 3 + 2 >= rt.array_length(sf_app_CpCanvas_eff_mo)) return;
+
+    const int32_t img_grp = rt.iaload(sf_app_CpCanvas_eff_mo, kWeaknessEffId * 3 + 0);
+    const int32_t anim_id = rt.iaload(sf_app_CpCanvas_eff_mo, kWeaknessEffId * 3 + 1);
+    const int32_t wait_id = rt.iaload(sf_app_CpCanvas_eff_mo, kWeaknessEffId * 3 + 2);
+    if (img_grp < 0 || img_grp >= rt.array_length(sf_app_CpCanvas_image) ||
+        img_grp >= rt.array_length(sf_app_CpCanvas_ani) ||
+        img_grp >= rt.array_length(sf_app_CpCanvas_a_dx) ||
+        img_grp >= rt.array_length(sf_app_CpCanvas_a_dy) ||
+        img_grp >= rt.array_length(sf_app_CpCanvas_gx) ||
+        img_grp >= rt.array_length(sf_app_CpCanvas_gy) ||
+        img_grp >= rt.array_length(sf_app_CpCanvas_sx) ||
+        img_grp >= rt.array_length(sf_app_CpCanvas_sy) ||
+        wait_id < 0 || wait_id * 5 + 4 >= rt.array_length(sf_app_CpCanvas_wait_data)) {
+        return;
+    }
+
+    const Ref img_ref = rt.iaload(sf_app_CpCanvas_image, img_grp);
+    const Ref ani_grp = rt.iaload(sf_app_CpCanvas_ani, img_grp);
+    const Ref adx_grp = rt.iaload(sf_app_CpCanvas_a_dx, img_grp);
+    const Ref ady_grp = rt.iaload(sf_app_CpCanvas_a_dy, img_grp);
+    const Ref gx_grp = rt.iaload(sf_app_CpCanvas_gx, img_grp);
+    const Ref gy_grp = rt.iaload(sf_app_CpCanvas_gy, img_grp);
+    const Ref sx_grp = rt.iaload(sf_app_CpCanvas_sx, img_grp);
+    const Ref sy_grp = rt.iaload(sf_app_CpCanvas_sy, img_grp);
+    if (img_ref <= 0 || ani_grp <= 0 || adx_grp <= 0 || ady_grp <= 0 ||
+        gx_grp <= 0 || gy_grp <= 0 || sx_grp <= 0 || sy_grp <= 0 ||
+        anim_id < 0 || anim_id >= rt.array_length(ani_grp) ||
+        anim_id >= rt.array_length(adx_grp) || anim_id >= rt.array_length(ady_grp)) {
+        return;
+    }
+
+    const Ref ani_seq = rt.iaload(ani_grp, anim_id);
+    const Ref adx_seq = rt.iaload(adx_grp, anim_id);
+    const Ref ady_seq = rt.iaload(ady_grp, anim_id);
+    if (ani_seq <= 0 || adx_seq <= 0 || ady_seq <= 0) return;
+
+    const int32_t ani_len = rt.array_length(ani_seq);
+    if (ani_len <= 0 || rt.array_length(adx_seq) < ani_len || rt.array_length(ady_seq) < ani_len) return;
+
+    // Pure read-only replay of PoN's Attack_Loop + Attack_Draw animation state for seq_idx ticks
+    int32_t w0 = rt.iaload(sf_app_CpCanvas_wait_data, wait_id * 5 + 0);
+    int32_t w1 = rt.iaload(sf_app_CpCanvas_wait_data, wait_id * 5 + 1);
+    int32_t loop_cnt = rt.iaload(sf_app_CpCanvas_wait_data, wait_id * 5 + 2);
+    const int32_t loop_start = rt.iaload(sf_app_CpCanvas_wait_data, wait_id * 5 + 3);
+    const int32_t loop_end = rt.iaload(sf_app_CpCanvas_wait_data, wait_id * 5 + 4);
+    int32_t step = 0;
+    int32_t sub = -1;
+    for (int t = 0; t <= seq_idx; ++t) {
+        bool advance = true;
+        if (--w0 >= 0) {
+            advance = false;
+        } else {
+            w0 = 0;
+            if (loop_cnt != 0) {
+                if (step == loop_end + 1) {
+                    step = loop_start;
+                    --loop_cnt;
+                }
+            } else if (step + 1 < ani_len && rt.iaload(ani_seq, step + 1) == -2) {
+                if (w1 < 0) {
+                    advance = false;
+                } else if (--w1 >= 0) {
+                    advance = false;
+                } else {
+                    w1 = 0;
+                }
+            }
+        }
+        if (step < 0 || step >= ani_len) return;
+        sub = rt.iaload(ani_seq, step);
+        if (sub < 0) return;
+        if (t < seq_idx && advance) {
+            ++step;
+        }
+    }
+
+    if (sub < 0 || sub >= rt.array_length(gx_grp) || sub >= rt.array_length(gy_grp) ||
+        sub >= rt.array_length(sx_grp) || sub >= rt.array_length(sy_grp)) {
+        return;
+    }
+    const int32_t gx = rt.iaload(gx_grp, sub);
+    const int32_t gy = rt.iaload(gy_grp, sub);
+    const int32_t sx = rt.iaload(sx_grp, sub);
+    const int32_t sy = rt.iaload(sy_grp, sub);
+    const int32_t adx = rt.iaload(adx_seq, step);
+    const int32_t ady = rt.iaload(ady_seq, step);
+
+    // Center "!!" on the interrupted fighter's chip-name announcement area (GBA EXE6 0x0800BF0A parity)
+    const int32_t center_x = 60 + 120 * interrupted_ch;
+    const int32_t center_y = 76;
+    const int32_t dst_x = center_x - (sx / 2) + adx;
+    const int32_t dst_y = center_y - (sy / 2) + ady;
+
+    const int32_t prev_flip = rt.get(sf_app_CpCanvas_g).flip_mode;
+    if (prev_flip != 0) {
+        Slot f_args[2];
+        f_args[0].r = sf_app_CpCanvas_g;
+        f_args[1].i = 0;
+        rt.invoke_external("com/nttdocomo/ui/Graphics", "setFlipMode", "(I)V", f_args, 2);
+    }
+
+    Slot d_args[8];
+    d_args[0].r = sf_app_CpCanvas_g;
+    d_args[1].r = img_ref;
+    d_args[2].i = dst_x;
+    d_args[3].i = dst_y;
+    d_args[4].i = gx;
+    d_args[5].i = gy;
+    d_args[6].i = sx;
+    d_args[7].i = sy;
+    rt.invoke_external("com/nttdocomo/ui/Graphics", "drawImage", "(Lcom/nttdocomo/ui/Image;IIIIII)V", d_args, 8);
+
+    if (prev_flip != 0) {
+        Slot f_args[2];
+        f_args[0].r = sf_app_CpCanvas_g;
+        f_args[1].i = prev_flip;
+        rt.invoke_external("com/nttdocomo/ui/Graphics", "setFlipMode", "(I)V", f_args, 2);
+    }
+}
+
 static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
     // Snapshot canonical simulation state so PoN Draw methods cannot mutate any combat state
     HostRuntimeState host_st = capture_host_runtime_state(rt);
@@ -3356,6 +3492,10 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
             int32_t tx = (120 - str_w) / 2 + 120 * stop_ch;
             tx = std::clamp<int32_t>(tx, 0, std::max<int32_t>(0, 240 - str_w));
             fn_app_CpCanvas_strDraw___Ljava_lang_String_II__V(rt, disp_name, tx, 80);
+        }
+        if ((tf_slot.flags & kTfFlagCutInChain) != 0 && tf_slot.ann_cnt >= 1) {
+            int interrupted_ch = 1 - stop_ch;
+            draw_tf_cutin_fx_sprite(rt, interrupted_ch, static_cast<int>(tf_slot.ann_cnt) - 1);
         }
     }
 
@@ -8491,6 +8631,137 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                 }
             }
             sf_app_CpCanvas_audio_flg = saved_audio_flg;
+        }
+
+        // G6: Native PoN "!!" Cut-In Chain VFX (eff_mo[39]) on interrupted side's chip-name banner area, shake & expiry
+        {
+            auto is_cutin_fx_pixel = [](uint32_t c) -> bool {
+                return c == 0xFFF8E840u || c == 0xFFD88808u || c == 0xFFA830D0u ||
+                       c == 0xFFE080E8u || c == 0xFFD078E0u || c == 0xFFF890F8u ||
+                       c == 0xFFE8B820u;
+            };
+            auto count_cutin_fx_pixels = [&](int x0, int y0, int x1, int y1) -> int {
+                const uint32_t* fb = rt.framebuffer();
+                int cnt = 0;
+                for (int y = y0; y < y1; ++y) {
+                    for (int x = x0; x < x1; ++x) {
+                        if (is_cutin_fx_pixel(fb[y * 240 + x])) {
+                            ++cnt;
+                        }
+                    }
+                }
+                return cnt;
+            };
+            auto first_cutin_fx_x = [&](int x0, int y0, int x1, int y1) -> int {
+                const uint32_t* fb = rt.framebuffer();
+                int min_x = x1;
+                for (int y = y0; y < y1; ++y) {
+                    for (int x = x0; x < x1; ++x) {
+                        if (is_cutin_fx_pixel(fb[y * 240 + x]) && x < min_x) {
+                            min_x = x;
+                        }
+                    }
+                }
+                return (min_x < x1) ? min_x : -1;
+            };
+
+            struct ViewCounts {
+                int left_px = -1;
+                int right_px = -1;
+                int center_px = -1;
+                int left_min_x = -1;
+                int right_min_x = -1;
+            };
+            auto measure_view = [&]() -> ViewCounts {
+                ViewCounts vc{};
+                vc.left_px = count_cutin_fx_pixels(36, 52, 86, 100);
+                vc.right_px = count_cutin_fx_pixels(156, 52, 206, 100);
+                vc.center_px = count_cutin_fx_pixels(96, 52, 144, 142);
+                vc.left_min_x = first_cutin_fx_x(36, 52, 86, 100);
+                vc.right_min_x = first_cutin_fx_x(156, 52, 206, 100);
+                return vc;
+            };
+
+            reset_test_arena(500, 500, 0, 0, 1);
+            queue_tips_fifo(0, {137, 137});
+            queue_tips_fifo(1, {137});
+
+            bool hash_invariant = true;
+            auto render_both_views = [&](ViewCounts& out_loc0, ViewCounts& out_loc1) {
+                uint16_t h0 = compute_combat_state_hash(rt);
+                g_pvp_eng.local_idx = 0;
+                render_pvp_combat_frame(rt, cp);
+                out_loc0 = measure_view();
+                uint16_t h1 = compute_combat_state_hash(rt);
+                g_pvp_eng.local_idx = 1;
+                render_pvp_combat_frame(rt, cp);
+                out_loc1 = measure_view();
+                g_pvp_eng.local_idx = 0;
+                uint16_t h2 = compute_combat_state_hash(rt);
+                if (h0 != h1 || h0 != h2) {
+                    hash_invariant = false;
+                }
+            };
+
+            ViewCounts root0{}, root1{};
+            ViewCounts c1_loc0{}, c1_loc1{};
+            ViewCounts c1_shake0{}, c1_shake1{};
+            ViewCounts c2_loc0{}, c2_loc1{};
+            ViewCounts exp0{}, exp1{};
+            bool saw_root = false, saw_c1 = false, saw_c1_shake = false, saw_c2 = false, saw_exp = false;
+
+            for (int k = 0; k < 24; ++k) {
+                int32_t m0 = (k == 0 || k == 6) ? (1 << 20) : 0;
+                int32_t m1 = (k == 3) ? (1 << 20) : 0;
+                step_pvp_combat_tick(rt, cp, m0, m1);
+
+                if (k == 1 && (g_pvp_eng.core.tf_slots[0].flags & kTfFlagCutInChain) == 0 &&
+                    g_pvp_eng.core.tf_slots[0].tf_state == TF_BANNER_OPEN) {
+                    saw_root = true;
+                    render_both_views(root0, root1);
+                } else if (k == 3 && (g_pvp_eng.core.tf_slots[1].flags & kTfFlagCutInChain) != 0 &&
+                           g_pvp_eng.core.tf_slots[1].ann_cnt == 1) {
+                    saw_c1 = true;
+                    render_both_views(c1_loc0, c1_loc1);
+                } else if (k == 4 && (g_pvp_eng.core.tf_slots[1].flags & kTfFlagCutInChain) != 0 &&
+                           g_pvp_eng.core.tf_slots[1].ann_cnt == 2) {
+                    saw_c1_shake = true;
+                    render_both_views(c1_shake0, c1_shake1);
+                } else if (k == 6 && (g_pvp_eng.core.tf_slots[0].flags & kTfFlagCutInChain) != 0 &&
+                           g_pvp_eng.core.tf_slots[0].ann_cnt == 1) {
+                    saw_c2 = true;
+                    render_both_views(c2_loc0, c2_loc1);
+                } else if (k == 14 && (g_pvp_eng.core.tf_slots[0].flags & kTfFlagCutInChain) != 0 &&
+                           g_pvp_eng.core.tf_slots[0].tf_state == TF_BANNER_OPEN &&
+                           g_pvp_eng.core.tf_slots[0].ann_cnt == 9 &&
+                           sf_app_CpCanvas_stop_cnt >= 2 && sf_app_CpCanvas_stop_cnt < 15) {
+                    saw_exp = true;
+                    render_both_views(exp0, exp1);
+                }
+            }
+
+            if (!hash_invariant || !saw_root || !saw_c1 || !saw_c1_shake || !saw_c2 || !saw_exp ||
+                root0.left_px != 0 || root0.right_px != 0 || root0.center_px != 0 ||
+                root1.left_px != 0 || root1.right_px != 0 || root1.center_px != 0 ||
+                c1_loc0.left_px < 1000 || c1_loc0.right_px != 0 || c1_loc0.center_px != 0 || c1_loc0.left_min_x != 36 ||
+                c1_loc1.right_px < 1000 || c1_loc1.left_px != 0 || c1_loc1.center_px != 0 || c1_loc1.right_min_x != 156 ||
+                c1_shake0.left_px != c1_loc0.left_px || c1_shake0.left_min_x != 38 ||
+                c2_loc0.right_px < 1000 || c2_loc0.left_px != 0 || c2_loc0.center_px != 0 || c2_loc0.right_min_x != 156 ||
+                c2_loc1.left_px < 1000 || c2_loc1.right_px != 0 || c2_loc1.center_px != 0 || c2_loc1.left_min_x != 36 ||
+                exp0.left_px != 0 || exp0.right_px != 0 || exp0.center_px != 0 ||
+                exp1.left_px != 0 || exp1.right_px != 0 || exp1.center_px != 0) {
+                fail_msg("SuiteG6-CutInFxRender",
+                         "Native cut-in !! VFX check failed: hash_ok=" + std::to_string(hash_invariant) +
+                         " saw=" + std::to_string(saw_root) + std::to_string(saw_c1) +
+                         std::to_string(saw_c1_shake) + std::to_string(saw_c2) + std::to_string(saw_exp) +
+                         " root0=(" + std::to_string(root0.left_px) + "," + std::to_string(root0.right_px) + "," + std::to_string(root0.center_px) + ")" +
+                         " c1_loc0=(" + std::to_string(c1_loc0.left_px) + "@" + std::to_string(c1_loc0.left_min_x) + "," + std::to_string(c1_loc0.right_px) + "," + std::to_string(c1_loc0.center_px) + ")" +
+                         " c1_loc1=(" + std::to_string(c1_loc1.left_px) + "," + std::to_string(c1_loc1.right_px) + "@" + std::to_string(c1_loc1.right_min_x) + "," + std::to_string(c1_loc1.center_px) + ")" +
+                         " shake0=(" + std::to_string(c1_shake0.left_px) + "@" + std::to_string(c1_shake0.left_min_x) + ")" +
+                         " c2_loc0=(" + std::to_string(c2_loc0.left_px) + "," + std::to_string(c2_loc0.right_px) + "@" + std::to_string(c2_loc0.right_min_x) + "," + std::to_string(c2_loc0.center_px) + ")" +
+                         " c2_loc1=(" + std::to_string(c2_loc1.left_px) + "@" + std::to_string(c2_loc1.left_min_x) + "," + std::to_string(c2_loc1.right_px) + "," + std::to_string(c2_loc1.center_px) + ")" +
+                         " exp0=(" + std::to_string(exp0.left_px) + "," + std::to_string(exp0.right_px) + "," + std::to_string(exp0.center_px) + ")");
+            }
         }
     }
     std::printf("[PvP SELF-TEST] Suite G complete: Time-Freeze Cut-In Counters & Rollback verified (failures=%d)\n",
