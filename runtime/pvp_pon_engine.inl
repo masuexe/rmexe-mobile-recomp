@@ -167,6 +167,7 @@ struct TfSavedAction {
     int32_t r_s = 0;
     int32_t r_e = 0;
     int32_t ani_cnt = 0;
+    int32_t drawn_ani_cnt = 0;
     int32_t ani_cnt_max = 0;
     int32_t ani_ok = 0;
     int32_t ani_wait_cnt = 0;
@@ -316,6 +317,29 @@ struct PvpEngineState {
         std::array<int32_t, 8> se_ids{};
     };
     std::array<TurnEmittedSe, kRollbackWindow> turn_emitted_se{};
+    struct TurnBusterVisual {
+        uint32_t turn = UINT32_MAX;
+        uint8_t fired_mask = 0;      // bit s_idx: side fired Normal Buster on `turn`
+        uint8_t presented_mask = 0;  // bit s_idx: already rendered on screen (persists across rollbacks)
+        int8_t pos_x[2]{};
+        int8_t pos_y[2]{};
+        int16_t joutai[2]{};
+        int16_t drawn_ani_cnt[2]{};
+        int16_t ani_cnt[2]{};
+        bool has_ata[2]{};
+        int8_t ata_layer[2]{};
+        int16_t ata_eff0[2]{};
+        int16_t ata_eff1[2]{};
+        int16_t ata_dx[2]{};
+        int16_t ata_dy[2]{};
+        int8_t ata_flp[2]{};
+        int16_t ata_drawn_cnt[2]{};
+        int16_t ata_w0[2]{};
+        int16_t ata_w1[2]{};
+        int16_t ata_w2[2]{};
+        int16_t ata_se[2]{};
+    };
+    std::array<TurnBusterVisual, kRollbackWindow> turn_buster_vis{};
     FastCombatSnapshot render_snap{};
     std::vector<int64_t> render_statics{};
     uint32_t round_start_turn = 0;
@@ -1066,6 +1090,7 @@ static void init_pvp_battle_arena(DojaRuntime& rt, Ref cp) {
         em.turn = UINT32_MAX;
         em.count = 0;
     }
+    for (auto& bv : g_pvp_eng.turn_buster_vis) bv = PvpEngineState::TurnBusterVisual{};
     g_pvp_eng.round_start_turn = 0;
     g_pvp_eng.first_unconfirmed_turn = 0;
     g_pvp_eng.max_scheduled_turn = 0;
@@ -1325,6 +1350,7 @@ static void enter_custom_screen_phase(DojaRuntime& rt, Ref cp) {
 
     Ref fol_obj = rt.iaload(sf_app_CpCanvas_fol, 0);
     fn_app_Folder_RandSet___I__V(rt, fol_obj, sf_app_CpCanvas_max_sel);
+    fn_app_CpCanvas_MotionBack_____V(rt, cp);
     sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
     if (sf_app_CpCanvas_max_sel <= 0) {
         sf_app_CpCanvas_sel_cas_mode = 1;
@@ -1506,6 +1532,7 @@ static uint16_t compute_combat_state_hash(DojaRuntime& rt) {
         mix(sa.r_s);
         mix(sa.r_e);
         mix(sa.ani_cnt);
+        mix(sa.drawn_ani_cnt);
         mix(sa.ani_cnt_max);
         mix(sa.ani_ok);
         mix(sa.ani_wait_cnt);
@@ -1895,6 +1922,7 @@ static void save_tf_interrupted_action(DojaRuntime& rt, int s_idx) {
     sa.r_s = sf_app_Rock_r_s;
     sa.r_e = sf_app_Rock_r_e;
     sa.ani_cnt = sf_app_Rock_ani_cnt;
+    sa.drawn_ani_cnt = (sf_app_CpCanvas_rock > 0) ? rt.field_i32(sf_app_CpCanvas_rock, 1) : 0;
     sa.ani_cnt_max = sf_app_Rock_ani_cnt_max;
     sa.ani_ok = sf_app_Rock_ani_ok;
     sa.ani_wait_cnt = sf_app_Rock_ani_wait_cnt;
@@ -1940,6 +1968,7 @@ static void restore_tf_interrupted_actions(DojaRuntime& rt) {
                 sf_app_Rock_ani_ok = sa.ani_ok;
                 sf_app_Rock_ani_wait_cnt = sa.ani_wait_cnt;
                 if (sf_app_CpCanvas_rock > 0) {
+                    rt.field_i32(sf_app_CpCanvas_rock, 1) = sa.drawn_ani_cnt;
                     rt.field_i32(sf_app_CpCanvas_rock, 2) = sa.s_wait;
                     rt.field_i32(sf_app_CpCanvas_rock, 3) = sa.r_suu;
                     rt.field_i32(sf_app_CpCanvas_rock, 4) = sa.e_wait;
@@ -2492,6 +2521,21 @@ static void step_single_side(DojaRuntime& rt, Ref cp, int s_idx, int32_t mask) {
         g_pvp_eng.core.shared_cus_sp = std::clamp<int32_t>(sf_app_CpCanvas_cus_sp, 1, 4);
     }
 
+    // Detect fresh Normal Buster (tip_id == 0, non-chip field_39 == 0) spawned on this tick
+    // (catches both standing Rock_Action(0) and move-buffered tmp_ata inside Rock_Move())
+    int fresh_buster_ata_slot = -1;
+    if (sf_app_Rock_joutai > 0 && sf_app_CpCanvas_ata > 0) {
+        for (int i = 0; i < 30; ++i) {
+            Ref a = rt.iaload(sf_app_CpCanvas_ata, i);
+            if (a > 0 && rt.field_i32(a, 38) != 0 &&
+                rt.field_i32(a, 1) == 0 && rt.field_i32(a, 39) == 0 &&
+                rt.field_i32(a, 27) == 0 && rt.field_i32(a, 48) == 0) {
+                fresh_buster_ata_slot = i;
+                break;
+            }
+        }
+    }
+
     // Advance Rock & Attack sprite frame counters (with AV suppressed so zero pixels are drawn)
     fn_app_Rock_Draw___I__V(rt, sf_app_CpCanvas_rock, 1);
     for (int i = 0; i < 30; ++i) {
@@ -2499,6 +2543,34 @@ static void step_single_side(DojaRuntime& rt, Ref cp, int s_idx, int32_t mask) {
         if (rt.field_i32(a, 38) != 0) {
             fn_app_Attack_Draw___II__V(rt, a, 1, 1);
             fn_app_Attack_Draw___II__V(rt, a, 2, 1);
+        }
+    }
+
+    if (fresh_buster_ata_slot >= 0 && sf_app_Rock_joutai > 0) {
+        const uint32_t cur_turn = g_pvp_eng.core.combat_turn;
+        auto& bv = g_pvp_eng.turn_buster_vis[cur_turn % kRollbackWindow];
+        if (bv.turn == cur_turn) {
+            bv.fired_mask |= static_cast<uint8_t>(1u << s_idx);
+            bv.pos_x[s_idx] = static_cast<int8_t>(sf_app_Rock_pos_x);
+            bv.pos_y[s_idx] = static_cast<int8_t>(sf_app_Rock_pos_y);
+            bv.joutai[s_idx] = static_cast<int16_t>(sf_app_Rock_joutai);
+            bv.drawn_ani_cnt[s_idx] = static_cast<int16_t>(rt.field_i32(sf_app_CpCanvas_rock, 1));
+            bv.ani_cnt[s_idx] = static_cast<int16_t>(sf_app_Rock_ani_cnt);
+            Ref ba = rt.iaload(sf_app_CpCanvas_ata, fresh_buster_ata_slot);
+            if (ba > 0 && rt.field_i32(ba, 38) != 0) {
+                bv.has_ata[s_idx] = true;
+                bv.ata_layer[s_idx] = static_cast<int8_t>(rt.field_i32(ba, 38));
+                bv.ata_eff0[s_idx] = static_cast<int16_t>(rt.field_i32(ba, 24));
+                bv.ata_eff1[s_idx] = static_cast<int16_t>(rt.field_i32(ba, 25));
+                bv.ata_dx[s_idx] = static_cast<int16_t>(rt.field_i32(ba, 5));
+                bv.ata_dy[s_idx] = static_cast<int16_t>(rt.field_i32(ba, 6));
+                bv.ata_flp[s_idx] = static_cast<int8_t>(rt.field_i32(ba, 40));
+                bv.ata_drawn_cnt[s_idx] = static_cast<int16_t>(rt.field_i32(ba, 43));
+                bv.ata_w0[s_idx] = static_cast<int16_t>(rt.field_i32(ba, 33));
+                bv.ata_w1[s_idx] = static_cast<int16_t>(rt.field_i32(ba, 34));
+                bv.ata_w2[s_idx] = static_cast<int16_t>(rt.field_i32(ba, 35));
+                bv.ata_se[s_idx] = static_cast<int16_t>(rt.field_i32(ba, 49));
+            }
         }
     }
 
@@ -2516,6 +2588,16 @@ static void step_pvp_combat_tick(DojaRuntime& rt, Ref cp, int32_t p0_mask, int32
     rt.set_suppress_av(true);
     g_pvp_eng.in_combat_step = true;
     const uint32_t tick_turn = g_pvp_eng.core.combat_turn;
+    PvpEngineState::TurnBusterVisual& bvis = g_pvp_eng.turn_buster_vis[tick_turn % kRollbackWindow];
+    if (bvis.turn != tick_turn) {
+        bvis = PvpEngineState::TurnBusterVisual{};
+        bvis.turn = tick_turn;
+    } else {
+        // Re-evaluating `tick_turn` during rollback: recompute `fired_mask`, keep `presented_mask`!
+        bvis.fired_mask = 0;
+        bvis.has_ata[0] = false;
+        bvis.has_ata[1] = false;
+    }
     std::vector<int32_t> pre_step_se_set = copy_int_array_safe(rt, sf_app_CpCanvas_se_set);
     std::vector<int32_t> pre_step_se_flg = copy_int_array_safe(rt, sf_app_CpCanvas_se_flg);
     if (sf_app_CpCanvas_se_set > 0) {
@@ -2997,6 +3079,33 @@ static void set_rock_palette_fast(DojaRuntime& rt, int32_t zoku) {
     fn_app_CpCanvas_PalSet___II__V(rt, 0, z);
 }
 
+// Render Rockman in read-only mode using the last drawn frame index (rock.field_1) when
+// Rock.Draw(1) post-incremented sf_app_Rock_ani_cnt, avoiding skipping 1-frame poses like Normal Buster.
+static void draw_rock_readonly(DojaRuntime& rt, Ref rock) {
+    if (rock <= 0) return;
+    int32_t saved_ani_cnt = sf_app_Rock_ani_cnt;
+    int32_t saved_joutai = sf_app_Rock_joutai;
+    int32_t saved_tmp_ani_cnt = sf_app_Rock_tmp_ani_cnt;
+    int32_t saved_f1 = rt.field_i32(rock, 1);
+    int32_t saved_f2 = rt.field_i32(rock, 2);
+    int32_t saved_f3 = rt.field_i32(rock, 3);
+    int32_t saved_f4 = rt.field_i32(rock, 4);
+
+    if (sf_app_CpCanvas_stop_cnt <= 1 && sf_app_Rock_ani_cnt > 0) {
+        sf_app_Rock_ani_cnt = saved_f1;
+    }
+
+    fn_app_Rock_Draw___I__V(rt, rock, 0);
+
+    sf_app_Rock_ani_cnt = saved_ani_cnt;
+    sf_app_Rock_joutai = saved_joutai;
+    sf_app_Rock_tmp_ani_cnt = saved_tmp_ani_cnt;
+    rt.field_i32(rock, 1) = saved_f1;
+    rt.field_i32(rock, 2) = saved_f2;
+    rt.field_i32(rock, 3) = saved_f3;
+    rt.field_i32(rock, 4) = saved_f4;
+}
+
 // Render an Attack slot in read-only mode using the exact animation frame (field_43) resolved by
 // step_pvp_combat_tick / step_single_side, avoiding double-advancing Attack.Loop or blanking the final frame.
 static void draw_attack_readonly(DojaRuntime& rt, Ref a, int layer) {
@@ -3297,6 +3406,110 @@ static void draw_tf_cutin_fx_sprite(DojaRuntime& rt, int interrupted_ch, int seq
     }
 }
 
+static void apply_unpresented_opp_buster_visual(DojaRuntime& rt, int opp_i) {
+    const uint32_t cur_t = g_pvp_eng.core.combat_turn;
+    const uint32_t min_t = std::max<uint32_t>(
+        g_pvp_eng.round_start_turn, cur_t > 8u ? (cur_t - 8u) : 0u);
+    const uint8_t opp_bit = static_cast<uint8_t>(1u << opp_i);
+    auto mark_presented_range = [&](uint32_t lo, uint32_t hi) {
+        if (lo > hi) return;
+        for (uint32_t u = lo;; ++u) {
+            auto& u_bv = g_pvp_eng.turn_buster_vis[u % kRollbackWindow];
+            if (u_bv.turn == u) {
+                u_bv.presented_mask |= opp_bit;
+            }
+            if (u == hi) break;
+        }
+    };
+
+    if (cur_t > g_pvp_eng.round_start_turn) {
+        const uint32_t last_t = cur_t - 1u;
+        const auto& last_bv = g_pvp_eng.turn_buster_vis[last_t % kRollbackWindow];
+        if (last_bv.turn == last_t && (last_bv.fired_mask & opp_bit) != 0 &&
+            g_pvp_eng.core.sides[opp_i].joutai > 0) {
+            mark_presented_range(min_t, last_t);
+            return;
+        }
+    }
+
+    if (g_pvp_eng.phase != Phase::COMBAT || sf_app_CpCanvas_stop_cnt != 0 || cur_t <= min_t) {
+        return;
+    }
+
+    uint32_t found_t = UINT32_MAX;
+    for (uint32_t t = cur_t; t-- > min_t;) {
+        const auto& bv = g_pvp_eng.turn_buster_vis[t % kRollbackWindow];
+        if (bv.turn == t && (bv.fired_mask & opp_bit) != 0 && (bv.presented_mask & opp_bit) == 0) {
+            found_t = t;
+            break;
+        }
+    }
+    if (found_t == UINT32_MAX) {
+        return;
+    }
+
+    mark_presented_range(min_t, found_t);
+    const SideContext& cur_opp = g_pvp_eng.core.sides[opp_i];
+    if (!(cur_opp.hp > 0 && cur_opp.hit_cnt == 0 && cur_opp.waza_flg < 0 &&
+          (cur_opp.joutai == 0 || cur_opp.move_flg != 0))) {
+        return;
+    }
+
+    const auto& bv = g_pvp_eng.turn_buster_vis[found_t % kRollbackWindow];
+    const bool prev_sup = rt.suppress_av();
+    rt.set_suppress_av(true);
+    load_side(rt, opp_i);
+    sf_app_Rock_pos_x = bv.pos_x[opp_i];
+    sf_app_Rock_pos_y = bv.pos_y[opp_i];
+    sf_app_Rock_move_flg = 0;
+    sf_app_Rock_joutai = 0;
+    fn_app_Rock_AniSet___I__V(rt, sf_app_CpCanvas_rock, bv.joutai[opp_i]);
+    if (sf_app_CpCanvas_rock > 0) {
+        rt.field_i32(sf_app_CpCanvas_rock, 1) = bv.drawn_ani_cnt[opp_i];
+    }
+    sf_app_Rock_ani_cnt = bv.ani_cnt[opp_i];
+
+    if (bv.has_ata[opp_i] && sf_app_CpCanvas_ata > 0) {
+        bool has_active_buster_ata = false;
+        Ref free_ata = 0;
+        for (int i = 0; i < 30; ++i) {
+            Ref a = rt.iaload(sf_app_CpCanvas_ata, i);
+            if (a <= 0) continue;
+            if (rt.field_i32(a, 38) != 0) {
+                if (rt.field_i32(a, 1) == 0 && rt.field_i32(a, 39) == 0) {
+                    has_active_buster_ata = true;
+                    break;
+                }
+            } else if (free_ata <= 0) {
+                free_ata = a;
+            }
+        }
+        if (!has_active_buster_ata && free_ata > 0) {
+            rt.field_i32(free_ata, 1) = 0;
+            rt.field_i32(free_ata, 39) = 0;
+            rt.field_i32(free_ata, 3) = bv.pos_x[opp_i];
+            rt.field_i32(free_ata, 4) = bv.pos_y[opp_i];
+            rt.field_i32(free_ata, 5) = bv.ata_dx[opp_i];
+            rt.field_i32(free_ata, 6) = bv.ata_dy[opp_i];
+            rt.field_i32(free_ata, 20) = 0;
+            rt.field_i32(free_ata, 24) = bv.ata_eff0[opp_i];
+            rt.field_i32(free_ata, 25) = bv.ata_eff1[opp_i];
+            rt.field_i32(free_ata, 27) = bv.ata_drawn_cnt[opp_i];
+            rt.field_i32(free_ata, 28) = 1;
+            rt.field_i32(free_ata, 33) = bv.ata_w0[opp_i];
+            rt.field_i32(free_ata, 34) = bv.ata_w1[opp_i];
+            rt.field_i32(free_ata, 35) = bv.ata_w2[opp_i];
+            rt.field_i32(free_ata, 38) = bv.ata_layer[opp_i];
+            rt.field_i32(free_ata, 40) = bv.ata_flp[opp_i];
+            rt.field_i32(free_ata, 43) = bv.ata_drawn_cnt[opp_i];
+            rt.field_i32(free_ata, 48) = 1;
+            rt.field_i32(free_ata, 49) = bv.ata_se[opp_i];
+        }
+    }
+    save_side(rt, opp_i);
+    rt.set_suppress_av(prev_sup);
+}
+
 static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
     // Snapshot canonical simulation state so PoN Draw methods cannot mutate any combat state
     HostRuntimeState host_st = capture_host_runtime_state(rt);
@@ -3305,9 +3518,11 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
     g_pvp_eng.render_snap.base_heap_size = 0;
     rt.save_combat_snapshot(g_pvp_eng.render_snap, g_pvp_eng.mutable_heap_min_ref);
 
-    rt.set_suppress_av(false);
     int loc_i = g_pvp_eng.local_idx;
     int opp_i = 1 - loc_i;
+    apply_unpresented_opp_buster_visual(rt, opp_i);
+
+    rt.set_suppress_av(false);
 
     ensure_board_orient(rt, loc_i);
     load_side(rt, loc_i);
@@ -3343,7 +3558,7 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
             int32_t saved_px = sf_app_Rock_pos_x;
             sf_app_Rock_pos_x = 5 - saved_px;
             g_pvp_rock_flip_override = 0; // Face Left (drawImg2 flips Rock.dx via flp=0)
-            fn_app_Rock_Draw___I__V(rt, sf_app_CpCanvas_rock, 0);
+            draw_rock_readonly(rt, sf_app_CpCanvas_rock);
             g_pvp_rock_flip_override = -1;
             sf_app_Rock_pos_x = saved_px;
         }
@@ -3354,7 +3569,7 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
             load_side(rt, loc_i);
             set_rock_palette_fast(rt, sf_app_Rock_zoku);
             g_pvp_rock_flip_override = 1; // Face Right!
-            fn_app_Rock_Draw___I__V(rt, sf_app_CpCanvas_rock, 0);
+            draw_rock_readonly(rt, sf_app_CpCanvas_rock);
             g_pvp_rock_flip_override = -1;
         }
 
@@ -3937,7 +4152,7 @@ static bool pvp_pon_intercept_ene_draw(DojaRuntime& rt, Ref ene_thiz, int32_t ad
             sf_app_Rock_non_cnt2 = 0;
         }
         g_pvp_rock_flip_override = 0; // Face Left!
-        fn_app_Rock_Draw___I__V(rt, sf_app_CpCanvas_rock, 0);
+        draw_rock_readonly(rt, sf_app_CpCanvas_rock);
         g_pvp_rock_flip_override = -1;
     }
 
@@ -5428,6 +5643,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
             em.turn = UINT32_MAX;
             em.count = 0;
         }
+        for (auto& bv : g_pvp_eng.turn_buster_vis) bv = PvpEngineState::TurnBusterVisual{};
 
         // 1. Verify all 30 m_audio presenters (11 BGM + 19 jingle/UI cues) are distinct & non-aliasing
         if (sf_app_CpCanvas_m_audio <= 0 || rt.array_length(sf_app_CpCanvas_m_audio) < 30) {
@@ -6247,6 +6463,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                 em.turn = UINT32_MAX;
                 em.count = 0;
             }
+            for (auto& bv : g_pvp_eng.turn_buster_vis) bv = PvpEngineState::TurnBusterVisual{};
             int32_t held_at_transition = (1 << 10) | (1 << 20); // Both Buster & Confirm-OK held!
             int32_t suppress_bits = (0xF << 16) | (1 << 21) | (1 << 22) |
                                     (g_pvp_eng.core.sides[0].tip_no >= 0 ? (1 << 20) : 0);
@@ -6270,6 +6487,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                 em.turn = UINT32_MAX;
                 em.count = 0;
             }
+            for (auto& bv : g_pvp_eng.turn_buster_vis) bv = PvpEngineState::TurnBusterVisual{};
 
             // Now step Round 2 frames 0..9 with live held_at_transition filtered by round_held_edge_suppress_mask
             for (int f = 0; f < 10; ++f) {
@@ -6870,6 +7088,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                                     em.turn = UINT32_MAX;
                                     em.count = 0;
                                 }
+                                for (auto& bv : g_pvp_eng.turn_buster_vis) bv = PvpEngineState::TurnBusterVisual{};
                             }
 
                             // Step 10 frames of R2 COMBAT while (1<<10)|(1<<20) are held:
@@ -8525,6 +8744,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                     em.turn = UINT32_MAX;
                     em.count = 0;
                 }
+                for (auto& bv : g_pvp_eng.turn_buster_vis) bv = PvpEngineState::TurnBusterVisual{};
             };
 
             // G5a: Mispredicted remote cut-in rolled back -> matches canonical no-cut-in run
@@ -8761,6 +8981,293 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                          " c2_loc0=(" + std::to_string(c2_loc0.left_px) + "," + std::to_string(c2_loc0.right_px) + "@" + std::to_string(c2_loc0.right_min_x) + "," + std::to_string(c2_loc0.center_px) + ")" +
                          " c2_loc1=(" + std::to_string(c2_loc1.left_px) + "@" + std::to_string(c2_loc1.left_min_x) + "," + std::to_string(c2_loc1.right_px) + "," + std::to_string(c2_loc1.center_px) + ")" +
                          " exp0=(" + std::to_string(exp0.left_px) + "," + std::to_string(exp0.right_px) + "," + std::to_string(exp0.center_px) + ")");
+            }
+        }
+
+        // G7: Normal Rock Buster (tip_id == 0) 1-frame firing pose read-only rendering & rollback determinism
+        {
+            reset_test_arena(500, 500, 0, 0, 1);
+            bool readonly_preserved = true;
+            auto capture_rock_only_fb = [&](int side_idx, bool mirrored) -> std::vector<uint32_t> {
+                std::vector<int64_t> saved_st;
+                generated_save_statics(saved_st);
+                bool prev_sup = rt.suppress_av();
+                rt.set_suppress_av(false);
+                uint32_t* fb = rt.framebuffer();
+                std::fill(fb, fb + 240 * 240, 0xFF000000u);
+
+                load_side(rt, side_idx);
+                set_rock_palette_fast(rt, sf_app_Rock_zoku);
+                int32_t saved_px = sf_app_Rock_pos_x;
+                Ref rock = sf_app_CpCanvas_rock;
+                int32_t pre_ani = sf_app_Rock_ani_cnt;
+                int32_t pre_jou = sf_app_Rock_joutai;
+                int32_t pre_tmp = sf_app_Rock_tmp_ani_cnt;
+                int32_t pre_f1 = (rock > 0) ? rt.field_i32(rock, 1) : 0;
+                int32_t pre_f2 = (rock > 0) ? rt.field_i32(rock, 2) : 0;
+                int32_t pre_f3 = (rock > 0) ? rt.field_i32(rock, 3) : 0;
+                int32_t pre_f4 = (rock > 0) ? rt.field_i32(rock, 4) : 0;
+
+                if (mirrored) {
+                    sf_app_Rock_pos_x = 5 - saved_px;
+                    g_pvp_rock_flip_override = 0;
+                } else {
+                    g_pvp_rock_flip_override = 1;
+                }
+                draw_rock_readonly(rt, rock);
+                g_pvp_rock_flip_override = -1;
+                sf_app_Rock_pos_x = saved_px;
+
+                if (sf_app_Rock_ani_cnt != pre_ani || sf_app_Rock_joutai != pre_jou ||
+                    sf_app_Rock_tmp_ani_cnt != pre_tmp ||
+                    (rock > 0 && (rt.field_i32(rock, 1) != pre_f1 || rt.field_i32(rock, 2) != pre_f2 ||
+                                  rt.field_i32(rock, 3) != pre_f3 || rt.field_i32(rock, 4) != pre_f4))) {
+                    readonly_preserved = false;
+                }
+
+                std::vector<uint32_t> snap(fb, fb + 240 * 240);
+                generated_restore_statics(saved_st);
+                rt.set_suppress_av(prev_sup);
+                return snap;
+            };
+            auto count_fb_diff = [](const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) -> int {
+                int d = 0;
+                for (size_t i = 0; i < a.size() && i < b.size(); ++i) {
+                    if (a[i] != b[i]) ++d;
+                }
+                return d;
+            };
+
+            // Step 1 idle tick and capture isolated P0 & mirrored P1 Rock pixels
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            std::vector<uint32_t> idle_p0_fb = capture_rock_only_fb(0, false);
+            std::vector<uint32_t> idle_p1_fb = capture_rock_only_fb(1, true);
+
+            // Tick A: tap Normal Buster (1 << 11) for both P0 and P1
+            step_pvp_combat_tick(rt, cp, (1 << 11), (1 << 11));
+
+            // Save rollback slot before Tick B, then Tick B: release (0) so Normal Buster fires
+            const uint32_t pre_b_turn = g_pvp_eng.core.combat_turn;
+            save_rollback_slot(rt, pre_b_turn, 0, 0, false);
+            step_pvp_combat_tick(rt, cp, 0, 0);
+
+            int32_t b_jou0 = g_pvp_eng.core.sides[0].joutai;
+            int32_t b_jou1 = g_pvp_eng.core.sides[1].joutai;
+            int32_t b_ani0 = g_pvp_eng.core.sides[0].ani_cnt;
+            int32_t b_f1_0 = (g_pvp_eng.core.sides[0].rock_ref > 0)
+                ? rt.field_i32(g_pvp_eng.core.sides[0].rock_ref, 1) : -1;
+            std::vector<uint32_t> fire_p0_fb = capture_rock_only_fb(0, false);
+            std::vector<uint32_t> fire_p1_fb = capture_rock_only_fb(1, true);
+            int diff_p0 = count_fb_diff(idle_p0_fb, fire_p0_fb);
+            int diff_p1 = count_fb_diff(idle_p1_fb, fire_p1_fb);
+
+            uint16_t hash_b = compute_combat_state_hash(rt);
+            ensure_board_orient(rt, 0);
+            uint16_t hash_b_o0 = compute_combat_state_hash(rt);
+            ensure_board_orient(rt, 1);
+            uint16_t hash_b_o1 = compute_combat_state_hash(rt);
+            ensure_board_orient(rt, 0);
+            int saved_loc_idx = g_pvp_eng.local_idx;
+            g_pvp_eng.local_idx = 0;
+            render_pvp_combat_frame(rt, cp);
+            uint16_t hash_b_r0 = compute_combat_state_hash(rt);
+            g_pvp_eng.local_idx = 1;
+            render_pvp_combat_frame(rt, cp);
+            uint16_t hash_b_r1 = compute_combat_state_hash(rt);
+            g_pvp_eng.local_idx = saved_loc_idx;
+
+            // Tick C: 1-frame Normal Buster pose finishes and returns both sides to Idle (joutai == 0)
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            int32_t c_jou0 = g_pvp_eng.core.sides[0].joutai;
+            int32_t c_jou1 = g_pvp_eng.core.sides[1].joutai;
+
+            // Rollback to pre-Tick-B, re-step Tick B, verify identical hash & firing-pose pixels
+            bool rb_ok = restore_rollback_slot(rt, pre_b_turn);
+            if (rb_ok) {
+                step_pvp_combat_tick(rt, cp, 0, 0);
+            }
+            uint16_t hash_b_rb = compute_combat_state_hash(rt);
+            std::vector<uint32_t> fire_p0_rb_fb = capture_rock_only_fb(0, false);
+            std::vector<uint32_t> fire_p1_rb_fb = capture_rock_only_fb(1, true);
+
+            if (!readonly_preserved || b_jou0 == 0 || b_jou1 == 0 || b_ani0 != 1 || b_f1_0 != 0 ||
+                diff_p0 <= 0 || diff_p1 <= 0 ||
+                hash_b_o0 != hash_b || hash_b_o1 != hash_b ||
+                hash_b_r0 != hash_b || hash_b_r1 != hash_b ||
+                c_jou0 != 0 || c_jou1 != 0 || !rb_ok ||
+                hash_b_rb != hash_b || fire_p0_rb_fb != fire_p0_fb || fire_p1_rb_fb != fire_p1_fb) {
+                fail_msg("SuiteG7-BusterFiringPose",
+                         "Normal Buster firing pose check failed: ro=" + std::to_string(readonly_preserved) +
+                         " b_jou=(" + std::to_string(b_jou0) + "," + std::to_string(b_jou1) + ")" +
+                         " b_ani0=" + std::to_string(b_ani0) + " b_f1_0=" + std::to_string(b_f1_0) +
+                         " diff=(" + std::to_string(diff_p0) + "," + std::to_string(diff_p1) + ")" +
+                         " h=(" + std::to_string(hash_b) + "," + std::to_string(hash_b_o0) + "," +
+                         std::to_string(hash_b_o1) + "," + std::to_string(hash_b_r0) + "," +
+                         std::to_string(hash_b_r1) + "," + std::to_string(hash_b_rb) + ")" +
+                         " c_jou=(" + std::to_string(c_jou0) + "," + std::to_string(c_jou1) + ")" +
+                         " rb_ok=" + std::to_string(rb_ok) +
+                         " px_eq=(" + std::to_string(fire_p0_rb_fb == fire_p0_fb) + "," +
+                         std::to_string(fire_p1_rb_fb == fire_p1_fb) + ")");
+            }
+        }
+
+        // G8: Opponent Normal Buster firing pose AND muzzle flash under live PvP GGPO rollback
+        {
+            const int saved_loc_idx = g_pvp_eng.local_idx;
+            auto capture_right_arena_px = [&]() -> std::vector<uint32_t> {
+                render_pvp_combat_frame(rt, cp);
+                const uint32_t* fb = rt.framebuffer();
+                std::vector<uint32_t> out;
+                out.reserve(120 * 115);
+                for (int y = 80; y < 195; ++y) {
+                    const uint32_t* row = fb + y * 240;
+                    out.insert(out.end(), row + 120, row + 240);
+                }
+                return out;
+            };
+            auto count_px_diff = [](const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) -> int {
+                int d = 0;
+                const size_t n = std::min(a.size(), b.size());
+                for (size_t i = 0; i < n; ++i) {
+                    if (a[i] != b[i]) ++d;
+                }
+                return d;
+            };
+            auto has_active_buster_ata = [&](int side_idx) -> bool {
+                Ref ata_arr = g_pvp_eng.core.sides[side_idx].ata_arr;
+                if (ata_arr <= 0) return false;
+                for (int i = 0; i < 30; ++i) {
+                    Ref a = rt.iaload(ata_arr, i);
+                    if (a > 0 && rt.field_i32(a, 38) != 0 &&
+                        rt.field_i32(a, 1) == 0 && rt.field_i32(a, 39) == 0) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            auto reset_g8_arena = [&]() {
+                reset_test_arena(500, 500, 0, 0, 1);
+                for (auto& sl : g_pvp_eng.rb_ring) sl.turn = UINT32_MAX;
+                for (auto& bv : g_pvp_eng.turn_buster_vis) bv = PvpEngineState::TurnBusterVisual{};
+                g_pvp_eng.local_idx = 0;
+                g_pvp_eng.phase = Phase::COMBAT;
+                sf_app_CpCanvas_stop_cnt = 0;
+            };
+
+            // 1) Synchronous opponent shot baseline: verify both firing pose AND muzzle flash render
+            reset_g8_arena();
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            const std::vector<uint32_t> idle_px = capture_right_arena_px();
+            step_pvp_combat_tick(rt, cp, 0, (1 << 11));
+            render_pvp_combat_frame(rt, cp);
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            const std::vector<uint32_t> sync_fire_px = capture_right_arena_px();
+
+            bool found_buster_ata = false;
+            int32_t saved_ata_layer = 0;
+            Ref buster_ata_ref = 0;
+            if (g_pvp_eng.core.sides[1].ata_arr > 0) {
+                for (int i = 0; i < 30; ++i) {
+                    Ref a = rt.iaload(g_pvp_eng.core.sides[1].ata_arr, i);
+                    if (a > 0 && rt.field_i32(a, 38) != 0 &&
+                        rt.field_i32(a, 1) == 0 && rt.field_i32(a, 39) == 0) {
+                        buster_ata_ref = a;
+                        saved_ata_layer = rt.field_i32(a, 38);
+                        found_buster_ata = true;
+                        break;
+                    }
+                }
+            }
+            std::vector<uint32_t> pose_only_px;
+            if (found_buster_ata) {
+                rt.field_i32(buster_ata_ref, 38) = 0;
+                pose_only_px = capture_right_arena_px();
+                rt.field_i32(buster_ata_ref, 38) = saved_ata_layer;
+            }
+            const int sync_vs_idle = count_px_diff(sync_fire_px, idle_px);
+            const int pose_vs_idle = found_buster_ata ? count_px_diff(pose_only_px, idle_px) : 0;
+            const int muzzle_diff_pixels = found_buster_ata ? count_px_diff(sync_fire_px, pose_only_px) : 0;
+
+            // 2) 1-tick GGPO rollback misprediction (exact live PvP bug)
+            reset_g8_arena();
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            render_pvp_combat_frame(rt, cp);
+            step_pvp_combat_tick(rt, cp, 0, (1 << 11));
+            render_pvp_combat_frame(rt, cp);
+            const uint32_t rb1_turn = g_pvp_eng.core.combat_turn;
+            save_rollback_slot(rt, rb1_turn, 0, (1 << 11), true);
+            step_pvp_combat_tick(rt, cp, 0, (1 << 11)); // Mispredicted still holding Buster
+            const std::vector<uint32_t> mispred1_px = capture_right_arena_px();
+
+            const bool rb1_ok = restore_rollback_slot(rt, rb1_turn);
+            if (rb1_ok) {
+                step_pvp_combat_tick(rt, cp, 0, 0); // Confirmed release at T (no render!)
+                step_pvp_combat_tick(rt, cp, 0, 0); // Step T+1 before rendering (canonical joutai/ata wiped)
+            }
+            const int32_t rb1_canon_jou = g_pvp_eng.core.sides[1].joutai;
+            const bool rb1_canon_ata = has_active_buster_ata(1);
+            const std::vector<uint32_t> rb1_fire_px = capture_right_arena_px();
+            step_pvp_combat_tick(rt, cp, 0, 0); // Step T+2 -> returns to idle (not stuck)
+            const std::vector<uint32_t> rb1_post_px = capture_right_arena_px();
+
+            // 3) 2-tick strafe-shooting rollback + state hash invariance vs headless reference
+            reset_g8_arena();
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            step_pvp_combat_tick(rt, cp, 0, (1 << 11));
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            step_pvp_combat_tick(rt, cp, 0, (1 << 18));
+            const uint16_t headless_hash = compute_combat_state_hash(rt);
+
+            reset_g8_arena();
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            step_pvp_combat_tick(rt, cp, 0, (1 << 18));
+            const std::vector<uint32_t> pure_move_px = capture_right_arena_px();
+
+            reset_g8_arena();
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            render_pvp_combat_frame(rt, cp);
+            step_pvp_combat_tick(rt, cp, 0, (1 << 11));
+            render_pvp_combat_frame(rt, cp);
+            const uint32_t rb2_turn = g_pvp_eng.core.combat_turn;
+            save_rollback_slot(rt, rb2_turn, 0, (1 << 11), true);
+            step_pvp_combat_tick(rt, cp, 0, (1 << 11));
+            render_pvp_combat_frame(rt, cp);
+            step_pvp_combat_tick(rt, cp, 0, (1 << 11));
+            render_pvp_combat_frame(rt, cp);
+
+            const bool rb2_ok = restore_rollback_slot(rt, rb2_turn);
+            if (rb2_ok) {
+                step_pvp_combat_tick(rt, cp, 0, 0);
+                step_pvp_combat_tick(rt, cp, 0, 0);
+                step_pvp_combat_tick(rt, cp, 0, (1 << 18));
+            }
+            const int32_t rb2_move_flg = g_pvp_eng.core.sides[1].move_flg;
+            const std::vector<uint32_t> strafe_rb_px = capture_right_arena_px();
+            const uint16_t post_render_hash = compute_combat_state_hash(rt);
+            const int strafe_diff = count_px_diff(strafe_rb_px, pure_move_px);
+
+            g_pvp_eng.local_idx = saved_loc_idx;
+
+            if (!found_buster_ata || sync_vs_idle <= 0 || pose_vs_idle <= 0 || muzzle_diff_pixels <= 0 ||
+                mispred1_px == sync_fire_px || !rb1_ok || rb1_canon_jou != 0 || rb1_canon_ata ||
+                rb1_fire_px != sync_fire_px || rb1_post_px != idle_px ||
+                !rb2_ok || rb2_move_flg == 0 || strafe_diff <= 0 || post_render_hash != headless_hash) {
+                fail_msg("SuiteG8-OpponentRollbackBusterPoseAndMuzzle",
+                         "Opponent rollback Normal Buster check failed: ata=" + std::to_string(found_buster_ata) +
+                         " sync_diff=" + std::to_string(sync_vs_idle) +
+                         " pose_diff=" + std::to_string(pose_vs_idle) +
+                         " muzzle_diff=" + std::to_string(muzzle_diff_pixels) +
+                         " mispred_diff=" + std::to_string(mispred1_px != sync_fire_px) +
+                         " rb1=(" + std::to_string(rb1_ok) + "," + std::to_string(rb1_canon_jou) + "," +
+                         std::to_string(rb1_canon_ata) + "," + std::to_string(rb1_fire_px == sync_fire_px) + "," +
+                         std::to_string(rb1_post_px == idle_px) + ")" +
+                         " rb2=(" + std::to_string(rb2_ok) + "," + std::to_string(rb2_move_flg) + "," +
+                         std::to_string(strafe_diff) + ",h=" + std::to_string(post_render_hash) + "/" +
+                         std::to_string(headless_hash) + ")");
             }
         }
     }
@@ -9198,6 +9705,7 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
                     em.turn = UINT32_MAX;
                     em.count = 0;
                 }
+                for (auto& bv : g_pvp_eng.turn_buster_vis) bv = PvpEngineState::TurnBusterVisual{};
                 uint32_t cur_t = g_pvp_eng.core.combat_turn;
                 const size_t hist_n = g_pvp_eng.local_inputs.size();
                 g_pvp_eng.round_start_turn = cur_t;
