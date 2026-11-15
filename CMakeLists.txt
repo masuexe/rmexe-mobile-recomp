@@ -86,7 +86,7 @@ if(WIN32)
 endif()
 
 # Helper macro to register a static recompilation target if its user-supplied JAR is present
-macro(add_doja_recomp_target TARGET_NAME JAR_REL_PATH SP_REL_PATH SAV_REL_PATH WIN_TITLE)
+macro(add_doja_recomp_target TARGET_NAME JAR_REL_PATH SP_REL_PATH WIN_TITLE)
     set(JAR_ABS_PATH "${CMAKE_CURRENT_SOURCE_DIR}/${JAR_REL_PATH}")
     set(GEN_CPP_PATH "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}_gen.cpp")
 
@@ -116,7 +116,6 @@ macro(add_doja_recomp_target TARGET_NAME JAR_REL_PATH SP_REL_PATH SAV_REL_PATH W
         target_compile_definitions(${TARGET_NAME} PRIVATE
             DEFAULT_JAR_PATH="${JAR_REL_PATH}"
             DEFAULT_SP_PATH="${SP_REL_PATH}"
-            DEFAULT_SAV_PATH="${SAV_REL_PATH}"
             DEFAULT_WINDOW_TITLE="${WIN_TITLE}"
         )
         target_link_libraries(${TARGET_NAME} PRIVATE doja_runtime)
@@ -130,7 +129,6 @@ add_doja_recomp_target(
     pon_jp_recomp
     "assets/PoN_jp/bin/PoN.jar"
     "assets/PoN_jp/sp/PoN.sp"
-    "assets/PoN_jp/sp/PoN.sav"
     "Rockman EXE: Phantom of Network (JP Recomp)"
 )
 
@@ -138,7 +136,6 @@ add_doja_recomp_target(
     pon_en_recomp
     "assets/PoN/bin/PoN.jar"
     "assets/PoN/sp/PoN.sp"
-    "assets/PoN/sp/PoN.sav"
     "MegaMan Battle Network: Phantom of Network (EN Recomp)"
 )
 
@@ -146,7 +143,6 @@ add_doja_recomp_target(
     lon_jp_recomp
     "assets/LoN_jp/bin/LoN.jar"
     "assets/LoN_jp/sp/LoN.sp"
-    "assets/LoN_jp/sp/LoN.sav"
     "Rockman EXE: Legend of Network (JP Recomp)"
 )
 
@@ -154,6 +150,5 @@ add_doja_recomp_target(
     lon_en_recomp
     "assets/LoN/bin/LoN.jar"
     "assets/LoN/sp/LoN.sp"
-    "assets/LoN/sp/LoN.sav"
     "MegaMan Battle Network: Legend of Network (EN Recomp)"
 )

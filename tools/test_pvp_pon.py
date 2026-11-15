@@ -28,11 +28,13 @@ import os
 import re
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -58,6 +60,179 @@ def http_get_json(url: str, timeout: float = 1.0) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def http_post_json(url: str, timeout: float = 2.0) -> tuple[int, dict]:
+    req = urllib.request.Request(url, data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            return exc.code, json.loads(body)
+        except Exception:
+            return exc.code, {"ok": False, "raw": body}
+
+
+def find_proc_udp_ports(pid: int) -> set[int]:
+    inodes: set[str] = set()
+    fd_dir = Path(f"/proc/{pid}/fd")
+    try:
+        for entry in fd_dir.iterdir():
+            try:
+                target = os.readlink(entry)
+                if target.startswith("socket:[") and target.endswith("]"):
+                    inodes.add(target[8:-1])
+            except OSError:
+                continue
+    except OSError:
+        return set()
+    if not inodes:
+        return set()
+
+    ports: set[int] = set()
+    for table in ("/proc/net/udp", "/proc/net/udp6"):
+        try:
+            with open(table, "r", encoding="utf-8") as f:
+                next(f, None)
+                for line in f:
+                    cols = line.split()
+                    if len(cols) > 9 and cols[9] in inodes:
+                        _, port_hex = cols[1].rsplit(":", 1)
+                        port = int(port_hex, 16)
+                        if port > 0:
+                            ports.add(port)
+        except OSError:
+            continue
+    return ports
+
+
+def pack_forged_rmxp(
+    version: int,
+    pkt_type: int,
+    slot: int,
+    room_id: int,
+    token: int,
+    frame_or_seq: int = 0,
+    keypad_mask: int = 0,
+    payload: bytes = b"",
+) -> bytes:
+    hdr = struct.pack(
+        "!4sBBBBIIIiHH",
+        b"RMXP",
+        version & 0xFF,
+        pkt_type & 0xFF,
+        slot & 0xFF,
+        0,
+        room_id & 0xFFFFFFFF,
+        token & 0xFFFFFFFF,
+        frame_or_seq & 0xFFFFFFFF,
+        keypad_mask,
+        len(payload) & 0xFFFF,
+        0,
+    )
+    return hdr + payload
+
+
+def run_server_security_and_guard_tests(server_addr: str, lon_bin: Path, tmp_dir: Path) -> None:
+    print("=== [1.5] Testing rmexe_server /pvp/join guards & LoN CLI guard ===", flush=True)
+
+    # 1. Explicit same-UID self-join -> HTTP 409 same_uid
+    st, d_create_a = http_post_json(
+        f"http://{server_addr}/pvp/create?uid=sec_uid_a&name=HostA&game=pon&format=single"
+    )
+    if st != 200 or not d_create_a.get("ok"):
+        raise RuntimeError(f"Security test create_a failed: status={st} body={d_create_a}")
+    rid_a = int(d_create_a["room_id"])
+    tok_a = int(d_create_a["token"])
+
+    try:
+        st, d_self = http_post_json(
+            f"http://{server_addr}/pvp/join?uid=sec_uid_a&name=JoinA&game=pon&room={rid_a}"
+        )
+        if st != 409 or d_self.get("ok") is not False or d_self.get("error") != "same_uid":
+            raise RuntimeError(f"Expected HTTP 409 same_uid for explicit self-join, got status={st} body={d_self}")
+
+        # 2. Quick-match (room=0) skips host's own room -> 404 when alone
+        st, d_quick_alone = http_post_json(
+            f"http://{server_addr}/pvp/join?uid=sec_uid_a&name=JoinA&game=pon&room=0"
+        )
+        if st != 404 or d_quick_alone.get("ok") is not False or d_quick_alone.get("error") != "no_open_room":
+            raise RuntimeError(
+                f"Expected HTTP 404 no_open_room when room=0 only sees same_uid, got status={st} body={d_quick_alone}"
+            )
+
+        # 3. Quick-match (room=0) skips host's own room and joins another UID's open room
+        st, d_create_b = http_post_json(
+            f"http://{server_addr}/pvp/create?uid=sec_uid_b&name=HostB&game=pon&format=single"
+        )
+        if st != 200 or not d_create_b.get("ok"):
+            raise RuntimeError(f"Security test create_b failed: status={st} body={d_create_b}")
+        rid_b = int(d_create_b["room_id"])
+        tok_b = int(d_create_b["token"])
+        try:
+            st, d_quick_other = http_post_json(
+                f"http://{server_addr}/pvp/join?uid=sec_uid_a&name=JoinA&game=pon&room=0"
+            )
+            if st != 200 or not d_quick_other.get("ok") or int(d_quick_other.get("room_id", 0)) != rid_b:
+                raise RuntimeError(
+                    f"Expected room=0 to skip rid_a={rid_a} and join rid_b={rid_b}, got status={st} body={d_quick_other}"
+                )
+        finally:
+            http_post_json(f"http://{server_addr}/pvp/leave?room={rid_b}&token={tok_b}")
+
+        # 4. Cross-game join (game=lon joining pon room_id) -> HTTP 404 no_open_room
+        st, d_cross = http_post_json(
+            f"http://{server_addr}/pvp/join?uid=sec_uid_c&name=LonGuest&game=lon&room={rid_a}"
+        )
+        if st != 404 or d_cross.get("ok") is not False or d_cross.get("error") != "no_open_room":
+            raise RuntimeError(
+                f"Expected HTTP 404 no_open_room for cross-game LoN->PoN join, got status={st} body={d_cross}"
+            )
+    finally:
+        http_post_json(f"http://{server_addr}/pvp/leave?room={rid_a}&token={tok_a}")
+
+    rem_rooms = http_get_json(f"http://{server_addr}/pvp/rooms?game=all").get("rooms", [])
+    if rem_rooms:
+        raise RuntimeError(f"Expected 0 lingering rooms after /pvp/join guard tests, found: {rem_rooms}")
+    print("  -> /pvp/join guards PASSED (409 same_uid, room=0 skip, 404 cross-game rejection)", flush=True)
+
+    # 5. LoN CLI guard check: --pvp-create must create 0 rooms for LoN
+    lon_dir = tmp_dir / "lon_guard"
+    lon_dir.mkdir(parents=True, exist_ok=True)
+    lon_proc = subprocess.run(
+        [
+            str(lon_bin),
+            "--headless",
+            "--fast-forward",
+            "--max-frames",
+            "20",
+            "--sav",
+            str(lon_dir / "lon.sav"),
+            "--config",
+            str(lon_dir / "lon.cfg"),
+            "--server",
+            server_addr,
+            "--pvp-create",
+        ],
+        cwd=str(ROOT_DIR),
+        env=headless_env(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if lon_proc.returncode != 0:
+        raise RuntimeError(
+            f"LoN CLI guard check exited rc={lon_proc.returncode}:\nSTDOUT:\n{lon_proc.stdout}\nSTDERR:\n{lon_proc.stderr}"
+        )
+    lon_rooms = http_get_json(f"http://{server_addr}/pvp/rooms?game=lon").get("rooms", [])
+    pon_rooms = http_get_json(f"http://{server_addr}/pvp/rooms?game=pon").get("rooms", [])
+    if lon_rooms or pon_rooms:
+        raise RuntimeError(
+            f"Expected 0 rooms created by lon_jp_recomp --pvp-create, found lon={lon_rooms}, pon={pon_rooms}"
+        )
+    print("  -> LoN CLI guard check PASSED (0 lon/pon rooms created)\n", flush=True)
+
+
 def headless_env() -> dict[str, str]:
     env = os.environ.copy()
     env["SDL_VIDEODRIVER"] = "dummy"
@@ -65,11 +240,20 @@ def headless_env() -> dict[str, str]:
     return env
 
 
-def run_self_test(bin_path: Path, label: str) -> None:
+def run_self_test(bin_path: Path, label: str, tmp_dir: Path) -> None:
     print(f"=== [1] Running --pvp-self-test on {label} ({bin_path.name}) ===", flush=True)
+    st_dir = tmp_dir / f"selftest_{bin_path.stem}"
+    st_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
     proc = subprocess.run(
-        [str(bin_path), "--pvp-self-test"],
+        [
+            str(bin_path),
+            "--pvp-self-test",
+            "--sav",
+            str(st_dir / "test.sav"),
+            "--config",
+            str(st_dir / "controls.cfg"),
+        ],
         cwd=str(ROOT_DIR),
         env=headless_env(),
         capture_output=True,
@@ -98,6 +282,7 @@ def run_live_udp_match(
     realtime_clock: bool = False,
     inject_stalls: bool = False,
     bo3: bool = False,
+    inject_forged_udp: bool = False,
 ) -> None:
     print(
         f"=== [2.{match_idx}] Live UDP Match: {match_label} ({p0_bin.name} vs {p1_bin.name}) ===",
@@ -207,6 +392,70 @@ def run_live_udp_match(
     th0.start()
     th1.start()
 
+    forged_stats: dict = {
+        "srv_pkts": 0,
+        "cli_pkts": 0,
+        "p0_ports": set(),
+        "p1_ports": set(),
+        "error": None,
+    }
+    forge_thread: threading.Thread | None = None
+    if inject_forged_udp:
+        srv_host, srv_port_s = server_addr.rsplit(":", 1)
+        srv_port = int(srv_port_s)
+
+        def run_forge() -> None:
+            sock_a = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock_b = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock_a.bind(("127.0.0.1", 0))
+                sock_b.bind(("127.0.0.1", 0))
+                bad_pkts = [
+                    # Wrong token (disconnect, frame input, match end)
+                    pack_forged_rmxp(1, 8, 1, room_id, 0xDEADBEEF),
+                    pack_forged_rmxp(1, 6, 1, room_id, 0xCAFEBABE, frame_or_seq=5, keypad_mask=0x7FFF),
+                    pack_forged_rmxp(1, 15, 2, room_id, 0),
+                    # Wrong protocol version (= 2)
+                    pack_forged_rmxp(2, 8, 1, room_id, 1),
+                    pack_forged_rmxp(2, 6, 2, room_id, 1, frame_or_seq=12, keypad_mask=0x10),
+                    pack_forged_rmxp(2, 15, 1, room_id, 1),
+                    # Spoofed source port (unauthorized ephemeral socket != server/client port)
+                    pack_forged_rmxp(1, 1, 1, room_id, 1),
+                    pack_forged_rmxp(1, 8, 2, room_id, room_id ^ 0x5555),
+                    pack_forged_rmxp(1, 6, 1, room_id + 777, 1, frame_or_seq=20, keypad_mask=0x20),
+                    # Truncated / non-RMXP garbage
+                    b"BAD",
+                    b"RMXP\x01\x08\x01\x00" + b"\xff" * 20,
+                ]
+                waves_both = 0
+                deadline_f = time.monotonic() + 12.0
+                while time.monotonic() < deadline_f and waves_both < 15:
+                    if p0.poll() is not None or p1.poll() is not None:
+                        break
+                    p0_ps = find_proc_udp_ports(p0.pid)
+                    p1_ps = find_proc_udp_ports(p1.pid)
+                    forged_stats["p0_ports"].update(p0_ps)
+                    forged_stats["p1_ports"].update(p1_ps)
+                    client_targets = sorted(forged_stats["p0_ports"] | forged_stats["p1_ports"])
+                    for idx, pkt in enumerate(bad_pkts):
+                        sk = sock_a if (idx % 2 == 0) else sock_b
+                        sk.sendto(pkt, (srv_host, srv_port))
+                        forged_stats["srv_pkts"] += 1
+                        for cp in client_targets:
+                            sk.sendto(pkt, (srv_host, cp))
+                            forged_stats["cli_pkts"] += 1
+                    if forged_stats["p0_ports"] and forged_stats["p1_ports"]:
+                        waves_both += 1
+                    time.sleep(0.04)
+            except Exception as exc:
+                forged_stats["error"] = exc
+            finally:
+                sock_a.close()
+                sock_b.close()
+
+        forge_thread = threading.Thread(target=run_forge, daemon=True)
+        forge_thread.start()
+
     if inject_stalls and hasattr(signal, "SIGSTOP"):
         # Inject asymmetric OS freezes mid-battle while both bots Buster Charge (蓄力集气)
         for target_proc, delay_s, freeze_s in ((p1, 2.2, 0.42), (p0, 2.0, 0.42)):
@@ -223,6 +472,19 @@ def run_live_udp_match(
 
     th0.join()
     th1.join()
+    if forge_thread is not None:
+        forge_thread.join()
+        if forged_stats["error"] is not None:
+            raise RuntimeError(f"Forged UDP injector error in {match_label}: {forged_stats['error']}")
+        if forged_stats["srv_pkts"] <= 0 or not forged_stats["p0_ports"] or not forged_stats["p1_ports"] or forged_stats["cli_pkts"] <= 0:
+            raise RuntimeError(
+                f"Forged UDP injector did not target server + both clients in {match_label}: {forged_stats}"
+            )
+        print(
+            f"  Forged UDP injected: srv_pkts={forged_stats['srv_pkts']}, "
+            f"cli_pkts={forged_stats['cli_pkts']}, "
+            f"p0_ports={sorted(forged_stats['p0_ports'])}, p1_ports={sorted(forged_stats['p1_ports'])}"
+        )
 
     if res_box[0].get("timeout") or res_box[1].get("timeout"):
         raise RuntimeError(
@@ -300,18 +562,19 @@ def run_live_udp_match(
 def main() -> int:
     pon_jp = BUILD_DIR / "pon_jp_recomp"
     pon_en = BUILD_DIR / "pon_en_recomp"
+    lon_jp = BUILD_DIR / "lon_jp_recomp"
     srv_bin = BUILD_DIR / "rmexe_server"
 
-    for b in (pon_jp, pon_en, srv_bin):
+    for b in (pon_jp, pon_en, lon_jp, srv_bin):
         if not b.exists():
             print(f"ERROR: Required binary not found: {b}", file=sys.stderr)
             return 1
 
-    run_self_test(pon_jp, "PoN JP")
-    run_self_test(pon_en, "PoN EN")
-
     with tempfile.TemporaryDirectory(prefix="rmexe_pvp_test_") as tmp_s:
         tmp_dir = Path(tmp_s)
+        run_self_test(pon_jp, "PoN JP", tmp_dir)
+        run_self_test(pon_en, "PoN EN", tmp_dir)
+
         port = pick_free_port()
         server_addr = f"127.0.0.1:{port}"
         srv_proc = subprocess.Popen(
@@ -343,6 +606,8 @@ def main() -> int:
             if not ready:
                 raise RuntimeError("rmexe_server failed to become healthy")
 
+            run_server_security_and_guard_tests(server_addr, lon_jp, tmp_dir)
+
             run_live_udp_match("PoN JP vs PoN JP", pon_jp, pon_jp, server_addr, tmp_dir, 1)
             run_live_udp_match("PoN EN vs PoN EN", pon_en, pon_en, server_addr, tmp_dir, 2)
             run_live_udp_match("PoN JP vs PoN EN (Cross-Region)", pon_jp, pon_en, server_addr, tmp_dir, 3)
@@ -364,6 +629,16 @@ def main() -> int:
                 tmp_dir,
                 5,
                 bo3=True,
+            )
+            run_live_udp_match(
+                "PoN JP vs PoN EN [Real-Time 16Hz + Forged UDP Auth Guard]",
+                pon_jp,
+                pon_en,
+                server_addr,
+                tmp_dir,
+                6,
+                realtime_clock=True,
+                inject_forged_udp=True,
             )
         finally:
             srv_proc.terminate()

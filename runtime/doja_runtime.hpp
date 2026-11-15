@@ -248,6 +248,10 @@ public:
     int last_played_port_sound_id(int port) const;
 
     // Framebuffer HUD overlay drawing helpers (240x240 screen space)
+    void reset_interpolator();
+    uint32_t interp_test_img_gen(Ref img_ref) const;
+    void interp_test_begin_frame();
+    bool interp_test_end_and_rasterize(float alpha, uint32_t* out_fb_240x240);
     void fb_fill_rect_alpha(int rx, int ry, int rw, int rh, uint32_t argb);
     void fb_draw_border(int rx, int ry, int rw, int rh, uint32_t argb);
     int fb_measure_text(const std::string& utf8) const;

@@ -25,10 +25,6 @@
 #define DEFAULT_SP_PATH "assets/PoN_jp/sp/PoN.sp"
 #endif
 
-#ifndef DEFAULT_SAV_PATH
-#define DEFAULT_SAV_PATH "assets/PoN_jp/sp/PoN.sav"
-#endif
-
 #ifndef DEFAULT_WINDOW_TITLE
 #define DEFAULT_WINDOW_TITLE "Rockman EXE Mobile Recomp"
 #endif
@@ -43,7 +39,6 @@ int main(int argc, char** argv) {
 #endif
     std::string jar_path = DEFAULT_JAR_PATH;
     std::string sp_path = DEFAULT_SP_PATH;
-    std::string sav_path = DEFAULT_SAV_PATH;
     std::string dump_ppm_path;
     int scale = 3;
     int fps = 60;
@@ -61,8 +56,7 @@ int main(int argc, char** argv) {
         } else if (arg == "--sp" && i + 1 < argc) {
             sp_path = argv[++i];
         } else if (arg == "--sav" && i + 1 < argc) {
-            sav_path = argv[++i];
-            rmexe::set_custom_sav_path(sav_path);
+            rmexe::set_custom_sav_path(argv[++i]);
         } else if (arg == "--config" && i + 1 < argc) {
             rt.set_config_path(argv[++i]);
         } else if (arg == "--server" && i + 1 < argc) {

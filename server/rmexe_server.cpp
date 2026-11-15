@@ -27,7 +27,8 @@ struct TcpClientConn {
 
 std::vector<uint8_t> serialize_http_response(const rmexe::net::HttpResponse& resp) {
     const char* reason = (resp.status_code == 200) ? "OK" :
-                         (resp.status_code == 404) ? "Not Found" : "Bad Request";
+                         (resp.status_code == 404) ? "Not Found" :
+                         (resp.status_code == 409) ? "Conflict" : "Bad Request";
     std::ostringstream head;
     head << "HTTP/1.1 " << resp.status_code << " " << reason << "\r\n";
     bool has_len = false;
@@ -227,8 +228,7 @@ int main(int argc, char** argv) {
             break;
         }
 
-        // Priority 1: Process all incoming UDP PvP datagrams immediately for minimal jitter
-        if (pfds[1].revents & POLLIN) {
+        auto drain_udp = [&]() {
             uint8_t ubuf[1500];
             while (true) {
                 sockaddr_storage src{};
@@ -237,6 +237,11 @@ int main(int argc, char** argv) {
                 if (n <= 0) break;
                 pvp_engine.handle_udp_datagram(udp_fd, ubuf, static_cast<size_t>(n), src, slen);
             }
+        };
+
+        // Priority 1: Process all incoming UDP PvP datagrams immediately for minimal jitter
+        if (pfds[1].revents & POLLIN) {
+            drain_udp();
         }
 
         // Priority 2: Accept new TCP HTTP connections
@@ -313,6 +318,7 @@ int main(int argc, char** argv) {
 
                             c.out_buf = serialize_http_response(resp);
                             c.response_ready = true;
+                            drain_udp();
                         }
                     }
                 }

@@ -22,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <csignal>
 #include <cstdio>
 #include <ctime>
@@ -2370,6 +2371,154 @@ struct UiInputManager {
     bool overlay_ignore_next_textinput = false;
     std::vector<pvp::PvpRoomInfo> overlay_open_rooms;
 
+    struct ProbeRequest {
+        uint64_t seq = 0;
+        bool probe_status = false;
+        bool fetch_rooms = false;
+        std::string server_url;
+        std::string game;
+    };
+    struct ProbeResult {
+        uint64_t seq = 0;
+        bool has_status = false;
+        bool status_ok = false;
+        bool rooms_ok = false;
+        std::string server_url;
+        std::string stat_msg;
+        std::vector<pvp::PvpRoomInfo> rooms;
+        bool ready = false;
+    };
+    std::mutex probe_mtx;
+    std::condition_variable probe_cv;
+    std::thread probe_thread;
+    bool probe_stop = false;
+    bool probe_has_req = false;
+    bool probe_inflight = false;
+    uint64_t probe_seq = 0;
+    ProbeRequest probe_req{};
+    ProbeResult probe_res{};
+
+    ~UiInputManager() {
+        stop_probe_worker();
+    }
+
+    void ensure_probe_worker_locked() {
+        if (probe_thread.joinable()) return;
+        probe_stop = false;
+        probe_thread = std::thread([this]() {
+            for (;;) {
+                ProbeRequest req{};
+                {
+                    std::unique_lock<std::mutex> lk(probe_mtx);
+                    probe_cv.wait(lk, [this]() { return probe_stop || probe_has_req; });
+                    if (probe_stop) return;
+                    req = probe_req;
+                    probe_has_req = false;
+                    probe_inflight = true;
+                }
+
+                ProbeResult res{};
+                res.seq = req.seq;
+                res.server_url = req.server_url;
+                bool ok_so_far = true;
+                if (req.probe_status) {
+                    res.has_status = true;
+                    res.status_ok = pvp::PvpClientSession::check_server_status(req.server_url, res.stat_msg, 350);
+                    ok_so_far = res.status_ok;
+                }
+                if (ok_so_far && req.fetch_rooms) {
+                    res.rooms_ok = pvp::PvpClientSession::list_open_rooms(req.server_url, req.game, res.rooms, 350);
+                }
+
+                {
+                    std::lock_guard<std::mutex> lk(probe_mtx);
+                    probe_inflight = false;
+                    if (!probe_stop && req.seq == probe_seq) {
+                        res.ready = true;
+                        probe_res = std::move(res);
+                    }
+                }
+            }
+        });
+    }
+
+    void stop_probe_worker() {
+        std::thread to_join;
+        {
+            std::lock_guard<std::mutex> lk(probe_mtx);
+            probe_stop = true;
+            ++probe_seq;
+            probe_has_req = false;
+            probe_res = ProbeResult{};
+            probe_cv.notify_all();
+            if (probe_thread.joinable()) {
+                to_join = std::move(probe_thread);
+            }
+        }
+        if (to_join.joinable()) {
+            to_join.join();
+        }
+    }
+
+    bool is_probe_inflight() {
+        std::lock_guard<std::mutex> lk(probe_mtx);
+        return probe_inflight || probe_has_req;
+    }
+
+    void start_async_probe(bool probe_status, bool fetch_rooms) {
+        if (server_url.empty()) return;
+        std::lock_guard<std::mutex> lk(probe_mtx);
+        if (probe_stop) return;
+        ensure_probe_worker_locked();
+        ProbeRequest req{};
+        req.seq = ++probe_seq;
+        req.probe_status = probe_status;
+        req.fetch_rooms = fetch_rooms;
+        req.server_url = server_url;
+        req.game = is_lon_game ? "lon" : "pon";
+        probe_req = std::move(req);
+        probe_has_req = true;
+        probe_res.ready = false;
+        probe_cv.notify_one();
+    }
+
+    void cancel_pending_probe() {
+        std::lock_guard<std::mutex> lk(probe_mtx);
+        ++probe_seq;
+        probe_res = ProbeResult{};
+    }
+
+    void poll_async_probe() {
+        ProbeResult res{};
+        {
+            std::lock_guard<std::mutex> lk(probe_mtx);
+            if (!probe_res.ready) return;
+            if (probe_res.seq != probe_seq) {
+                probe_res.ready = false;
+                return;
+            }
+            res = std::move(probe_res);
+            probe_res = ProbeResult{};
+        }
+        if (res.has_status) {
+            if (res.status_ok) {
+                show_toast("已连接 " + res.server_url + " (" + res.stat_msg + ")", 120);
+            } else {
+                overlay_open_rooms.clear();
+                if (pvp_menu_choice >= 2) pvp_menu_choice = 0;
+                show_toast("未连上 " + res.server_url + " (请检查地址或端口)", 120);
+                return;
+            }
+        }
+        if (online_mode && !g_pvp.active() && !is_lon_game && res.rooms_ok) {
+            overlay_open_rooms = std::move(res.rooms);
+        } else {
+            overlay_open_rooms.clear();
+        }
+        int max_choices = 2 + static_cast<int>(overlay_open_rooms.size());
+        if (pvp_menu_choice >= max_choices) pvp_menu_choice = 0;
+    }
+
     static void pop_utf8_char(std::string& s) {
         while (!s.empty() && (static_cast<uint8_t>(s.back()) & 0xC0u) == 0x80u) {
             s.pop_back();
@@ -2388,25 +2537,20 @@ struct UiInputManager {
     }
 
     void refresh_open_rooms() {
-        overlay_open_rooms.clear();
-        if (online_mode && !server_url.empty() && !g_pvp.active()) {
-            pvp::PvpClientSession::list_open_rooms(server_url, is_lon_game ? "lon" : "pon", overlay_open_rooms);
+        if (!online_mode || server_url.empty() || g_pvp.active() || is_lon_game) {
+            cancel_pending_probe();
+            overlay_open_rooms.clear();
+            if (pvp_menu_choice >= 2) pvp_menu_choice = 0;
+            return;
         }
-        int max_choices = 2 + static_cast<int>(overlay_open_rooms.size());
-        if (pvp_menu_choice >= max_choices) pvp_menu_choice = 0;
+        start_async_probe(false, true);
     }
 
     void connect_and_probe_server() {
         online_mode = true;
         save_config();
-        std::string stat_msg;
-        if (pvp::PvpClientSession::check_server_status(server_url, stat_msg)) {
-            show_toast("已连接 " + server_url + " (" + stat_msg + ")", 120);
-            refresh_open_rooms();
-        } else {
-            overlay_open_rooms.clear();
-            show_toast("未连上 " + server_url + " (请检查地址或端口)", 120);
-        }
+        show_toast("正在连接 " + server_url + "...", 90);
+        start_async_probe(true, !is_lon_game);
     }
 
     void cycle_server_preset(int dir) {
@@ -2434,6 +2578,10 @@ struct UiInputManager {
     }
 
     void toggle_pvp_format() {
+        if (is_lon_game) {
+            show_toast("LoN 实时双人对战暂未开放 (请使用幻影网络 PoN)", 120);
+            return;
+        }
         if (g_pvp.active()) {
             show_toast("对战房间进行中，无法更改赛制", 90);
             return;
@@ -2454,6 +2602,7 @@ struct UiInputManager {
         if (online_mode) {
             connect_and_probe_server();
         } else {
+            cancel_pending_probe();
             g_pvp.close_udp();
             overlay_open_rooms.clear();
             pvp_menu_choice = 0;
@@ -2637,7 +2786,9 @@ struct UiInputManager {
         } else {
             auto adjust_row_lr = [&](int dir) {
                 if (overlay_sel_row == 0 && !g_pvp.active()) {
-                    if (online_mode) refresh_open_rooms();
+                    if (online_mode && !is_lon_game && !is_probe_inflight()) {
+                        refresh_open_rooms();
+                    }
                     int max_choices = 2 + static_cast<int>(overlay_open_rooms.size());
                     pvp_menu_choice = (pvp_menu_choice + dir + max_choices) % max_choices;
                 } else if (overlay_sel_row == 1) {
@@ -2829,7 +2980,10 @@ struct UiInputManager {
                 draw_ui_text(display_buf, 240, 260, "对战赛制", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string fstr;
                 uint32_t fcol = 0xFF88FFAAu;
-                if (g_pvp.active()) {
+                if (is_lon_game) {
+                    fstr = "[ 暂仅支持幻影网络 PoN ]";
+                    fcol = 0xFF8EA0BCu;
+                } else if (g_pvp.active()) {
                     bool is_bo3 = g_pvp.is_triple_battle();
                     fstr = is_bo3 ? "三回战 (BO3·三局两胜)" : "一回战 (Single)";
                     fcol = is_bo3 ? 0xFFFFD874u : 0xFF88FFAAu;
@@ -2913,7 +3067,9 @@ struct UiInputManager {
         // Footer instructions
         fill_rect_alpha(display_buf, 240, 260, 6, 196, 228, 1, 0xFF324672u);
         if (overlay_sel_row == 1) {
-            if (live_pvp) {
+            if (is_lon_game) {
+                draw_ui_text(display_buf, 240, 260, "LoN 实时双人对战暂未开放 (请使用幻影网络 PoN)", 6, 211, 0xFF8EA0BCu);
+            } else if (live_pvp) {
                 draw_ui_text(display_buf, 240, 260, "当前房间赛制已锁定 (退出房间后可修改)", 6, 211, 0xFF88FFAAu);
             } else {
                 draw_ui_text(display_buf, 240, 260, "←→/Enter:建房赛制 一回战 / 三回战(BO3·加入时随房主)", 6, 211, 0xFFFFD874u);
@@ -2923,7 +3079,9 @@ struct UiInputManager {
         } else if (overlay_sel_row == 3) {
             draw_ui_text(display_buf, 240, 260, "Enter:输入/粘贴昵称 (自动保存)", 14, 211, 0xFFFFEC88u);
         } else if (overlay_sel_row == 0) {
-            if (live_pvp) {
+            if (is_lon_game) {
+                draw_ui_text(display_buf, 240, 260, "LoN 实时双人对战暂未开放 (请使用幻影网络 PoN)", 6, 211, 0xFF8EA0BCu);
+            } else if (live_pvp) {
                 draw_ui_text(display_buf, 240, 260, "Enter:立即退出房间   F1/Esc:继续对战", 10, 211, 0xFF88FFAAu);
             } else {
                 draw_ui_text(display_buf, 240, 260, "←→:选建房/快速加入/房间号  Enter:出发!", 6, 211, 0xFFFFE484u);
@@ -2986,6 +3144,7 @@ struct UiInputManager {
                 close_overlay();
                 break;
             }
+            poll_async_probe();
             if (g_pvp.poll_udp()) {
                 show_toast("对战配对成功! VS " + g_pvp.opponent_name(), 150);
                 close_overlay();
@@ -3139,7 +3298,15 @@ static void blit_text_buf(uint32_t* dst_buf, int dst_w, int dst_h,
 }
 
 struct FrameInterpolator {
-    enum class CmdKind : uint8_t { FillRect, DrawRect, Image, Text };
+    enum class CmdKind : uint8_t {
+        FillRect,
+        DrawRect,
+        Image,
+        Text,
+        OP_FB_FILL_RECT_ALPHA,
+        OP_FB_DRAW_BORDER,
+        OP_FB_TEXT
+    };
 
     struct DrawCmd {
         CmdKind kind = CmdKind::Image;
@@ -3151,6 +3318,7 @@ struct FrameInterpolator {
         int dw = 0, dh = 0;
         int flip_mode = 0;
         uint32_t color = 0;
+        bool shadow = true;
         std::string text;
         int prev_dx = 0, prev_dy = 0;
         bool has_match = false;
@@ -3165,6 +3333,8 @@ struct FrameInterpolator {
     std::vector<DrawCmd> building_cmds;
     int building_coverage = 0;
 
+    bool capturing = false;
+    bool test_capture_override = false;
     bool can_interpolate = false;
     bool any_motion = false;
     int subframes_presented = 4; // 1..4 across ~62.5 ms 15Hz logic tick
@@ -3175,6 +3345,8 @@ struct FrameInterpolator {
         curr_cmds.clear();
         building_cmds.clear();
         building_coverage = 0;
+        capturing = false;
+        test_capture_override = false;
         can_interpolate = false;
         any_motion = false;
         subframes_presented = 4;
@@ -3195,6 +3367,7 @@ struct FrameInterpolator {
         std::memcpy(lock_base_fb, current_fb, 240 * 240 * sizeof(uint32_t));
         building_cmds.clear();
         building_coverage = 0;
+        capturing = true;
     }
 
     void add_coverage(int dx, int dy, int dw, int dh) {
@@ -3236,7 +3409,32 @@ struct FrameInterpolator {
         building_cmds.push_back(std::move(c));
     }
 
+    void record_fb_rect_alpha(int rx, int ry, int rw, int rh, uint32_t argb) {
+        if (!capturing || building_cmds.size() >= 2048) return;
+        DrawCmd c{};
+        c.kind = CmdKind::OP_FB_FILL_RECT_ALPHA;
+        c.dx = rx; c.dy = ry; c.dw = rw; c.dh = rh; c.color = argb;
+        building_cmds.push_back(std::move(c));
+    }
+
+    void record_fb_border(int rx, int ry, int rw, int rh, uint32_t argb) {
+        if (!capturing || building_cmds.size() >= 2048) return;
+        DrawCmd c{};
+        c.kind = CmdKind::OP_FB_DRAW_BORDER;
+        c.dx = rx; c.dy = ry; c.dw = rw; c.dh = rh; c.color = argb;
+        building_cmds.push_back(std::move(c));
+    }
+
+    void record_fb_text(const std::string& txt, int px, int baseline_y, uint32_t col, bool shadow) {
+        if (!capturing || building_cmds.size() >= 2048) return;
+        DrawCmd c{};
+        c.kind = CmdKind::OP_FB_TEXT;
+        c.dx = px; c.dy = baseline_y; c.color = col; c.shadow = shadow; c.text = txt;
+        building_cmds.push_back(std::move(c));
+    }
+
     void on_screen_unlock(const uint32_t* final_fb, bool enable_interp) {
+        capturing = false;
         prev_cmds = std::move(curr_cmds);
         curr_cmds = std::move(building_cmds);
         building_cmds.clear();
@@ -3275,8 +3473,12 @@ struct FrameInterpolator {
                        c.sx == p.sx && c.sy == p.sy && c.sw == p.sw && c.sh == p.sh &&
                        c.dw == p.dw && c.dh == p.dh && c.flip_mode == p.flip_mode;
             }
-            if (c.kind == CmdKind::FillRect || c.kind == CmdKind::DrawRect) {
+            if (c.kind == CmdKind::FillRect || c.kind == CmdKind::DrawRect ||
+                c.kind == CmdKind::OP_FB_FILL_RECT_ALPHA || c.kind == CmdKind::OP_FB_DRAW_BORDER) {
                 return c.dw == p.dw && c.dh == p.dh && c.color == p.color;
+            }
+            if (c.kind == CmdKind::OP_FB_TEXT) {
+                return c.color == p.color && c.shadow == p.shadow && c.text == p.text;
             }
             return c.color == p.color && c.text == p.text;
         };
@@ -3321,7 +3523,12 @@ struct FrameInterpolator {
         // so player & enemy panel warps snap cleanly instead of drifting across panel borders.
         for (int i = 0; i < n_curr; ++i) {
             DrawCmd& c = curr_cmds[i];
-            if (c.has_match) continue;
+            if (c.has_match ||
+                c.kind == CmdKind::OP_FB_FILL_RECT_ALPHA ||
+                c.kind == CmdKind::OP_FB_DRAW_BORDER ||
+                c.kind == CmdKind::OP_FB_TEXT) {
+                continue;
+            }
             int best_j = -1;
             int best_score = 999999;
             for (int j = 0; j < n_prev; ++j) {
@@ -3443,6 +3650,15 @@ struct FrameInterpolator {
                 case CmdKind::Text:
                     blit_text_buf(interp_fb, 240, 240, c.text, dx, dy, c.color);
                     break;
+                case CmdKind::OP_FB_FILL_RECT_ALPHA:
+                    UiInputManager::fill_rect_alpha(interp_fb, 240, 240, dx, dy, c.dw, c.dh, c.color);
+                    break;
+                case CmdKind::OP_FB_DRAW_BORDER:
+                    UiInputManager::draw_rect_border(interp_fb, 240, 240, dx, dy, c.dw, c.dh, c.color);
+                    break;
+                case CmdKind::OP_FB_TEXT:
+                    UiInputManager::draw_ui_text(interp_fb, 240, 240, c.text, dx, dy, c.color, c.shadow);
+                    break;
             }
         }
     }
@@ -3535,7 +3751,13 @@ std::string DojaRuntime::player_nickname() const {
 
 int DojaRuntime::take_cli_pvp_action(uint32_t& room_id_out) {
     if (g_ui.cli_pvp_mode == 0) return 0;
-    std::string gm = g_ui.is_lon_game ? "lon" : "pon";
+    if (g_ui.is_lon_game) {
+        g_ui.cli_pvp_mode = 0;
+        g_ui.show_toast("LoN 实时双人对战暂未开放 (请使用幻影网络 PoN)", 120);
+        std::cerr << "[PvP] LoN 实时双人对战暂未开放 (请使用幻影网络 PoN)\n";
+        return -1;
+    }
+    std::string gm = "pon";
     g_ui.online_mode = true;
     if (g_ui.cli_pvp_mode == 1) {
         g_ui.cli_pvp_mode = 0;
@@ -3669,12 +3891,42 @@ void DojaRuntime::restore_combat_snapshot(const FastCombatSnapshot& in) {
     }
 }
 
+void DojaRuntime::reset_interpolator() {
+    g_interp.reset();
+}
+
+uint32_t DojaRuntime::interp_test_img_gen(Ref img_ref) const {
+    return g_interp.get_img_gen(img_ref);
+}
+
+void DojaRuntime::interp_test_begin_frame() {
+    g_interp.test_capture_override = true;
+    g_interp.on_screen_lock(framebuffer_);
+}
+
+bool DojaRuntime::interp_test_end_and_rasterize(float alpha, uint32_t* out_fb_240x240) {
+    g_interp.on_screen_unlock(framebuffer_, true);
+    g_interp.test_capture_override = false;
+    if (!g_interp.can_interpolate) return false;
+    g_interp.rasterize_subframe(*this, alpha);
+    if (out_fb_240x240) {
+        std::memcpy(out_fb_240x240, g_interp.interp_fb, 240 * 240 * sizeof(uint32_t));
+    }
+    return true;
+}
+
 void DojaRuntime::fb_fill_rect_alpha(int rx, int ry, int rw, int rh, uint32_t argb) {
     UiInputManager::fill_rect_alpha(framebuffer_, 240, 240, rx, ry, rw, rh, argb);
+    if (g_interp.capturing && (g_interp.test_capture_override || (g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_))) {
+        g_interp.record_fb_rect_alpha(rx, ry, rw, rh, argb);
+    }
 }
 
 void DojaRuntime::fb_draw_border(int rx, int ry, int rw, int rh, uint32_t argb) {
     UiInputManager::draw_rect_border(framebuffer_, 240, 240, rx, ry, rw, rh, argb);
+    if (g_interp.capturing && (g_interp.test_capture_override || (g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_))) {
+        g_interp.record_fb_border(rx, ry, rw, rh, argb);
+    }
 }
 
 int DojaRuntime::fb_measure_text(const std::string& utf8) const {
@@ -3683,6 +3935,9 @@ int DojaRuntime::fb_measure_text(const std::string& utf8) const {
 
 void DojaRuntime::fb_draw_text(const std::string& utf8, int x, int baseline_y, uint32_t color, bool shadow) {
     UiInputManager::draw_ui_text(framebuffer_, 240, 240, utf8, x, baseline_y, color, shadow);
+    if (g_interp.capturing && (g_interp.test_capture_override || (g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_))) {
+        g_interp.record_fb_text(utf8, x, baseline_y, color, shadow);
+    }
 }
 
 void DojaRuntime::show_ui_toast(const std::string& msg, int frames) {
@@ -3739,6 +3994,10 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
 
     load_sav_overlay();
     g_ui.load_config();
+    if (g_ui.is_lon_game && g_ui.cli_pvp_mode != 0) {
+        uint32_t dummy_rm = 0;
+        take_cli_pvp_action(dummy_rm);
+    }
 
     // Allocate screen Graphics object and default Font
     HeapObject gfx{};
@@ -3828,6 +4087,7 @@ void DojaRuntime::shutdown() {
         save_sav_overlay();
     }
     g_pvp.close_udp();
+    g_ui.stop_probe_worker();
     g_ui.close_controllers();
     g_audio.shutdown_sdl_audio();
     if (sdl_texture_) {
@@ -4018,7 +4278,7 @@ void DojaRuntime::draw_image_internal(HeapObject& gfx, Ref img_ref, int dx, int 
     int base_dy = dy + gfx.origin_y;
     blit_image_buf(*this, dst_buf, dst_w, dst_h, img_ref, base_dx, base_dy, sx, sy, sw, sh, dw, dh, gfx.flip_mode);
 
-    if (gfx.target_image == 0 && g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_) {
+    if (gfx.target_image == 0 && (g_interp.test_capture_override || (g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_))) {
         g_interp.record_image(img_ref, base_dx, base_dy, sx, sy, sw, sh, dw, dh, gfx.flip_mode);
     }
 }
@@ -4042,7 +4302,7 @@ void DojaRuntime::draw_text_internal(HeapObject& gfx, const std::string& text, i
     int baseline_y = y + gfx.origin_y;
     blit_text_buf(dst_buf, dst_w, dst_h, text, pen_x, baseline_y, color);
 
-    if (gfx.target_image == 0 && g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_) {
+    if (gfx.target_image == 0 && (g_interp.test_capture_override || (g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_))) {
         g_interp.record_text(text, pen_x, baseline_y, color);
     }
 }
@@ -4051,6 +4311,7 @@ void DojaRuntime::poll_events() {
     if (g_quit_signal.load(std::memory_order_relaxed)) {
         clean_exit_runtime(*this, sdl_window_ != nullptr, 0);
     }
+    g_ui.poll_async_probe();
     if (!sdl_window_) return;
     static bool in_modal = false;
 
@@ -4954,7 +5215,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             }
             bool is_fill = (m == "fillRect");
             blit_rect_buf(dst_buf, dst_w, dst_h, is_fill, rx, ry, rw, rh, col);
-            if (gfx.target_image == 0 && g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_) {
+            if (gfx.target_image == 0 && (g_interp.test_capture_override || (g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_))) {
                 g_interp.record_rect(is_fill, rx, ry, rw, rh, col);
             }
             return Slot(0);

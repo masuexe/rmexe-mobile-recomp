@@ -405,28 +405,41 @@ public:
             js << "}";
         } else if (path == "/pvp/join" && net::iequals(method, "POST")) {
             uint32_t rid = params.count("room") ? static_cast<uint32_t>(std::strtoul(params["room"].c_str(), nullptr, 10)) : 0;
+            std::string want_game = params.count("game") ? params["game"] : "";
+            std::string join_uid = params.count("uid") ? params["uid"] : "";
+            bool same_uid_conflict = false;
             Room* target = nullptr;
             if (rid != 0) {
                 auto it = rooms_.find(rid);
                 if (it != rooms_.end() && it->second.peers[0].occupied && !it->second.peers[1].occupied) {
-                    target = &it->second;
+                    Room& rm = it->second;
+                    if (!want_game.empty() && rm.game != want_game) {
+                        // Game mismatch: leave target null so client gets no_open_room
+                    } else if (!join_uid.empty() && rm.peers[0].uid == join_uid) {
+                        same_uid_conflict = true;
+                    } else {
+                        target = &rm;
+                    }
                 }
             } else {
-                std::string want_game = params.count("game") ? params["game"] : "";
                 for (auto& [id, rm] : rooms_) {
                     if (rm.peers[0].occupied && !rm.peers[1].occupied &&
-                        (want_game.empty() || rm.game == want_game)) {
+                        (want_game.empty() || rm.game == want_game) &&
+                        (join_uid.empty() || rm.peers[0].uid != join_uid)) {
                         target = &rm;
                         break;
                     }
                 }
             }
-            if (!target) {
+            if (same_uid_conflict) {
+                resp.status_code = 409;
+                js << "{\"ok\":false,\"error\":\"same_uid\"}";
+            } else if (!target) {
                 resp.status_code = 404;
                 js << "{\"ok\":false,\"error\":\"no_open_room\"}";
             } else {
                 target->peers[1].occupied = true;
-                target->peers[1].uid = params.count("uid") ? params["uid"] : "P2";
+                target->peers[1].uid = params.count("uid") ? join_uid : "P2";
                 target->peers[1].name = params.count("name") && !params["name"].empty() ? params["name"] : "P2_NAVI";
                 target->peers[1].token = (rng_() & 0x7FFFFFFFu) | 0x20000u;
                 target->peers[1].last_seen_ms = steady_millis();
@@ -467,6 +480,7 @@ public:
         PvpPacketHeader hdr{};
         const uint8_t* payload = nullptr;
         if (!PvpPacketHeader::deserialize(data, len, hdr, payload)) return;
+        if (hdr.version != 1) return;
 
         std::lock_guard<std::mutex> lk(mtx_);
         uint64_t now = steady_millis();
@@ -528,8 +542,7 @@ public:
                                           reinterpret_cast<const sockaddr*>(&rm.peers[p].udp_addr), rm.peers[p].udp_addr_len);
                     }
                     if (opp.has_build && !opp.build_wire.empty()) {
-                        plat::sock_sendto(udp_fd, opp.build_wire.data(), opp.build_wire.size(),
-                                          reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                        send_with_peer_token(udp_fd, me, opp.build_wire.data(), opp.build_wire.size());
                     }
                 }
                 break;
@@ -552,31 +565,21 @@ public:
                 ack.token = me.token;
                 auto awire = ack.serialize();
                 plat::sock_sendto(udp_fd, awire.data(), awire.size(), reinterpret_cast<const sockaddr*>(&src_addr), src_len);
-                if (opp.occupied && opp.udp_bound) {
-                    plat::sock_sendto(udp_fd, data, len,
-                                      reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
-                }
+                send_with_peer_token(udp_fd, opp, data, len);
                 if (opp.has_build && !opp.build_wire.empty()) {
-                    plat::sock_sendto(udp_fd, opp.build_wire.data(), opp.build_wire.size(),
-                                      reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                    send_with_peer_token(udp_fd, me, opp.build_wire.data(), opp.build_wire.size());
                 }
                 break;
             }
             case PKT_BUILD_ACK:
             case PKT_CUSTOM_ACK:
             case PKT_BATTLE_STATE: {
-                if (opp.occupied && opp.udp_bound) {
-                    plat::sock_sendto(udp_fd, data, len,
-                                      reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
-                }
+                send_with_peer_token(udp_fd, opp, data, len);
                 break;
             }
             case PKT_MATCH_END: {
                 if (rm.match_ended_ms == 0) rm.match_ended_ms = now;
-                if (opp.occupied && opp.udp_bound) {
-                    plat::sock_sendto(udp_fd, data, len,
-                                      reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
-                }
+                send_with_peer_token(udp_fd, opp, data, len);
                 break;
             }
             case PKT_CUSTOM_COMMIT: {
@@ -600,8 +603,7 @@ public:
                             drop_commit_remaining_ > 0) {
                             --drop_commit_remaining_;
                         } else {
-                            plat::sock_sendto(udp_fd, data, len,
-                                              reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
+                            send_with_peer_token(udp_fd, opp, data, len);
                         }
                     }
                     if (opp.has_commit && opp.commit_turn == cturn && !opp.commit_wire.empty()) {
@@ -610,8 +612,7 @@ public:
                             drop_commit_remaining_ > 0) {
                             --drop_commit_remaining_;
                         } else {
-                            plat::sock_sendto(udp_fd, opp.commit_wire.data(), opp.commit_wire.size(),
-                                              reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                            send_with_peer_token(udp_fd, me, opp.commit_wire.data(), opp.commit_wire.size());
                         }
                     }
                 }
@@ -641,30 +642,35 @@ public:
                         }
                     }
                 }
-                if (opp.occupied && opp.udp_bound) {
-                    plat::sock_sendto(udp_fd, data, len,
-                                      reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
-                }
+                send_with_peer_token(udp_fd, opp, data, len);
                 break;
             }
             case PKT_INPUT_REQ: {
                 uint16_t turn = static_cast<uint16_t>(hdr.keypad_mask & 0xFFFF);
                 uint32_t want_f = hdr.frame_or_seq;
                 bool any_replayed = false;
-                // Replay up to 32 cached inputs from opp starting at want_f in 8-frame wire-compatible chunks!
-                for (uint32_t chunk = 0; chunk < 4; ++chunk) {
-                    uint32_t base_f = want_f + chunk * 8;
+                // Scan full [want_f, want_f + 32) window across gaps, emitting up to 4 contiguous <=8-frame chunks.
+                uint32_t chunks_sent = 0;
+                uint32_t off = 0;
+                while (off < 32 && chunks_sent < 4) {
+                    uint64_t key0 = (static_cast<uint64_t>(turn) << 32) | (want_f + off);
+                    if (opp.turn_inputs.find(key0) == opp.turn_inputs.end()) {
+                        ++off;
+                        continue;
+                    }
                     std::vector<int32_t> found_masks;
-                    uint32_t top_f = base_f;
-                    for (uint32_t f = base_f; f < base_f + 8; ++f) {
-                        uint64_t key = (static_cast<uint64_t>(turn) << 32) | f;
+                    uint32_t top_f = want_f + off;
+                    while (off < 32 && found_masks.size() < 8) {
+                        uint32_t cur_f = want_f + off;
+                        uint64_t key = (static_cast<uint64_t>(turn) << 32) | cur_f;
                         auto fit = opp.turn_inputs.find(key);
                         if (fit == opp.turn_inputs.end()) break;
                         found_masks.push_back(fit->second);
-                        top_f = f;
+                        top_f = cur_f;
+                        ++off;
                     }
-                    if (found_masks.empty()) break;
                     any_replayed = true;
+                    ++chunks_sent;
                     std::vector<uint8_t> pl;
                     net::push_be16(pl, turn);
                     pl.push_back(static_cast<uint8_t>(found_masks.size()));
@@ -677,21 +683,15 @@ public:
                     rep.pkt_type = PKT_INPUT_BUNDLE;
                     rep.slot = static_cast<uint8_t>(opp_idx + 1);
                     rep.room_id = rm.room_id;
-                    rep.token = opp.token;
+                    rep.token = me.token;
                     rep.frame_or_seq = top_f;
                     auto rwire = rep.serialize(pl.data(), pl.size());
                     plat::sock_sendto(udp_fd, rwire.data(), rwire.size(), reinterpret_cast<const sockaddr*>(&src_addr), src_len);
-                    if (found_masks.size() < 8) break;
                 }
-                if (!any_replayed && me.has_commit && me.commit_turn == turn &&
-                    !me.commit_wire.empty() && opp.occupied && opp.udp_bound) {
-                    plat::sock_sendto(udp_fd, me.commit_wire.data(), me.commit_wire.size(),
-                                      reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
+                if (!any_replayed && me.has_commit && me.commit_turn == turn && !me.commit_wire.empty()) {
+                    send_with_peer_token(udp_fd, opp, me.commit_wire.data(), me.commit_wire.size());
                 }
-                if (opp.occupied && opp.udp_bound) {
-                    plat::sock_sendto(udp_fd, data, len,
-                                      reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
-                }
+                send_with_peer_token(udp_fd, opp, data, len);
                 break;
             }
             case PKT_FRAME_INPUT: {
@@ -699,17 +699,11 @@ public:
                 while (me.recent_inputs.size() > 64) {
                     me.recent_inputs.erase(me.recent_inputs.begin());
                 }
-                if (opp.occupied && opp.udp_bound) {
-                    plat::sock_sendto(udp_fd, data, len,
-                                      reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
-                }
+                send_with_peer_token(udp_fd, opp, data, len);
                 break;
             }
             case PKT_DISCONNECT: {
-                if (opp.occupied && opp.udp_bound) {
-                    plat::sock_sendto(udp_fd, data, len,
-                                      reinterpret_cast<const sockaddr*>(&opp.udp_addr), opp.udp_addr_len);
-                }
+                send_with_peer_token(udp_fd, opp, data, len);
                 rooms_.erase(it);
                 if (rooms_.empty()) next_room_id_ = 1001;
                 break;
@@ -729,6 +723,23 @@ private:
     uint32_t next_room_id_ = 1001;
     std::unordered_map<uint32_t, Room> rooms_;
 
+    // Stamp receiver's token into header bytes [12..15] (big-endian matching PvpPacketHeader::deserialize).
+    static void send_with_peer_token(plat::sock_t udp_fd, const PeerSlot& dst,
+                                     const uint8_t* data, size_t len) {
+        if (udp_fd == plat::kInvalidSocket || !dst.occupied || !dst.udp_bound ||
+            !data || len < PvpPacketHeader::kWireSize || len > 1500) {
+            return;
+        }
+        uint8_t tmp[1500];
+        std::memcpy(tmp, data, len);
+        tmp[12] = static_cast<uint8_t>((dst.token >> 24) & 0xFF);
+        tmp[13] = static_cast<uint8_t>((dst.token >> 16) & 0xFF);
+        tmp[14] = static_cast<uint8_t>((dst.token >> 8) & 0xFF);
+        tmp[15] = static_cast<uint8_t>(dst.token & 0xFF);
+        plat::sock_sendto(udp_fd, tmp, len,
+                          reinterpret_cast<const sockaddr*>(&dst.udp_addr), dst.udp_addr_len);
+    }
+
     void notify_peer_disconnect_unlocked(const Room& rm, int surv_idx) {
         if (udp_fd_ == plat::kInvalidSocket || surv_idx < 0 || surv_idx > 1) return;
         const PeerSlot& surv = rm.peers[surv_idx];
@@ -737,7 +748,7 @@ private:
         d.pkt_type = PKT_DISCONNECT;
         d.slot = static_cast<uint8_t>((1 - surv_idx) + 1);
         d.room_id = rm.room_id;
-        d.token = rm.peers[1 - surv_idx].token;
+        d.token = surv.token;
         auto wire = d.serialize();
         plat::sock_sendto(udp_fd_, wire.data(), wire.size(),
                           reinterpret_cast<const sockaddr*>(&surv.udp_addr), surv.udp_addr_len);
@@ -821,9 +832,9 @@ public:
     bool peer_supports_bo3() const { return peer_fmt_capable_; }
     void set_send_legacy_build_for_test(bool v) { send_legacy_build_test_ = v; }
 
-    static bool check_server_status(const std::string& server_host_port, std::string& summary_out) {
+    static bool check_server_status(const std::string& server_host_port, std::string& summary_out, int timeout_ms = 1500) {
         net::HttpResponse resp;
-        if (!net::http_request_tcp(server_host_port, "GET", "/pvp/status", {}, {}, resp, 1500) ||
+        if (!net::http_request_tcp(server_host_port, "GET", "/pvp/status", {}, {}, resp, timeout_ms) ||
             resp.status_code != 200) {
             return false;
         }
@@ -834,11 +845,12 @@ public:
         return true;
     }
 
-    static bool list_open_rooms(const std::string& server_host_port, const std::string& game, std::vector<PvpRoomInfo>& out_rooms) {
+    static bool list_open_rooms(const std::string& server_host_port, const std::string& game,
+                                std::vector<PvpRoomInfo>& out_rooms, int timeout_ms = 1500) {
         out_rooms.clear();
         std::string uri = "/pvp/rooms?game=" + net::url_encode(game);
         net::HttpResponse resp;
-        if (!net::http_request_tcp(server_host_port, "GET", uri, {}, {}, resp, 1500) ||
+        if (!net::http_request_tcp(server_host_port, "GET", uri, {}, {}, resp, timeout_ms) ||
             resp.status_code != 200) {
             return false;
         }
@@ -847,10 +859,51 @@ public:
         if (pos == std::string::npos) return true;
         pos = js.find('[', pos);
         if (pos == std::string::npos) return true;
-        while (pos < js.size()) {
-            size_t lb = js.find('{', pos);
-            if (lb == std::string::npos) break;
-            size_t rb = js.find('}', lb);
+        ++pos;
+        const size_t n = js.size();
+        while (pos < n) {
+            while (pos < n && js[pos] != '{' && js[pos] != ']') {
+                if (js[pos] == '"') {
+                    ++pos;
+                    while (pos < n) {
+                        if (js[pos] == '\\' && pos + 1 < n) { pos += 2; continue; }
+                        if (js[pos] == '"') { ++pos; break; }
+                        ++pos;
+                    }
+                    continue;
+                }
+                ++pos;
+            }
+            if (pos >= n || js[pos] == ']') break;
+            size_t lb = pos;
+            int depth = 0;
+            bool in_str = false;
+            bool esc = false;
+            size_t rb = std::string::npos;
+            for (size_t i = lb; i < n; ++i) {
+                char c = js[i];
+                if (in_str) {
+                    if (esc) {
+                        esc = false;
+                    } else if (c == '\\') {
+                        esc = true;
+                    } else if (c == '"') {
+                        in_str = false;
+                    }
+                } else {
+                    if (c == '"') {
+                        in_str = true;
+                    } else if (c == '{') {
+                        ++depth;
+                    } else if (c == '}') {
+                        --depth;
+                        if (depth == 0) {
+                            rb = i;
+                            break;
+                        }
+                    }
+                }
+            }
             if (rb == std::string::npos) break;
             std::string item = js.substr(lb, rb - lb + 1);
             PvpRoomInfo ri{};
@@ -1140,11 +1193,16 @@ public:
         bool newly_started = false;
         uint8_t buf[1500];
         while (true) {
-            ptrdiff_t n = plat::sock_recvfrom(udp_fd_, buf, sizeof(buf), nullptr, nullptr);
+            sockaddr_storage src{};
+            socklen_t slen = sizeof(src);
+            ptrdiff_t n = plat::sock_recvfrom(udp_fd_, buf, sizeof(buf),
+                                              reinterpret_cast<sockaddr*>(&src), &slen);
             if (n <= 0) break;
+            if (!sockaddr_matches(src, slen, srv_addr_, srv_addr_len_)) continue;
             PvpPacketHeader h{};
             const uint8_t* payload = nullptr;
             if (!PvpPacketHeader::deserialize(buf, static_cast<size_t>(n), h, payload)) continue;
+            if (room_id_ == 0 || h.version != 1 || h.room_id != room_id_ || h.token != token_) continue;
 
             if (h.pkt_type == PKT_BIND_ACK) {
                 udp_bound_ = true;
@@ -1171,8 +1229,11 @@ public:
                 if (!match_started_) newly_started = true;
                 match_started_ = true;
             } else if (h.pkt_type == PKT_PONG) {
-                uint32_t now32 = static_cast<uint32_t>(steady_millis() & 0xFFFFFFFFu);
-                last_rtt_ms_ = static_cast<int>(now32 - h.frame_or_seq);
+                uint64_t now_ms = steady_millis() & 0xFFFFFFFFULL;
+                uint64_t sent_ms = static_cast<uint64_t>(h.frame_or_seq);
+                if (now_ms >= sent_ms && (now_ms - sent_ms) <= 10000ULL) {
+                    last_rtt_ms_ = static_cast<int>(now_ms - sent_ms);
+                }
             } else if (h.pkt_type == PKT_BUILD_SYNC) {
                 PvpFighterBuild fb{};
                 if (PvpFighterBuild::deserialize(payload, h.payload_len, fb)) {
@@ -1259,23 +1320,30 @@ public:
             } else if (h.pkt_type == PKT_INPUT_REQ) {
                 uint16_t turn = static_cast<uint16_t>(h.keypad_mask & 0xFFFF);
                 uint32_t want_f = h.frame_or_seq;
-                for (uint32_t chunk = 0; chunk < 4; ++chunk) {
-                    uint32_t base_f = want_f + chunk * 8;
+                uint32_t chunks_sent = 0;
+                uint32_t off = 0;
+                while (off < 32 && chunks_sent < 4) {
+                    uint64_t key0 = (static_cast<uint64_t>(turn) << 32) | (want_f + off);
+                    if (local_turn_inputs_.find(key0) == local_turn_inputs_.end()) {
+                        ++off;
+                        continue;
+                    }
                     std::vector<int32_t> masks;
-                    uint32_t top_f = base_f;
-                    for (uint32_t f = base_f; f < base_f + 8; ++f) {
-                        uint64_t key = (static_cast<uint64_t>(turn) << 32) | f;
+                    uint32_t top_f = want_f + off;
+                    while (off < 32 && masks.size() < 8) {
+                        uint32_t cur_f = want_f + off;
+                        uint64_t key = (static_cast<uint64_t>(turn) << 32) | cur_f;
                         auto it = local_turn_inputs_.find(key);
                         if (it == local_turn_inputs_.end()) break;
                         masks.push_back(it->second);
-                        top_f = f;
+                        top_f = cur_f;
+                        ++off;
                     }
-                    if (masks.empty()) break;
+                    ++chunks_sent;
                     int32_t rev[8]{};
                     uint8_t cnt = static_cast<uint8_t>(masks.size());
                     for (uint8_t i = 0; i < cnt; ++i) rev[i] = masks[cnt - 1 - i];
                     send_input_bundle(turn, top_f, rev, cnt, 0);
-                    if (cnt < 8) break;
                 }
             } else if (h.pkt_type == PKT_MATCH_END) {
                 remote_match_ended_ = true;
@@ -1384,6 +1452,29 @@ private:
     std::map<uint16_t, PvpCustomCommit> remote_commits_;
     std::unordered_map<uint16_t, bool> acked_custom_turns_;
     std::deque<std::vector<uint8_t>> remote_states_;
+
+    static bool sockaddr_matches(const sockaddr_storage& a, socklen_t a_len,
+                                 const sockaddr_storage& b, socklen_t b_len) {
+        if (a.ss_family != b.ss_family) return false;
+        if (a.ss_family == AF_INET) {
+            if (a_len < static_cast<socklen_t>(sizeof(sockaddr_in)) ||
+                b_len < static_cast<socklen_t>(sizeof(sockaddr_in))) return false;
+            const auto& sa = reinterpret_cast<const sockaddr_in&>(a);
+            const auto& sb = reinterpret_cast<const sockaddr_in&>(b);
+            return sa.sin_port == sb.sin_port &&
+                   sa.sin_addr.s_addr == sb.sin_addr.s_addr;
+        }
+        if (a.ss_family == AF_INET6) {
+            if (a_len < static_cast<socklen_t>(sizeof(sockaddr_in6)) ||
+                b_len < static_cast<socklen_t>(sizeof(sockaddr_in6))) return false;
+            const auto& sa = reinterpret_cast<const sockaddr_in6&>(a);
+            const auto& sb = reinterpret_cast<const sockaddr_in6&>(b);
+            return sa.sin6_port == sb.sin6_port &&
+                   std::memcmp(&sa.sin6_addr, &sb.sin6_addr, sizeof(sa.sin6_addr)) == 0 &&
+                   sa.sin6_scope_id == sb.sin6_scope_id;
+        }
+        return false;
+    }
 
     void reset_match_buffers() {
         active_match_format_ = PVP_FORMAT_SINGLE;
