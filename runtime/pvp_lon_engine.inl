@@ -2997,6 +2997,19 @@ static void step_tf_stack_tick(DojaRuntime& rt, int32_t p0_mask, int32_t p1_mask
     }
 }
 
+static void clear_panel_yokoku(DojaRuntime& rt) {
+    if (sf_app_CpCanvas_panel > 0 && rt.array_length(sf_app_CpCanvas_panel) >= 3) {
+        for (int32_t y = 0; y < 3; ++y) {
+            Ref row = rt.iaload(sf_app_CpCanvas_panel, y);
+            if (row <= 0 || rt.array_length(row) < 6) continue;
+            for (int32_t x = 0; x < 6; ++x) {
+                Ref p = rt.iaload(row, x);
+                if (p > 0) rt.field_i32(p, kFld_BtPanel_yokoku) = 0;
+            }
+        }
+    }
+}
+
 static void step_pvp_combat_tick(DojaRuntime& rt, Ref cp, int32_t p0_mask, int32_t p1_mask) {
     (void)cp;
     PvpCombatCore& core = g_pvp_eng.core;
@@ -3011,6 +3024,11 @@ static void step_pvp_combat_tick(DojaRuntime& rt, Ref cp, int32_t p0_mask, int32
     if (sf_app_CpCanvas_rand > 0) {
         rt.get(sf_app_CpCanvas_rand).rng_seed = static_cast<uint64_t>(r);
     }
+
+    // BtPanel.Draw2() normally clears yokoku=0 each frame, but render_pvp_combat_frame() restores
+    // render_snap so 60fps interpolated frames don't lose the warning rect. Clear yokoku here at the
+    // start of each canonical 16Hz simulation tick so stale warning rectangles never persist.
+    clear_panel_yokoku(rt);
 
     sync_tf_canvas_statics_from_core(core);
     if (core.tf_state != TF_IDLE) {
@@ -6628,11 +6646,115 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
     });
     std::printf("[PvP SELF-TEST] Suite O complete (failures=%d)\n", failures);
 
+    // =========================================================================
+    // Suite P: Panel Attack Warning (BtPanel.yokoku) Per-Tick Clear & Render
+    // =========================================================================
+    run_safe("SuiteP", [&]() {
+        setup_basic_arena(500, 500, 0x100001u, 0);
+
+        auto capture_panel_rect = [&](int px, int py) {
+            std::vector<uint32_t> out;
+            const uint32_t* fb = rt.framebuffer();
+            int x0 = px * 40 + 2;
+            int x1 = px * 40 + 37;
+            int y0 = py * 24 + 107;
+            int y1 = py * 24 + 126;
+            out.reserve(static_cast<size_t>((x1 - x0 + 1) * (y1 - y0 + 1)));
+            for (int y = y0; y <= y1; ++y) {
+                for (int x = x0; x <= x1; ++x) {
+                    out.push_back(fb[y * 240 + x] & 0x00FFFFFFu);
+                }
+            }
+            return out;
+        };
+
+        auto render_combat = [&]() {
+            g_pvp_eng.backdrop_cache = PvpEngineState::BackdropCache{};
+            rt.set_suppress_av(false);
+            render_pvp_combat_frame(rt, cp);
+            rt.set_suppress_av(true);
+        };
+
+        auto all_yokoku_zero = [&]() -> bool {
+            for (int32_t y = 0; y < 3; ++y) {
+                Ref row = rt.iaload(sf_app_CpCanvas_panel, y);
+                if (row <= 0) continue;
+                for (int32_t x = 0; x < 6; ++x) {
+                    Ref p = rt.iaload(row, x);
+                    if (p > 0 && rt.field_i32(p, kFld_BtPanel_yokoku) != 0) return false;
+                }
+            }
+            return true;
+        };
+
+        // 1) Baseline panel (4, 1) without yokoku
+        render_combat();
+        const auto base_panel = capture_panel_rect(4, 1);
+
+        // 2) Set yokoku=1 on panel (4, 1) and verify it renders across 2 interpolated frames
+        //    without mutating canonical yokoku, then clears on the next simulation tick.
+        Ref target_p = rt.iaload(rt.iaload(sf_app_CpCanvas_panel, 1), 4);
+        rt.field_i32(target_p, kFld_BtPanel_yokoku) = 1;
+        render_combat();
+        const auto warn_f1 = capture_panel_rect(4, 1);
+        render_combat();
+        const auto warn_f2 = capture_panel_rect(4, 1);
+        if (warn_f1 == base_panel || warn_f1 != warn_f2 ||
+            rt.field_i32(target_p, kFld_BtPanel_yokoku) != 1) {
+            fail_msg("SuiteP-WarnRenderPersist",
+                     "yokoku warning rect did not render consistently across interpolated frames");
+        }
+
+        step_pvp_combat_tick(rt, cp, 0, 0);
+        if (!all_yokoku_zero()) {
+            fail_msg("SuiteP-NextTickClear",
+                     "BtPanel.yokoku remained non-zero after next combat tick");
+        }
+        render_combat();
+        const auto after_panel = capture_panel_rect(4, 1);
+        if (after_panel != base_panel) {
+            fail_msg("SuiteP-NoStaleYellowRect",
+                     "Yellow warning rect remained on panel after yokoku cleared");
+        }
+
+        // 3) Real chip lifecycle: trigger a non-dimming chip that sets BtPanel.yokoku=1,
+        //    confirm yokoku is observed while active, and clears to 0 after attack finishes.
+        int found_yokoku_chip = 0;
+        for (int cid = 1; cid <= 270 && found_yokoku_chip == 0; ++cid) {
+            int32_t st_tmp = 0, tc_tmp = 0;
+            if (is_dimming_tip_id(rt, cid, st_tmp, tc_tmp)) continue;
+            setup_basic_arena(500, 500, 0x100100u + cid, 0);
+            queue_tips_fifo(0, {static_cast<int16_t>(cid)});
+            bool saw_yokoku = false;
+            for (int t = 0; t < 48; ++t) {
+                step_pvp_combat_tick(rt, cp, (t == 0) ? (1 << 20) : 0, 0);
+                if (!all_yokoku_zero()) {
+                    saw_yokoku = true;
+                    break;
+                }
+            }
+            if (saw_yokoku) {
+                found_yokoku_chip = cid;
+                for (int t = 0; t < 180; ++t) {
+                    step_pvp_combat_tick(rt, cp, 0, 0);
+                }
+                if (!all_yokoku_zero()) {
+                    fail_msg("SuiteP-ChipYokokuStuck",
+                             "chip=" + std::to_string(cid) + " left BtPanel.yokoku non-zero after finishing");
+                }
+            }
+        }
+        if (found_yokoku_chip == 0) {
+            fail_msg("SuiteP-NoYokokuChipFound", "No chip in 1..270 triggered BtPanel.yokoku");
+        }
+    });
+    std::printf("[PvP SELF-TEST] Suite P complete (failures=%d)\n", failures);
+
     if (failures == 0) {
-        std::printf("[PvP SELF-TEST PASS] LoN Suites A-O passed (0 failures).\n");
+        std::printf("[PvP SELF-TEST PASS] LoN Suites A-P passed (0 failures).\n");
         return 0;
     }
-    std::fprintf(stderr, "[PvP SELF-TEST FAIL] LoN Suites A-O failed (failures=%d).\n", failures);
+    std::fprintf(stderr, "[PvP SELF-TEST FAIL] LoN Suites A-P failed (failures=%d).\n", failures);
     return 1;
 }
 
