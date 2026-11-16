@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 End-to-end LoN Online PvP verification suite (Stage 4):
-  Part 1:  Headless --pvp-self-test (Suites A-K) on lon_jp_recomp and lon_en_recomp
+  Part 1:  Headless --pvp-self-test (Suites A-L) on lon_jp_recomp and lon_en_recomp
   Part 2a: rmexe_server bidirectional PoN<->LoN isolation (HTTP 404 + CLI --pvp-join)
            and LoN UDP auth / v2 PvpFighterBuild & PvpCustomCommit wire boundary fuzzing
   Part 2b: Six live rmexe_server + UDP NetBattle matches:
@@ -246,7 +246,7 @@ def run_self_test(label: str, bin_path: str) -> None:
         assert "JavaException" not in combined and "[PvP Exception]" not in combined, (
             f"{label} threw JavaException\n{combined}"
         )
-        for suite in "ABCDEFGHIJK":
+        for suite in "ABCDEFGHIJKL":
             expected = f"Suite {suite} complete (failures=0)"
             assert expected in combined, f"{label} missing '{expected}'\n{combined}"
         print(f"  -> {label} self-test PASSED in {dt:.2f}s!", flush=True)

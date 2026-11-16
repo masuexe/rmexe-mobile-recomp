@@ -1964,6 +1964,25 @@ static void apply_trance_decision_for_side(DojaRuntime& rt, int s_idx, uint8_t a
     save_side(rt, s_idx);
 }
 
+constexpr int32_t kKeySelectBit = (1 << 20); // ACT_SELECT (决定/A): Use Chip when tip_no >= 0, Buster fallback when tip_no < 0
+constexpr int32_t kPureBusterBits = (1 << 11) | (1 << 10) | (1 << 9) | (1 << 7); // ACT_POUND (#), ACT_CANCEL (B), 9, 7
+constexpr int32_t kCustomTriggerBits = (1 << 21) | (1 << 22); // ACT_SOFT1 (L) or ACT_SOFT2 (R)
+
+static int32_t compute_round_initial_remote_buster_pred(int rem_idx) {
+    const SideContext& rem = g_pvp_eng.core.sides[rem_idx];
+    if (rem.key_cnt <= 0) {
+        return 0;
+    }
+    int32_t held_buster = rem.last_raw_input & kPureBusterBits;
+    if (held_buster != 0) {
+        return held_buster;
+    }
+    if (rem.tip_no < 0 && (rem.last_raw_input & kKeySelectBit) != 0) {
+        return kKeySelectBit;
+    }
+    return (1 << 10);
+}
+
 static void init_round_rollback_window(DojaRuntime& rt) {
     uint32_t cur_t = g_pvp_eng.core.combat_turn;
     const size_t hist_n = g_pvp_eng.local_inputs.size();
@@ -1977,7 +1996,9 @@ static void init_round_rollback_window(DojaRuntime& rt) {
     g_pvp_eng.last_hash_checked_turn = cur_t;
     g_pvp_eng.max_scheduled_turn = cur_t;
     g_pvp_eng.round_needs_initial_schedule = true;
-    g_pvp_eng.round_initial_remote_pred = 0;
+    g_pvp_eng.round_initial_remote_pred = compute_round_initial_remote_buster_pred(g_pvp_eng.opp_idx());
+    g_pvp_eng.core.sides[0].last_raw_input = 0;
+    g_pvp_eng.core.sides[1].last_raw_input = 0;
     g_pvp_eng.core.open_custom_req = false;
     g_pvp_eng.core.ended_by_judge = false;
     g_pvp_eng.core.combat_tick_in_round = 0;
@@ -1993,7 +2014,7 @@ static void init_round_rollback_window(DojaRuntime& rt) {
     for (uint32_t d = 0; d <= kInputDelayFrames + 8; ++d) {
         size_t slot = (cur_t + d) % hist_n;
         g_pvp_eng.local_inputs[slot] = 0;
-        g_pvp_eng.predicted_remote[slot] = 0;
+        g_pvp_eng.predicted_remote[slot] = g_pvp_eng.round_initial_remote_pred;
         g_pvp_eng.remote_confirmed[slot] = false;
     }
     g_pvp_eng.stall_frames = 0;
@@ -2404,7 +2425,7 @@ static bool try_push_counter_dim(DojaRuntime& rt, int s_idx, int interrupted_own
     PvpCombatCore& core = g_pvp_eng.core;
     SideContext& sc = core.sides[s_idx];
     int32_t key2 = mask & (~sc.last_raw_input);
-    bool b_press = require_edge ? ((key2 & (1 << 21)) != 0) : ((mask & (1 << 21)) != 0);
+    bool b_press = require_edge ? ((key2 & kKeySelectBit) != 0) : ((mask & kKeySelectBit) != 0);
     if (!b_press || sc.tip_no < 0 || sc.tip_no > 4 || sc.hp <= 0) return false;
     int32_t tid = sc.rock_tip_ids[sc.tip_no];
     int32_t stop_t = 0, t_cls = 0;
@@ -2433,7 +2454,7 @@ static bool try_trigger_dim_chip(DojaRuntime& rt, int s_idx, int32_t mask) {
     SideContext& sc = core.sides[s_idx];
     const SideContext& opp = core.sides[1 - s_idx];
     int32_t key2 = mask & (~sc.last_raw_input);
-    if ((key2 & (1 << 21)) == 0 || sc.tip_no < 0 || sc.tip_no > 4 ||
+    if ((key2 & kKeySelectBit) == 0 || sc.tip_no < 0 || sc.tip_no > 4 ||
         sc.waza_flg >= 0 || sc.joutai != 0 || sc.mahi_id >= 0) {
         return false;
     }
@@ -2489,35 +2510,66 @@ static void step_side_input_phase(DojaRuntime& rt, int s_idx, int32_t mask) {
     sc.last_raw_input = mask;
     sf_app_CpCanvas_key = mask;
     sf_app_CpCanvas_key2 = mask & (~prev_key);
+    bool chip_pressed = (sf_app_CpCanvas_key2 & kKeySelectBit) != 0;
 
-    // D-Pad grid movement (BattleMain: 1=Left, 2=Up, 3=Right, 4=Down)
-    if (sf_app_Rock_joutai == 0 && sf_app_Rock_move_flg == 0 && sf_app_Rock_mahi_id < 0) {
+    // 1. Non-dimming Chip Activation (Dimming chips are processed synchronously in Phase 0)
+    if (chip_pressed && sf_app_Rock_tip_no >= 0 && sf_app_Rock_tip_no <= 4 &&
+        sf_app_Rock_tmp_ata < 0 && sf_app_Rock_waza_flg < 0 &&
+        sf_app_Rock_joutai == 0 && sf_app_Rock_mahi_id < 0) {
+        Ref rock = sf_app_CpCanvas_rock;
+        Ref r_tip_arr = (rock > 0) ? rt.field_i32(rock, kFld_Rock_tip) : 0;
+        int32_t pre_act_tip_no = sf_app_Rock_tip_no;
+        Ref t_obj = safe_iaload(rt, r_tip_arr, pre_act_tip_no);
+        int32_t tid = (t_obj > 0) ? rt.field_i32(t_obj, kFld_Tip_tip_id) : 0;
+        if (tid > 0) {
+            int32_t z_elem = rt.field_i32(t_obj, kFld_Tip_zoku);
+            if (sf_app_Rock_non_cnt <= 0 && sf_app_Rock_non_cnt2 <= 0 && sf_app_Rock_move_flg == 0 &&
+                z_elem >= 1 && z_elem <= 4 && opp.wana == z_elem) {
+                trigger_opponent_elemental_trap(rt, s_idx, z_elem);
+            }
+            fn_app_Rock_Action___I__V(rt, rock, 0);
+            if (sf_app_Rock_tip_no < pre_act_tip_no) {
+                record_nondim_hud_popup(rt, sc, t_obj, safe_iaload(rt, sf_app_Rock_pow, 3));
+            }
+        }
+    }
+
+    // 2. D-Pad grid movement (BattleMain: 1=Left, 2=Up, 3=Right, 4=Down)
+    if (sf_app_Rock_joutai == 0 && sf_app_Rock_move_flg == 0 &&
+        sf_app_Rock_waza_flg < 0 && sf_app_Rock_mahi_id < 0) {
         if (sf_app_CpCanvas_key2 & (1 << 16))      sf_app_Rock_move_flg = 1;
         else if (sf_app_CpCanvas_key2 & (1 << 17)) sf_app_Rock_move_flg = 2;
         else if (sf_app_CpCanvas_key2 & (1 << 18)) sf_app_Rock_move_flg = 3;
         else if (sf_app_CpCanvas_key2 & (1 << 19)) sf_app_Rock_move_flg = 4;
     }
 
-    // Charge Shot & Buster handling
-    bool a_down = (mask & (1 << 20)) != 0;   // Enter / A button
-    bool b_pressed = (sf_app_CpCanvas_key2 & (1 << 21)) != 0;
+    // 3. Charge Shot & Buster handling (ACT_POUND/ACT_CANCEL/7/9 anytime, or ACT_SELECT when tip_no < 0)
+    bool buster_held =
+        ((mask & kPureBusterBits) != 0) ||
+        (((mask & kKeySelectBit) != 0) && sf_app_Rock_tip_no < 0);
 
     int32_t z_clamped = std::clamp<int32_t>(sf_app_Rock_zoku, 0, 6);
     int32_t charge_thresh = (42 - sf_app_CpCanvas_cha_lv * 5) + kChargeDelayAdd[z_clamped];
 
-    if (a_down) {
+    if (sf_app_CpCanvas_key_cnt < 0) {
         sf_app_CpCanvas_key_cnt++;
-        if (sf_app_CpCanvas_rock > 0) {
-            if (sf_app_CpCanvas_key_cnt == 4) {
-                fn_app_Rock_Chage___I__I(rt, sf_app_CpCanvas_rock, 0);
-            } else if (sf_app_CpCanvas_key_cnt == charge_thresh) {
-                fn_app_Rock_Chage___I__I(rt, sf_app_CpCanvas_rock, 1);
+        sc.buster_charge_glow = false;
+    } else if (buster_held) {
+        if (sf_app_Rock_non_bas == 0 && sf_app_Rock_tmp_ata < 0 &&
+            sf_app_Rock_non_cnt2 == 0 && sf_app_Rock_joutai == 0) {
+            sf_app_CpCanvas_key_cnt++;
+            if (sf_app_CpCanvas_rock > 0) {
+                if (sf_app_CpCanvas_key_cnt == 4) {
+                    fn_app_Rock_Chage___I__I(rt, sf_app_CpCanvas_rock, 0);
+                } else if (sf_app_CpCanvas_key_cnt == charge_thresh) {
+                    fn_app_Rock_Chage___I__I(rt, sf_app_CpCanvas_rock, 1);
+                }
             }
         }
         sc.buster_charge_glow = (sf_app_CpCanvas_key_cnt >= charge_thresh);
     } else {
         if (sf_app_CpCanvas_key_cnt > 0 &&
-            !(b_pressed && sf_app_Rock_tip_no >= 0) &&
+            sf_app_Rock_tmp_ata < 0 && sf_app_Rock_non_cnt2 == 0 &&
             sf_app_Rock_joutai == 0 && sf_app_Rock_mahi_id < 0 && sf_app_Rock_non_cnt == 0) {
             // Release Normal Buster (tid=0) or Charge Shot via rock.tip[5] & Rock.Action(0)
             bool is_charged = (sf_app_CpCanvas_key_cnt >= charge_thresh);
@@ -2547,32 +2599,13 @@ static void step_side_input_phase(DojaRuntime& rt, int s_idx, int32_t mask) {
             safe_iastore(rt, sf_app_Rock_pow, 0, saved_pow0);
             safe_iastore(rt, sf_app_Rock_pow, 3, saved_pow3);
             sf_app_CpCanvas_key_cnt = -4;
-            sf_app_Rock_non_bas = 0;
             sc.opp_buster_visual_ticks = is_charged ? 6 : 4;
         } else if (sf_app_CpCanvas_key_cnt > 0) {
             sf_app_CpCanvas_key_cnt = 0;
-        } else if (sf_app_CpCanvas_key_cnt < 0) {
-            sf_app_CpCanvas_key_cnt++;
         }
         sc.buster_charge_glow = false;
     }
-
-    // Non-dimming Chip Activation (Dimming chips are processed synchronously in Phase 0)
-    if (b_pressed && sf_app_Rock_tip_no >= 0 && sf_app_Rock_tip_no <= 4 &&
-        sf_app_Rock_waza_flg < 0 && sf_app_Rock_joutai == 0 && sf_app_Rock_mahi_id < 0) {
-        Ref rock = sf_app_CpCanvas_rock;
-        Ref r_tip_arr = (rock > 0) ? rt.field_i32(rock, kFld_Rock_tip) : 0;
-        Ref t_obj = safe_iaload(rt, r_tip_arr, sf_app_Rock_tip_no);
-        int32_t tid = (t_obj > 0) ? rt.field_i32(t_obj, kFld_Tip_tip_id) : 0;
-        if (tid > 0) {
-            int32_t z_elem = rt.field_i32(t_obj, kFld_Tip_zoku);
-            if (z_elem >= 1 && z_elem <= 4 && opp.wana == z_elem) {
-                trigger_opponent_elemental_trap(rt, s_idx, z_elem);
-            }
-            record_nondim_hud_popup(rt, sc, t_obj, safe_iaload(rt, sf_app_Rock_pow, 3));
-            fn_app_Rock_Action___I__V(rt, rock, 1);
-        }
-    }
+    sf_app_Rock_non_bas = 0;
 
     update_oki_owner_from_snapshot(rt, s_idx, prev_oki_on);
     save_side(rt, s_idx);
@@ -2896,8 +2929,12 @@ static void step_pvp_combat_tick(DojaRuntime& rt, Ref cp, int32_t p0_mask, int32
     } else {
 
         // Check Custom Screen open request when gauge full on rounds 1..14
+        int32_t p0_edge = p0_mask & (~core.sides[0].last_raw_input);
+        int32_t p1_edge = p1_mask & (~core.sides[1].last_raw_input);
         if (core.custom_round < kMaxTurns && core.cus_gage >= 128 &&
-            (((p0_mask | p1_mask) & ((1 << 22) | (1 << 23))) != 0)) {
+            (((p0_edge | p1_edge) & kCustomTriggerBits) != 0)) {
+            core.sides[0].last_raw_input = p0_mask;
+            core.sides[1].last_raw_input = p1_mask;
             core.open_custom_req = true;
         } else {
             // Phase-split simultaneous frame resolution so idle vs active symmetry & Double KOs
@@ -3581,10 +3618,11 @@ static int32_t compute_auto_bot_combat_input(DojaRuntime& rt) {
     if (me.pos_y < opp.pos_y && (t % 8 == 0)) m |= (1 << 19);      // Down
     else if (me.pos_y > opp.pos_y && (t % 8 == 0)) m |= (1 << 17); // Up
     else if (me.pos_x < 2 && (t % 16 == 4)) m |= (1 << 18);        // Right toward front col
-    if (me.tip_no >= 0 && (t % 12 == 5)) m |= (1 << 21);           // Chip (B) on rest tick
-    else if ((t % 6) < 3) m |= (1 << 20);                          // Buster/Charge (A) hold/release
-    if (g_pvp_eng.core.custom_round < kMaxTurns && g_pvp_eng.core.cus_gage >= 128 && (t % 4 == 0)) {
-        m |= (1 << 22); // Custom Enter
+    if (me.tip_no >= 0 && (t % 12 == 5)) m |= kKeySelectBit;        // Chip (ACT_SELECT) on rest tick
+    else if ((t % 6) < 3) m |= (1 << 10);                          // Buster/Charge (ACT_CANCEL) hold/release
+    if (g_pvp_eng.core.custom_round < kMaxTurns && g_pvp_eng.core.cus_gage >= 128 &&
+        me.tip_no < 0 && (t & 1u) == 0u) {
+        m |= (g_pvp_eng.local_idx == 0) ? (1 << 21) : (1 << 22);   // Custom Enter (ACT_SOFT1 / ACT_SOFT2)
     }
     return m;
 }
@@ -3807,11 +3845,11 @@ static void start_next_bo3_game(DojaRuntime& rt, Ref cp) {
 }
 
 // ============================================================================
-// Stage 4 Headless --pvp-self-test Suites A-I
+// Stage 4 Headless --pvp-self-test Suites A-L
 // ============================================================================
 static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
     SelfTestFlagGuard test_guard(rt);
-    std::printf("[PvP SELF-TEST] LoN Suites A-K starting...\n");
+    std::printf("[PvP SELF-TEST] LoN Suites A-L starting...\n");
 
     FullHeapSnapshot base_heap;
     std::vector<int64_t> base_statics;
@@ -4137,8 +4175,8 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                     bool rendered_mid = false;
                     res[actor].render_invar = true;
                     for (int t = 0; t < 44 || (g_pvp_eng.core.tf_state != TF_IDLE && t < 160); ++t) {
-                        int32_t p0m = (actor == 0 && t == 0) ? (1 << 21) : 0;
-                        int32_t p1m = (actor == 1 && t == 0) ? (1 << 21) : 0;
+                        int32_t p0m = (actor == 0 && t == 0) ? (1 << 20) : 0;
+                        int32_t p1m = (actor == 1 && t == 0) ? (1 << 20) : 0;
                         step_pvp_combat_tick(rt, cp, p0m, p1m);
                         if (t == 6 || t == 43) {
                             uint16_t pre_h = compute_combat_state_hash(rt);
@@ -4250,12 +4288,12 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                 // Run mirror check on out_pa
                 setup_basic_arena(5000, 5000, 0xB3100u + pid, 0);
                 queue_tips_fifo(0, {static_cast<int16_t>(out_pa)});
-                for (int t = 0; t < 48; ++t) step_pvp_combat_tick(rt, cp, (t == 0) ? (1 << 21) : 0, 0);
+                for (int t = 0; t < 48; ++t) step_pvp_combat_tick(rt, cp, (t == 0) ? (1 << 20) : 0, 0);
                 int32_t a1_hp = g_pvp_eng.core.sides[1].hp;
 
                 setup_basic_arena(5000, 5000, 0xB3100u + pid, 0);
                 queue_tips_fifo(1, {static_cast<int16_t>(out_pa)});
-                for (int t = 0; t < 48; ++t) step_pvp_combat_tick(rt, cp, 0, (t == 0) ? (1 << 21) : 0);
+                for (int t = 0; t < 48; ++t) step_pvp_combat_tick(rt, cp, 0, (t == 0) ? (1 << 20) : 0);
                 int32_t b0_hp = g_pvp_eng.core.sides[0].hp;
                 if (a1_hp != b0_hp) {
                     fail_msg("SuiteB-PAMirror", "pid=" + std::to_string(pid) + " out_pa=" +
@@ -4312,7 +4350,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                 g_pvp_eng.core.sides[1].tmp_x = px;
                 queue_tips_fifo(0, {static_cast<int16_t>(boosted_sp_tid)});
                 for (int t = 0; t < 96; ++t) {
-                    step_pvp_combat_tick(rt, cp, (t == 0) ? (1 << 21) : 0, 0);
+                    step_pvp_combat_tick(rt, cp, (t == 0) ? (1 << 20) : 0, 0);
                 }
                 int32_t dmg_p0 = 3000 - g_pvp_eng.core.sides[1].hp;
 
@@ -4322,7 +4360,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                 g_pvp_eng.core.sides[1].pos_x = px;
                 g_pvp_eng.core.sides[1].tmp_x = px;
                 queue_tips_fifo(1, {static_cast<int16_t>(boosted_sp_tid)});
-                for (int t = 0; t < 96; ++t) step_pvp_combat_tick(rt, cp, 0, (t == 0) ? (1 << 21) : 0);
+                for (int t = 0; t < 96; ++t) step_pvp_combat_tick(rt, cp, 0, (t == 0) ? (1 << 20) : 0);
                 int32_t dmg_p1 = 3000 - g_pvp_eng.core.sides[0].hp;
                 if (dmg_p0 > best_p0) {
                     best_p0 = dmg_p0;
@@ -4340,8 +4378,8 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
         constexpr int kRbFrames = 24;
         std::array<int32_t, kRbFrames> p0_in{}, p1_in{};
         for (int t = 0; t < kRbFrames; ++t) {
-            p0_in[t] = (t == 0) ? (1 << 21) : ((t == 4) ? (1 << 18) : ((t >= 8 && t < 18) ? (1 << 20) : 0));
-            p1_in[t] = (t == 2) ? (1 << 21) : ((t == 5) ? (1 << 17) : ((t >= 10 && t < 20) ? (1 << 20) : 0));
+            p0_in[t] = (t == 0) ? (1 << 20) : ((t == 4) ? (1 << 18) : ((t >= 8 && t < 18) ? (1 << 10) : 0));
+            p1_in[t] = (t == 2) ? (1 << 20) : ((t == 5) ? (1 << 17) : ((t >= 10 && t < 20) ? (1 << 11) : 0));
         }
         setup_test_arena(fast_b, slow_b, 0xC0002u, 0);
         if (tid_cannon > 0) {
@@ -4587,7 +4625,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
 
             queue_tips_fifo(0, {static_cast<int16_t>(dim_tid)});
             queue_tips_fifo(1, {static_cast<int16_t>(dim_tid)});
-            step_pvp_combat_tick(rt, cp, (1 << 21), 0);
+            step_pvp_combat_tick(rt, cp, (1 << 20), 0);
             bool saw_root = (g_pvp_eng.core.tf_state == TF_ROOT_INTRO && g_pvp_eng.core.tf_depth == 1);
 
             // Render inside Time-Freeze and confirm backdrop darkened
@@ -4604,7 +4642,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
             }
 
             // Counter-Cut-In by P1 during TF_ROOT_INTRO banner window -> tf_depth == 2
-            step_pvp_combat_tick(rt, cp, 0, (1 << 21));
+            step_pvp_combat_tick(rt, cp, 0, (1 << 20));
             bool saw_counter = (g_pvp_eng.core.tf_depth == 2);
             bool saw_resume = false;
             bool saw_idle = false;
@@ -4668,8 +4706,8 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
         bool injected_mahi = false;
         bool saw_p0_paralyzed = false;
         for (int t = 0; t < 40; ++t) {
-            int32_t p0_m = (t == 0) ? (1 << 21) : 0;
-            int32_t p1_m = (t == 3) ? (1 << 21) : 0;
+            int32_t p0_m = (t == 0) ? (1 << 20) : 0;
+            int32_t p1_m = (t == 3) ? (1 << 20) : 0;
             step_pvp_combat_tick(rt, cp, p0_m, p1_m);
             if (!injected_mahi && g_pvp_eng.core.sides[1].han == 1 && g_pvp_eng.core.sides[1].han_id >= 0) {
                 int32_t hid = g_pvp_eng.core.sides[1].han_id;
@@ -4693,7 +4731,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
         g_pvp_eng.core.sides[1].wana_pow[0] = 100;
         g_pvp_eng.core.sides[1].wana_pow[2] = 100;
         if (tid_cannon > 0) queue_tips_fifo(0, {static_cast<int16_t>(tid_cannon)});
-        for (int t = 0; t < 40; ++t) step_pvp_combat_tick(rt, cp, (t == 0) ? (1 << 21) : 0, 0);
+        for (int t = 0; t < 40; ++t) step_pvp_combat_tick(rt, cp, (t == 0) ? (1 << 20) : 0, 0);
         if (g_pvp_eng.core.sides[1].hp != 2000 || g_pvp_eng.core.sides[0].hp >= 2000 ||
             g_pvp_eng.core.sides[1].wana != 0) {
             fail_msg("SuiteE-AntiDmgWana5", "p0_hp=" + std::to_string(g_pvp_eng.core.sides[0].hp) +
@@ -4716,7 +4754,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
             if (syu == 4 || syu == 5) continue;
             setup_basic_arena(2000, 2000, 0xF0001u, 0);
             queue_tips_fifo(0, {static_cast<int16_t>(tid)});
-            step_pvp_combat_tick(rt, cp, (1 << 21), 0);
+            step_pvp_combat_tick(rt, cp, (1 << 20), 0);
             for (int t = 0; t < 48 && found_oki_tid < 0; ++t) {
                 step_pvp_combat_tick(rt, cp, 0, 0);
                 for (int s = 0; s < kMaxOkimono; ++s) {
@@ -4737,7 +4775,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
             queue_tips_fifo(0, {static_cast<int16_t>(found_oki_tid)});
             queue_tips_fifo(1, {static_cast<int16_t>(found_oki_tid)});
             for (int t = 0; t < 96 && (t < 50 || g_pvp_eng.core.tf_state != TF_IDLE); ++t) {
-                step_pvp_combat_tick(rt, cp, (t == 0) ? (1 << 21) : 0, (t == 0) ? (1 << 21) : 0);
+                step_pvp_combat_tick(rt, cp, (t == 0) ? (1 << 20) : 0, (t == 0) ? (1 << 20) : 0);
             }
             int p0_slots = 0, p1_slots = 0;
             for (int i = 0; i < kMaxOkimono; ++i) {
@@ -5122,7 +5160,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
 
             for (int k = 0; k < 14; ++k) {
                 // Move Rock up/down and fire projectile to create visible inter-frame delta
-                int32_t m_loc = (k == 0) ? (1 << 21) : ((k % 4 < 2) ? (1 << 17) : (1 << 19));
+                int32_t m_loc = (k == 0) ? (1 << 20) : ((k % 4 < 2) ? (1 << 17) : (1 << 19));
                 int32_t p0m = (loc == 0) ? m_loc : 0;
                 int32_t p1m = (loc == 1) ? m_loc : 0;
                 step_pvp_combat_tick(rt, cp, p0m, p1m);
@@ -5513,8 +5551,8 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                 bool exited_tf = false;
 
                 for (int t = 0; t < 72; ++t) {
-                    int32_t p0m = (actor == 0 && t == 0) ? (1 << 21) : 0;
-                    int32_t p1m = (actor == 1 && t == 0) ? (1 << 21) : 0;
+                    int32_t p0m = (actor == 0 && t == 0) ? (1 << 20) : 0;
+                    int32_t p1m = (actor == 1 && t == 0) ? (1 << 20) : 0;
                     step_pvp_combat_tick(rt, cp, p0m, p1m);
 
                     if (g_pvp_eng.core.tf_state == TF_ROOT_INTRO && g_pvp_eng.core.tf_stack[0].timer >= 16) {
@@ -5700,8 +5738,8 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
             bool resumed_after_tf = false;
 
             for (int t = 0; t < 72; ++t) {
-                int32_t p0m = (t == 0) ? (1 << 21) : 0;
-                int32_t p1m = (t == 0 || t == 2) ? (1 << 21) : 0;
+                int32_t p0m = (t == 0) ? (1 << 20) : 0;
+                int32_t p1m = (t == 0 || t == 2) ? (1 << 20) : 0;
                 step_pvp_combat_tick(rt, cp, p0m, p1m);
 
                 auto find_nondim_slot = [&](int s) -> int {
@@ -5763,8 +5801,8 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
         {
             constexpr int kCtrFrames = 112;
             std::array<int32_t, kCtrFrames> p0_in{}, p1_in{};
-            p0_in[0] = (1 << 21);
-            p1_in[2] = (1 << 21);
+            p0_in[0] = (1 << 20);
+            p1_in[2] = (1 << 20);
 
             setup_basic_arena(1000, 1000, 0xCA300u, 0);
             queue_tips_fifo(0, {static_cast<int16_t>(tid_area_grab)});
@@ -5835,11 +5873,149 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
     });
     std::printf("[PvP SELF-TEST] Suite K complete (failures=%d)\n", failures);
 
+    // =========================================================================
+    // Suite L: PoN <-> LoN Keybinding Parity (ACT_SELECT / ACT_CANCEL / ACT_POUND / SOFT1 / SOFT2)
+    // =========================================================================
+    run_safe("SuiteL", [&]() {
+        if (tid_cannon <= 0) {
+            fail_msg("SuiteL-NoCannon", "tid_cannon not discovered");
+            return;
+        }
+        Ref cannon_obj = safe_iaload(rt, sf_app_CpCanvas_tip, tid_cannon);
+        int32_t cannon_pow = (cannon_obj > 0) ? rt.field_i32(cannon_obj, kFld_Tip_pow) : 0;
+
+        auto step_hold_and_release = [&](int actor, int32_t bit_mask, int hold_ticks, int settle_ticks, bool& out_saw_buster_vis) {
+            out_saw_buster_vis = false;
+            for (int t = 0; t < hold_ticks + settle_ticks; ++t) {
+                int32_t m = (t < hold_ticks) ? bit_mask : 0;
+                step_pvp_combat_tick(rt, cp, (actor == 0) ? m : 0, (actor == 1) ? m : 0);
+                if (g_pvp_eng.core.sides[actor].opp_buster_visual_ticks > 0) {
+                    out_saw_buster_vis = true;
+                }
+            }
+        };
+
+        // L1: ACT_SELECT (1 << 20) fires queued chip and non_bas prevents accidental Buster pea-shot on release
+        {
+            setup_basic_arena(1000, 1000, 0xCA401u, 0);
+            g_pvp_eng.core.sides[0].pos_y = 1; g_pvp_eng.core.sides[0].tmp_y = 1;
+            g_pvp_eng.core.sides[1].pos_y = 1; g_pvp_eng.core.sides[1].tmp_y = 1;
+            queue_tips_fifo(0, {static_cast<int16_t>(tid_cannon)});
+            bool saw_buster_vis = false;
+            step_hold_and_release(0, (1 << 20), 1, 29, saw_buster_vis);
+            int32_t dmg = 1000 - g_pvp_eng.core.sides[1].hp;
+            if (g_pvp_eng.core.sides[0].tip_no != -1 || saw_buster_vis || dmg != cannon_pow) {
+                fail_msg("SuiteL1-SelectChip",
+                         "tip_no=" + std::to_string(g_pvp_eng.core.sides[0].tip_no) +
+                         " buster_vis=" + std::to_string(saw_buster_vis) +
+                         " dmg=" + std::to_string(dmg) + " expected=" + std::to_string(cannon_pow));
+            }
+        }
+
+        // L2: ACT_SELECT (1 << 20) fires Normal Buster & Charge Shot when tip_no < 0
+        {
+            setup_basic_arena(1000, 1000, 0xCA402u, 0);
+            g_pvp_eng.core.sides[0].pos_y = 1; g_pvp_eng.core.sides[0].tmp_y = 1;
+            g_pvp_eng.core.sides[1].pos_y = 1; g_pvp_eng.core.sides[1].tmp_y = 1;
+            bool saw_tap_vis = false;
+            step_hold_and_release(0, (1 << 20), 1, 24, saw_tap_vis);
+            int32_t tap_dmg = 1000 - g_pvp_eng.core.sides[1].hp;
+
+            setup_basic_arena(1000, 1000, 0xCA402u, 0);
+            g_pvp_eng.core.sides[0].pos_y = 1; g_pvp_eng.core.sides[0].tmp_y = 1;
+            g_pvp_eng.core.sides[1].pos_y = 1; g_pvp_eng.core.sides[1].tmp_y = 1;
+            const int chg_ticks = (42 - sf_app_CpCanvas_cha_lv * 5) + kChargeDelayAdd[0] + 4;
+            bool saw_chg_vis = false;
+            step_hold_and_release(0, (1 << 20), chg_ticks, 24, saw_chg_vis);
+            int32_t chg_dmg = 1000 - g_pvp_eng.core.sides[1].hp;
+            if (!saw_tap_vis || tap_dmg < 1 || tap_dmg > 5 || !saw_chg_vis || chg_dmg < 10) {
+                fail_msg("SuiteL2-SelectEmptyBuster",
+                         "tap_vis=" + std::to_string(saw_tap_vis) + " tap_dmg=" + std::to_string(tap_dmg) +
+                         " chg_vis=" + std::to_string(saw_chg_vis) + " chg_dmg=" + std::to_string(chg_dmg));
+            }
+        }
+
+        // L3: ACT_CANCEL (1 << 10) & ACT_POUND (1 << 11) fire Buster & Charge Shot WITHOUT consuming queued chips
+        {
+            setup_basic_arena(1000, 1000, 0xCA403u, 0);
+            g_pvp_eng.core.sides[0].pos_y = 1; g_pvp_eng.core.sides[0].tmp_y = 1;
+            g_pvp_eng.core.sides[1].pos_y = 1; g_pvp_eng.core.sides[1].tmp_y = 1;
+            queue_tips_fifo(0, {static_cast<int16_t>(tid_cannon)});
+            bool saw_cancel_tap = false;
+            step_hold_and_release(0, (1 << 10), 1, 24, saw_cancel_tap);
+            int32_t cancel_tap_dmg = 1000 - g_pvp_eng.core.sides[1].hp;
+            int32_t p0_tip_after_tap = g_pvp_eng.core.sides[0].tip_no;
+
+            setup_basic_arena(1000, 1000, 0xCA403u, 0);
+            g_pvp_eng.core.sides[0].pos_y = 1; g_pvp_eng.core.sides[0].tmp_y = 1;
+            g_pvp_eng.core.sides[1].pos_y = 1; g_pvp_eng.core.sides[1].tmp_y = 1;
+            queue_tips_fifo(0, {static_cast<int16_t>(tid_cannon)});
+            queue_tips_fifo(1, {static_cast<int16_t>(tid_cannon)});
+            const int chg_ticks = (42 - sf_app_CpCanvas_cha_lv * 5) + kChargeDelayAdd[0] + 4;
+            bool saw_cancel_chg = false;
+            step_hold_and_release(0, (1 << 10), chg_ticks, 24, saw_cancel_chg);
+            int32_t cancel_chg_dmg = 1000 - g_pvp_eng.core.sides[1].hp;
+            int32_t p0_tip_after_chg = g_pvp_eng.core.sides[0].tip_no;
+
+            bool saw_pound_chg = false;
+            step_hold_and_release(1, (1 << 11), chg_ticks, 24, saw_pound_chg);
+            int32_t pound_chg_dmg = 1000 - g_pvp_eng.core.sides[0].hp;
+            int32_t p1_tip_after_chg = g_pvp_eng.core.sides[1].tip_no;
+
+            if (!saw_cancel_tap || cancel_tap_dmg < 1 || cancel_tap_dmg > 5 || p0_tip_after_tap != 0 ||
+                !saw_cancel_chg || cancel_chg_dmg < 10 || p0_tip_after_chg != 0 ||
+                !saw_pound_chg || pound_chg_dmg < 10 || p1_tip_after_chg != 0) {
+                fail_msg("SuiteL3-CancelPoundBuster",
+                         "ctap=" + std::to_string(cancel_tap_dmg) + " tip0a=" + std::to_string(p0_tip_after_tap) +
+                         " cchg=" + std::to_string(cancel_chg_dmg) + " tip0b=" + std::to_string(p0_tip_after_chg) +
+                         " pchg=" + std::to_string(pound_chg_dmg) + " tip1=" + std::to_string(p1_tip_after_chg));
+            }
+        }
+
+        // L4: ACT_SOFT1 (1 << 21) & ACT_SOFT2 (1 << 22) open Custom Screen on rising edge without consuming queued chips
+        {
+            setup_basic_arena(1000, 1000, 0xCA404u, 0);
+            queue_tips_fifo(0, {static_cast<int16_t>(tid_cannon)});
+            queue_tips_fifo(1, {static_cast<int16_t>(tid_cannon)});
+            g_pvp_eng.core.custom_round = 1;
+            g_pvp_eng.core.cus_gage = 64;
+            sf_app_CpCanvas_cus_gage = 64;
+            step_pvp_combat_tick(rt, cp, (1 << 21), 0);
+            bool pre_full_no_open = (!g_pvp_eng.core.open_custom_req && g_pvp_eng.core.sides[0].tip_no == 0);
+
+            g_pvp_eng.core.cus_gage = 128;
+            sf_app_CpCanvas_cus_gage = 128;
+            step_pvp_combat_tick(rt, cp, (1 << 21), 0); // Still held across threshold -> must require fresh rising edge
+            bool held_no_open = (!g_pvp_eng.core.open_custom_req && g_pvp_eng.core.sides[0].tip_no == 0);
+
+            step_pvp_combat_tick(rt, cp, 0, 0); // Release
+            step_pvp_combat_tick(rt, cp, (1 << 21), 0); // Fresh rising edge -> open Custom!
+            bool soft1_opened = (g_pvp_eng.core.open_custom_req && g_pvp_eng.core.sides[0].tip_no == 0);
+
+            setup_basic_arena(1000, 1000, 0xCA405u, 0);
+            queue_tips_fifo(1, {static_cast<int16_t>(tid_cannon)});
+            g_pvp_eng.core.custom_round = 1;
+            g_pvp_eng.core.cus_gage = 128;
+            sf_app_CpCanvas_cus_gage = 128;
+            step_pvp_combat_tick(rt, cp, 0, (1 << 22));
+            bool soft2_opened = (g_pvp_eng.core.open_custom_req && g_pvp_eng.core.sides[1].tip_no == 0);
+
+            if (!pre_full_no_open || !held_no_open || !soft1_opened || !soft2_opened) {
+                fail_msg("SuiteL4-SoftkeyCustomOpen",
+                         "pre=" + std::to_string(pre_full_no_open) +
+                         " held=" + std::to_string(held_no_open) +
+                         " soft1=" + std::to_string(soft1_opened) +
+                         " soft2=" + std::to_string(soft2_opened));
+            }
+        }
+    });
+    std::printf("[PvP SELF-TEST] Suite L complete (failures=%d)\n", failures);
+
     if (failures == 0) {
-        std::printf("[PvP SELF-TEST PASS] LoN Suites A-K passed (0 failures).\n");
+        std::printf("[PvP SELF-TEST PASS] LoN Suites A-L passed (0 failures).\n");
         return 0;
     }
-    std::fprintf(stderr, "[PvP SELF-TEST FAIL] LoN Suites A-K failed (failures=%d).\n", failures);
+    std::fprintf(stderr, "[PvP SELF-TEST FAIL] LoN Suites A-L failed (failures=%d).\n", failures);
     return 1;
 }
 
