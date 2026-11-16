@@ -133,8 +133,8 @@ def pack_forged_rmxp(
     return hdr + payload
 
 
-def run_server_security_and_guard_tests(server_addr: str, lon_bin: Path, tmp_dir: Path) -> None:
-    print("=== [1.5] Testing rmexe_server /pvp/join guards & LoN CLI guard ===", flush=True)
+def run_server_security_and_guard_tests(server_addr: str, lon_bin: Path, pon_bin: Path, tmp_dir: Path) -> None:
+    print("=== [1.5] Testing rmexe_server /pvp/join guards & LoN/PoN room isolation ===", flush=True)
 
     # 1. Explicit same-UID self-join -> HTTP 409 same_uid
     st, d_create_a = http_post_json(
@@ -196,16 +196,16 @@ def run_server_security_and_guard_tests(server_addr: str, lon_bin: Path, tmp_dir
         raise RuntimeError(f"Expected 0 lingering rooms after /pvp/join guard tests, found: {rem_rooms}")
     print("  -> /pvp/join guards PASSED (409 same_uid, room=0 skip, 404 cross-game rejection)", flush=True)
 
-    # 5. LoN CLI guard check: --pvp-create must create 0 rooms for LoN
+    # 5. LoN room creation & PoN cross-game /pvp/join HTTP 404 isolation check
     lon_dir = tmp_dir / "lon_guard"
+    pon_cross_dir = tmp_dir / "pon_cross_guard"
     lon_dir.mkdir(parents=True, exist_ok=True)
-    lon_proc = subprocess.run(
+    pon_cross_dir.mkdir(parents=True, exist_ok=True)
+    lon_proc = subprocess.Popen(
         [
             str(lon_bin),
             "--headless",
             "--fast-forward",
-            "--max-frames",
-            "20",
             "--sav",
             str(lon_dir / "lon.sav"),
             "--config",
@@ -216,21 +216,80 @@ def run_server_security_and_guard_tests(server_addr: str, lon_bin: Path, tmp_dir
         ],
         cwd=str(ROOT_DIR),
         env=headless_env(),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=30,
     )
-    if lon_proc.returncode != 0:
-        raise RuntimeError(
-            f"LoN CLI guard check exited rc={lon_proc.returncode}:\nSTDOUT:\n{lon_proc.stdout}\nSTDERR:\n{lon_proc.stderr}"
+    try:
+        lon_rid = 0
+        for _ in range(100):
+            if lon_proc.poll() is not None:
+                out, err = lon_proc.communicate()
+                raise RuntimeError(
+                    f"lon_jp_recomp --pvp-create exited unexpectedly rc={lon_proc.returncode}:\nSTDOUT:\n{out}\nSTDERR:\n{err}"
+                )
+            lon_rooms = http_get_json(f"http://{server_addr}/pvp/rooms?game=lon").get("rooms", [])
+            if lon_rooms:
+                lon_rid = int(lon_rooms[0]["room_id"])
+                break
+            time.sleep(0.05)
+        if lon_rid <= 0:
+            raise RuntimeError("Timed out waiting for lon_jp_recomp --pvp-create room in /pvp/rooms?game=lon")
+
+        pon_rooms = http_get_json(f"http://{server_addr}/pvp/rooms?game=pon").get("rooms", [])
+        if any(int(r.get("room_id", 0)) == lon_rid for r in pon_rooms):
+            raise RuntimeError(f"Expected PoN /pvp/rooms to exclude LoN room #{lon_rid}, found: {pon_rooms}")
+
+        # Direct HTTP /pvp/join with game=pon onto the LoN room must be rejected with HTTP 404
+        st, d_cross_pon = http_post_json(
+            f"http://{server_addr}/pvp/join?uid=pon_cross_uid&name=PonGuest&game=pon&room={lon_rid}"
         )
-    lon_rooms = http_get_json(f"http://{server_addr}/pvp/rooms?game=lon").get("rooms", [])
-    pon_rooms = http_get_json(f"http://{server_addr}/pvp/rooms?game=pon").get("rooms", [])
-    if lon_rooms or pon_rooms:
-        raise RuntimeError(
-            f"Expected 0 rooms created by lon_jp_recomp --pvp-create, found lon={lon_rooms}, pon={pon_rooms}"
+        if st != 404 or d_cross_pon.get("ok") is not False or d_cross_pon.get("error") != "no_open_room":
+            raise RuntimeError(
+                f"Expected HTTP 404 no_open_room for PoN->LoN join on #{lon_rid}, got status={st} body={d_cross_pon}"
+            )
+
+        # Launching pon_jp_recomp --pvp-join <lon_rid> must be rejected and leave the LoN room open
+        pon_proc = subprocess.run(
+            [
+                str(pon_bin),
+                "--headless",
+                "--fast-forward",
+                "--max-frames",
+                "20",
+                "--sav",
+                str(pon_cross_dir / "pon.sav"),
+                "--config",
+                str(pon_cross_dir / "pon.cfg"),
+                "--server",
+                server_addr,
+                "--pvp-join",
+                str(lon_rid),
+            ],
+            cwd=str(ROOT_DIR),
+            env=headless_env(),
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
-    print("  -> LoN CLI guard check PASSED (0 lon/pon rooms created)\n", flush=True)
+        if pon_proc.returncode != 0:
+            raise RuntimeError(
+                f"pon_jp_recomp --pvp-join cross-game check exited rc={pon_proc.returncode}:\nSTDOUT:\n{pon_proc.stdout}\nSTDERR:\n{pon_proc.stderr}"
+            )
+        if "已加入" in pon_proc.stdout or "已加入" in pon_proc.stderr:
+            raise RuntimeError(f"pon_jp_recomp unexpectedly joined LoN room #{lon_rid}")
+
+        lon_rooms_after = http_get_json(f"http://{server_addr}/pvp/rooms?game=lon").get("rooms", [])
+        if not any(int(r.get("room_id", 0)) == lon_rid for r in lon_rooms_after):
+            raise RuntimeError(f"Expected LoN room #{lon_rid} to stay open after rejected PoN join, found: {lon_rooms_after}")
+    finally:
+        lon_proc.terminate()
+        try:
+            lon_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            lon_proc.kill()
+            lon_proc.wait(timeout=5)
+    print(f"  -> LoN --pvp-create + PoN /pvp/join HTTP 404 isolation PASSED (room #{lon_rid})\n", flush=True)
 
 
 def headless_env() -> dict[str, str]:
@@ -606,7 +665,7 @@ def main() -> int:
             if not ready:
                 raise RuntimeError("rmexe_server failed to become healthy")
 
-            run_server_security_and_guard_tests(server_addr, lon_jp, tmp_dir)
+            run_server_security_and_guard_tests(server_addr, lon_jp, pon_jp, tmp_dir)
 
             run_live_udp_match("PoN JP vs PoN JP", pon_jp, pon_jp, server_addr, tmp_dir, 1)
             run_live_udp_match("PoN EN vs PoN EN", pon_en, pon_en, server_addr, tmp_dir, 2)

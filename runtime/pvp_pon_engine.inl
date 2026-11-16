@@ -6,35 +6,16 @@
 
 } // namespace rmexe
 
-#include "pvp_protocol.hpp"
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <iostream>
-#include <string>
-#include <thread>
-#include <vector>
+#include "pvp_common.hpp"
 
 namespace rmexe {
 static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp);
 
+#include "pvp_common.inl"
+
 namespace pvp_pon {
 
-enum class Phase : uint8_t {
-    IDLE = 0,
-    LOBBY_WAIT,
-    HANDSHAKE,
-    CUSTOM_SCREEN,
-    ROUND_BANNER,
-    COMBAT,
-    JUDGE,
-    ROUND_RESULT,
-    RESULT,
-};
+using namespace rmexe::pvp_common;
 
 struct SideContext {
     Ref rock_ref = 0;
@@ -212,112 +193,11 @@ static inline void reset_combat_tf_state(PvpCombatCore& core) {
     core.tf_saved[1] = TfSavedAction{};
 }
 
-struct RollbackSlot {
-    uint32_t turn = UINT32_MAX;
-    int32_t p0_mask = 0;
-    int32_t p1_mask = 0;
-    bool p1_predicted = false;
-    uint16_t pre_hash = 0;
-    PvpCombatCore core;
-    std::vector<int64_t> statics;
-    FastCombatSnapshot heap_snap;
-};
+using RollbackSlot = pvp_common::RollbackSlot<PvpCombatCore>;
 
-static constexpr size_t kRollbackWindow = 128;
-static constexpr uint32_t kMaxPredictionFrames = 12; // 0.75s max speculation cap at 16 Hz (prevents multi-second drift!)
-static constexpr size_t kInputHistorySize = 4096;
-static constexpr uint32_t kInputDelayFrames = 1;
-static constexpr uint16_t kFinalTurnDurationTicks = 10 * 16; // 160 ticks at 16 Hz
-static constexpr uint8_t kOppNonDimChipHudTicks = 16; // 1.0s at 16 Hz
-
-// Rollback clock-drift throttler ported from HCTOrganization/trill
-// (getgud::Session local_tick_advantage / skew / speculation_balance + trill-pvp/src/battle/throttler.rs)
-// adapted to PoN's native 62ms (16.129 Hz) CpCanvas.exe() frame clock.
-struct TrillTimeSyncThrottler {
-    static constexpr float kExpectedFps = 1000.0f / 62.0f; // 16.129032 Hz
-    static constexpr float kMaxSlowdown = 0.36f * kExpectedFps;
-    static constexpr float kSkewGain = 0.065f * kExpectedFps; // skew = 2 * lead_ticks
-    static constexpr float kEngagementSlope = 0.75f * kExpectedFps;
-    static constexpr float kBalanceFloor = -(kMaxSlowdown / kEngagementSlope);
-    static constexpr float kSkewAlphaRise = 0.22f;
-    static constexpr float kSkewAlphaFall = 0.60f;
-    static constexpr float kBalanceAlpha = 0.40f;
-
-    float skew_ema = 0.0f;
-    float balance_ema = 0.0f;
-
-    void reset() {
-        skew_ema = 0.0f;
-        balance_ema = 0.0f;
-    }
-
-    // Returns extra frame wait in milliseconds (>= 0) applied ONLY to the leading peer's mill timer
-    int64_t update_extra_wait_ms(int32_t skew, int32_t speculation_balance) {
-        int32_t eff_skew = (std::abs(skew) <= 1) ? 0 : skew;
-        float target_skew = static_cast<float>(eff_skew);
-        float s_alpha = (target_skew > skew_ema) ? kSkewAlphaRise : kSkewAlphaFall;
-        skew_ema = std::max(0.0f, skew_ema + s_alpha * (target_skew - skew_ema));
-
-        balance_ema = std::max(
-            kBalanceFloor,
-            balance_ema + kBalanceAlpha * (static_cast<float>(speculation_balance) - balance_ema));
-
-        if (balance_ema <= 0.0f || skew_ema <= 0.05f) {
-            return 0;
-        }
-        float gate_cap = balance_ema * kEngagementSlope;
-        float slowdown_fps = std::clamp(std::min(skew_ema * kSkewGain, gate_cap), 0.0f, kMaxSlowdown);
-        if (slowdown_fps <= 0.05f) {
-            return 0;
-        }
-        float target_fps = std::max(4.0f, kExpectedFps - slowdown_fps);
-        int64_t target_period_ms = static_cast<int64_t>(std::lround(1000.0f / target_fps));
-        return std::clamp<int64_t>(target_period_ms - 62, 0, 38);
-    }
-};
-
-struct PvpEngineState {
-    Phase phase = Phase::IDLE;
-    uint32_t active_room_id = 0;
-    int local_idx = 0; // 0 = Host (Left/Red), 1 = Joiner (Right/Blue)
-    uint32_t match_seed = 0x13579BDFu;
-    size_t mutable_heap_min_ref = 1;
+struct PvpEngineState : pvp_common::PvpCommonState<PvpCombatCore> {
     Ref trap_mask_str = 0;
 
-    // Pre-match full VM snapshot for clean restoration after match ends
-    bool has_pre_match_snap = false;
-    FullHeapSnapshot pre_match_heap;
-    std::vector<int64_t> pre_match_statics;
-
-    // Build sync & Custom Screen state
-    pvp::PvpFighterBuild local_build{};
-    pvp::PvpFighterBuild builds[2]{};
-    bool build_prepared = false;
-    int64_t last_sync_send_ms = 0;
-    int64_t last_build_keepalive_ms = 0;
-
-    bool local_custom_done = false;
-    pvp::PvpCustomCommit local_commit{};
-    int custom_timer_ticks = 0;
-    std::array<int32_t, 10> local_cas_tip{};
-    std::array<int32_t, 10> local_cas_ok{};
-    uint32_t local_permanently_consumed_mask = 0;
-    PvpCombatCore pre_custom_core{};
-    std::vector<int64_t> pre_custom_statics{};
-    FastCombatSnapshot pre_custom_snap{};
-
-    // Lockstep & GGPO Rollback state
-    PvpCombatCore core{};
-    std::array<int32_t, kInputHistorySize> local_inputs{};
-    std::array<int32_t, kInputHistorySize> predicted_remote{};
-    std::array<bool, kInputHistorySize> remote_confirmed{};
-    std::array<RollbackSlot, kRollbackWindow> rb_ring{};
-    struct TurnEmittedSe {
-        uint32_t turn = UINT32_MAX;
-        uint8_t count = 0;
-        std::array<int32_t, 8> se_ids{};
-    };
-    std::array<TurnEmittedSe, kRollbackWindow> turn_emitted_se{};
     struct TurnBusterVisual {
         uint32_t turn = UINT32_MAX;
         uint8_t fired_mask = 0;      // bit s_idx: side fired Normal Buster on `turn`
@@ -341,19 +221,7 @@ struct PvpEngineState {
         int16_t ata_se[2]{};
     };
     std::array<TurnBusterVisual, kRollbackWindow> turn_buster_vis{};
-    FastCombatSnapshot render_snap{};
-    std::vector<int64_t> render_statics{};
-    uint32_t round_start_turn = 0;
-    uint32_t first_unconfirmed_turn = 0;
-    uint32_t max_scheduled_turn = 0;
-    uint32_t last_hash_checked_turn = 0;
-    bool round_needs_initial_schedule = true;
-    int32_t round_initial_remote_pred = 0;
-    int32_t round_held_edge_suppress_mask = 0;
-    int desync_warnings = 0;
-    int stall_frames = 0;
-    int phase_timer = 0;
-    int combat_stall_frames = 0;
+
     struct BackdropCache {
         bool valid = false;
         Ref gra_map = 0;
@@ -370,46 +238,14 @@ struct PvpEngineState {
             int32_t jou = -1;
         } cells[3][6]{};
     } backdrop_cache{};
-    TrillTimeSyncThrottler throttler{};
 
-    // Round banner, Judge banner, Between-game BO3 & Result banner timers + BO3 state
-    int banner_ticks = 0;
-    int judge_ticks = 0;
-    int round_result_ticks = 0;
-    int result_ticks = 0;
-    uint32_t base_match_seed = 0;
-    bool is_triple_battle = false;
-    uint8_t bo3_game_index = 0;                 // 0, 1, 2 (Game 1..3)
-    uint8_t bo3_wins[2] = {0, 0};               // Game wins for P0, P1
-    int8_t bo3_game_results[3] = {-2, -2, -2};  // Per-game winner (-1 Draw, 0 P0, 1 P1)
-    int match_winner = -2;
-
-    // Re-entrancy flags for Ene.Hit hook
-    bool in_combat_step = false;
-    int active_side = 0;
     Ref active_ata_ref = 0;
-    int bot_custom_step = 0;
 };
 
 static PvpEngineState g_pvp_eng;
 
-static uint32_t derive_bo3_game_seed(uint32_t base_seed, uint8_t game_idx) {
-    if (game_idx == 0) return base_seed ? base_seed : 1u;
-    uint32_t s = base_seed ^ (static_cast<uint32_t>(game_idx) * 0x9E3779B9u + 0x7F4A7C15u);
-    s ^= (s >> 16);
-    s *= 0x85EBCA6Bu;
-    s ^= (s >> 13);
-    return s | 1u;
-}
-
 static inline uint16_t current_wire_round_key() {
-    return static_cast<uint16_t>(static_cast<uint16_t>(g_pvp_eng.bo3_game_index) * 100u +
-                                 g_pvp_eng.core.custom_round);
-}
-
-static int64_t steady_ms() {
-    auto now = std::chrono::steady_clock::now().time_since_epoch();
-    return std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    return make_wire_round_key(g_pvp_eng.bo3_game_index, g_pvp_eng.core.custom_round);
 }
 
 static uint32_t read_folder_used_mask(DojaRuntime& rt, Ref fol_obj) {
@@ -830,7 +666,7 @@ static pvp::PvpFighterBuild extract_local_build_from_sav(DojaRuntime& rt, Ref cp
         fn_app_CpCanvas_init___I__V(rt, cp, 1);
         fn_app_CpCanvas_Load___I__V(rt, cp, 0);
         if (sf_app_CpCanvas_max_hp <= 0) {
-            fn_app_CpCanvas_init___I__V(rt, cp, 1);
+            fn_app_CpCanvas_init___I__V(rt, cp, 0);
         }
     }
 
@@ -1123,11 +959,11 @@ static void init_pvp_battle_arena(DojaRuntime& rt, Ref cp) {
     FastCombatSnapshot watermark_probe{};
     rt.save_combat_snapshot(watermark_probe, 1);
 
-    bool prev_sup = rt.suppress_av();
-    rt.set_suppress_av(true);
-    init_side_context(rt, cp, 0, g_pvp_eng.builds[0]);
-    init_side_context(rt, cp, 1, g_pvp_eng.builds[1]);
-    rt.set_suppress_av(prev_sup);
+    {
+        ScopedRenderMute mute_init(rt, true);
+        init_side_context(rt, cp, 0, g_pvp_eng.builds[0]);
+        init_side_context(rt, cp, 1, g_pvp_eng.builds[1]);
+    }
 
     // Compute exact minimum heap Ref across all mutable combat objects so static asset Refs are skipped
     // without missing any combat-mutated objects (panel/oki/ene/rand/se/wana_pow/fol/Muramasa/sides).
@@ -1892,97 +1728,12 @@ static uint16_t compute_combat_state_hash(DojaRuntime& rt) {
 // deterministic combat simulation. Preserving these across rollback / custom / render snapshots
 // prevents rollbacks from rewinding sf_app_CpCanvas_mill into the past (which caused 4x turbo clock
 // runaway!) or corrupting active CpCanvas.sePlay() AudioPresenter channels during Buster Charging.
-struct HostRuntimeState {
-    int64_t mill = 0;
-    int64_t audio_mill = 0;
-    int32_t audio_flg = 0;
-    int32_t play_flg = 0;
-    int32_t now_bgm = 0;
-    std::vector<int32_t> m_audio_se;
-    std::vector<int32_t> now_se;
-    std::vector<int32_t> now_se_cnt;
-    std::vector<int32_t> now_se_flg;
-    std::vector<int32_t> se_set;
-    std::vector<int32_t> se_flg;
-};
-
-static std::vector<int32_t> copy_int_array_safe(DojaRuntime& rt, Ref arr) {
-    std::vector<int32_t> out;
-    if (arr > 0) {
-        int32_t n = rt.array_length(arr);
-        if (n > 0) {
-            out.resize(static_cast<size_t>(n));
-            for (int32_t i = 0; i < n; ++i) {
-                out[static_cast<size_t>(i)] = rt.iaload(arr, i);
-            }
-        }
-    }
-    return out;
-}
-
-static void write_int_array_safe(DojaRuntime& rt, Ref arr, const std::vector<int32_t>& vals) {
-    if (arr > 0 && !vals.empty()) {
-        int32_t n = std::min<int32_t>(rt.array_length(arr), static_cast<int32_t>(vals.size()));
-        for (int32_t i = 0; i < n; ++i) {
-            rt.iaload(arr, i) = vals[static_cast<size_t>(i)];
-        }
-    }
-}
-
-static HostRuntimeState capture_host_runtime_state(DojaRuntime& rt) {
-    HostRuntimeState h{};
-    h.mill = sf_app_CpCanvas_mill;
-    h.audio_mill = sf_app_CpCanvas_audio_mill;
-    h.audio_flg = sf_app_CpCanvas_audio_flg;
-    h.play_flg = sf_app_CpCanvas_play_flg;
-    h.now_bgm = sf_app_CpCanvas_now_bgm;
-    h.m_audio_se = copy_int_array_safe(rt, sf_app_CpCanvas_m_audio_se);
-    h.now_se = copy_int_array_safe(rt, sf_app_CpCanvas_now_se);
-    h.now_se_cnt = copy_int_array_safe(rt, sf_app_CpCanvas_now_se_cnt);
-    h.now_se_flg = copy_int_array_safe(rt, sf_app_CpCanvas_now_se_flg);
-    h.se_set = copy_int_array_safe(rt, sf_app_CpCanvas_se_set);
-    h.se_flg = copy_int_array_safe(rt, sf_app_CpCanvas_se_flg);
-    return h;
-}
-
-static void restore_host_runtime_state(DojaRuntime& rt, const HostRuntimeState& h, bool restore_se_queue = true) {
-    sf_app_CpCanvas_mill = h.mill;
-    sf_app_CpCanvas_audio_mill = h.audio_mill;
-    sf_app_CpCanvas_audio_flg = h.audio_flg;
-    sf_app_CpCanvas_play_flg = h.play_flg;
-    sf_app_CpCanvas_now_bgm = h.now_bgm;
-    write_int_array_safe(rt, sf_app_CpCanvas_m_audio_se, h.m_audio_se);
-    write_int_array_safe(rt, sf_app_CpCanvas_now_se, h.now_se);
-    write_int_array_safe(rt, sf_app_CpCanvas_now_se_cnt, h.now_se_cnt);
-    write_int_array_safe(rt, sf_app_CpCanvas_now_se_flg, h.now_se_flg);
-    if (restore_se_queue) {
-        write_int_array_safe(rt, sf_app_CpCanvas_se_set, h.se_set);
-        write_int_array_safe(rt, sf_app_CpCanvas_se_flg, h.se_flg);
-    }
-}
-
 static void save_rollback_slot(DojaRuntime& rt, uint32_t turn, int32_t p0_m, int32_t p1_m, bool p1_pred) {
-    RollbackSlot& sl = g_pvp_eng.rb_ring[turn % kRollbackWindow];
-    sl.turn = turn;
-    sl.p0_mask = p0_m;
-    sl.p1_mask = p1_m;
-    sl.p1_predicted = p1_pred;
-    sl.pre_hash = compute_combat_state_hash(rt);
-    sl.core = g_pvp_eng.core;
-    generated_save_statics(sl.statics);
-    sl.heap_snap.base_heap_size = 0;
-    rt.save_combat_snapshot(sl.heap_snap, g_pvp_eng.mutable_heap_min_ref);
+    pvp_common::save_rollback_slot(rt, g_pvp_eng, turn, p0_m, p1_m, p1_pred, compute_combat_state_hash(rt));
 }
 
 static bool restore_rollback_slot(DojaRuntime& rt, uint32_t turn) {
-    const RollbackSlot& sl = g_pvp_eng.rb_ring[turn % kRollbackWindow];
-    if (sl.turn != turn) return false;
-    HostRuntimeState host_st = capture_host_runtime_state(rt);
-    g_pvp_eng.core = sl.core;
-    generated_restore_statics(sl.statics);
-    rt.restore_combat_snapshot(sl.heap_snap);
-    restore_host_runtime_state(rt, host_st, true);
-    return true;
+    return pvp_common::restore_rollback_slot(rt, g_pvp_eng, turn);
 }
 
 static void sync_muramasa_power(DojaRuntime& rt) {
@@ -3795,8 +3546,7 @@ static void apply_unpresented_opp_buster_visual(DojaRuntime& rt, int opp_i) {
     }
 
     const auto& bv = g_pvp_eng.turn_buster_vis[found_t % kRollbackWindow];
-    const bool prev_sup = rt.suppress_av();
-    rt.set_suppress_av(true);
+    ScopedRenderMute mute_vis(rt, true);
     load_side(rt, opp_i);
     sf_app_Rock_pos_x = bv.pos_x[opp_i];
     sf_app_Rock_pos_y = bv.pos_y[opp_i];
@@ -3846,7 +3596,6 @@ static void apply_unpresented_opp_buster_visual(DojaRuntime& rt, int opp_i) {
         }
     }
     save_side(rt, opp_i);
-    rt.set_suppress_av(prev_sup);
 }
 
 static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
@@ -4061,39 +3810,16 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
     // Active trap "????" HUD indicators (left x=5,y=75 for local; mirrored right y=75 for opponent)
     draw_active_trap_hud_indicators(rt, loc_sc.wana != 0, opp_sc.wana != 0);
 
-    // 6. Top HUD Bar: Local Name + HP vs Opponent Name + HP + Live Ping
-    std::string loc_name = g_pvp_eng.builds[loc_i].player_name;
-    std::string opp_name = g_pvp_eng.builds[opp_i].player_name;
-
-    rt.fb_fill_rect_alpha(3, 4, 104, 32, 0xE014203Cu);
-    rt.fb_draw_border(3, 4, 104, 32, 0xFF4C88FFu);
-    rt.fb_draw_text(loc_name, 7, 16, 0xFF88CCFFu);
-    std::string loc_hp_str = "HP " + std::to_string(std::max(0, loc_sc.hp)) + "/" + std::to_string(loc_sc.max_hp);
-    rt.fb_draw_text(loc_hp_str, 7, 31, (loc_sc.hp * 4 <= loc_sc.max_hp) ? 0xFFFF6868u : 0xFFFFFFFFu);
-
-    if (g_pvp_eng.is_triple_battle) {
-        rt.fb_draw_text("G" + std::to_string(g_pvp_eng.bo3_game_index + 1), 113, 15, 0xFFFFD84Cu);
-        rt.fb_draw_text(std::to_string(g_pvp_eng.bo3_wins[loc_i]) + "-" +
-                        std::to_string(g_pvp_eng.bo3_wins[opp_i]),
-                        111, 31, 0xFFFFFFFFu);
-    } else {
-        rt.fb_draw_text("VS", 113, 24, 0xFFFFD84Cu);
-    }
-
-    rt.fb_fill_rect_alpha(133, 4, 104, 32, 0xE0381420u);
-    rt.fb_draw_border(133, 4, 104, 32, 0xFFFF5868u);
-    rt.fb_draw_text(opp_name, 137, 16, 0xFFFF98A8u);
-    std::string opp_hp_str = "HP " + std::to_string(std::max(0, opp_sc.hp)) + "/" + std::to_string(opp_sc.max_hp);
-    rt.fb_draw_text(opp_hp_str, 137, 31, (opp_sc.hp * 4 <= opp_sc.max_hp) ? 0xFFFF6868u : 0xFFFFFFFFu);
-
-    if (g_pvp_eng.core.custom_round >= 15 && sf_app_CpCanvas_stop_cnt < 2) {
-        int secs = (static_cast<int>(g_pvp_eng.core.final_turn_ticks_left) + 15) / 16;
-        int tenths = (static_cast<int>(g_pvp_eng.core.final_turn_ticks_left) * 10) / 16;
-        std::string cd_txt = "FINAL " + std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + "s";
-        rt.fb_fill_rect_alpha(74, 37, 92, 13, 0xE81C0C14u);
-        rt.fb_draw_border(74, 37, 92, 13, (secs <= 3) ? 0xFFFF4858u : 0xFFFFC84Cu);
-        rt.fb_draw_text(cd_txt, 120 - rt.fb_measure_text(cd_txt) / 2, 47, (secs <= 3) ? 0xFFFF7888u : 0xFFFFF088u);
-    }
+    // 6. Top HUD Bar: Local Name + HP vs Opponent Name + HP + BO3/FINAL Countdown
+    render_top_combat_hud(rt,
+                          g_pvp_eng.builds[loc_i].player_name, loc_sc.hp, loc_sc.max_hp,
+                          g_pvp_eng.builds[opp_i].player_name, opp_sc.hp, opp_sc.max_hp,
+                          g_pvp_eng.is_triple_battle,
+                          g_pvp_eng.bo3_game_index,
+                          g_pvp_eng.bo3_wins[loc_i],
+                          g_pvp_eng.bo3_wins[opp_i],
+                          g_pvp_eng.core.custom_round >= 15 && sf_app_CpCanvas_stop_cnt < 2,
+                          g_pvp_eng.core.final_turn_ticks_left);
 
     // Restore canonical simulation state (100% read-only rendering, zero heap growth)
     // Restore exact simulation state and pre-render SE queue (live AniSe cues were already queued by step_pvp_combat_tick)
@@ -4103,233 +3829,163 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
     restore_host_runtime_state(rt, host_st, true);
 }
 
-static void draw_native_battle_start_sprite(DojaRuntime& rt, int frame_idx, int32_t center_y_offset = 0) {
-    static constexpr int32_t kHeights[15] = {4, 9, 16, 18, 16, 16, 16, 16, 16, 16, 16, 16, 16, 9, 4};
-    int32_t h = kHeights[std::clamp(frame_idx, 0, 14)];
-    Ref img43 = (sf_app_CpCanvas_image > 0 && rt.array_length(sf_app_CpCanvas_image) > 43)
-        ? rt.iaload(sf_app_CpCanvas_image, 43)
-        : 0;
-    if (img43 <= 0 || sf_app_CpCanvas_g <= 0) {
-        return;
-    }
+static void render_custom_screen_backdrop(DojaRuntime& rt, Ref cp) {
+    (void)cp;
+    HostRuntimeState host_st = capture_host_runtime_state(rt);
+    PvpCombatCore saved_core = g_pvp_eng.core;
+    generated_save_statics(g_pvp_eng.render_statics);
+    g_pvp_eng.render_snap.base_heap_size = 0;
+    rt.save_combat_snapshot(g_pvp_eng.render_snap, 1);
+
+    int loc_i = g_pvp_eng.local_idx;
+    int opp_i = 1 - loc_i;
+
     bool prev_sup = rt.suppress_av();
     rt.set_suppress_av(false);
-    int32_t dy = 104 + center_y_offset + (16 - h) / 2;
-    Slot args[10];
-    args[0].r = sf_app_CpCanvas_g;
-    args[1].r = img43;
-    args[2].i = 52;
-    args[3].i = dy;
-    args[4].i = 68;
-    args[5].i = h;
-    args[6].i = 120;
-    args[7].i = 0;
-    args[8].i = 68;
-    args[9].i = 16;
-    rt.invoke_external("com/nttdocomo/ui/Graphics", "drawScaledImage", "(Lcom/nttdocomo/ui/Image;IIIIIIII)V", args, 10);
 
-    args[2].i = 120;
-    args[7].i = 16;
-    rt.invoke_external("com/nttdocomo/ui/Graphics", "drawScaledImage", "(Lcom/nttdocomo/ui/Image;IIIIIIII)V", args, 10);
+    ensure_board_orient(rt, loc_i);
+    load_side(rt, loc_i);
+    sync_panel_occupancy_and_proxy(rt, loc_i);
+
+    // 1. Refresh arena backdrop + all 18 battle panels onto imgMap and draw onto g
+    refresh_arena_imgmap_backdrop(rt, 0, 0, false);
+    if (sf_app_CpCanvas_g > 0 && sf_app_CpCanvas_imgMap > 0) {
+        Slot args[4];
+        args[0].r = sf_app_CpCanvas_g;
+        args[1].r = sf_app_CpCanvas_imgMap;
+        args[2].i = 0;
+        args[3].i = 0;
+        rt.invoke_external("com/nttdocomo/ui/Graphics", "drawImage", "(Lcom/nttdocomo/ui/Image;II)V", args, 4);
+    }
+
+    // 2. Panel warning / effect overlays (BtPanel.Draw2)
+    if (sf_app_CpCanvas_panel > 0 && rt.array_length(sf_app_CpCanvas_panel) >= 3) {
+        for (int y = 0; y < 3; ++y) {
+            Ref row = rt.iaload(sf_app_CpCanvas_panel, y);
+            if (row <= 0 || rt.array_length(row) < 6) continue;
+            for (int x = 0; x < 6; ++x) {
+                Ref p = rt.iaload(row, x);
+                if (p > 0) fn_app_BtPanel_Draw2_____V(rt, p);
+            }
+        }
+    }
+
+    // 3. Y-sorted 2.5D entities without damage/invulnerability blinking
+    const SideContext& opp_sc = g_pvp_eng.core.sides[opp_i];
+    const SideContext& loc_sc = g_pvp_eng.core.sides[loc_i];
+    for (int row = 0; row < 3; ++row) {
+        if (opp_sc.hp > 0 && opp_sc.pos_y == row && sf_app_CpCanvas_rock > 0) {
+            load_side(rt, opp_i);
+            set_rock_palette_fast(rt, sf_app_Rock_zoku);
+            sf_app_Rock_muteki_cnt = 0;
+            sf_app_Rock_hit_cnt = 0;
+            sf_app_Rock_non_cnt2 = 0;
+            int32_t saved_px = sf_app_Rock_pos_x;
+            sf_app_Rock_pos_x = 5 - saved_px;
+            g_pvp_rock_flip_override = 0;
+            draw_rock_readonly(rt, sf_app_CpCanvas_rock);
+            g_pvp_rock_flip_override = -1;
+            sf_app_Rock_pos_x = saved_px;
+        }
+        if (loc_sc.hp > 0 && loc_sc.pos_y == row && sf_app_CpCanvas_rock > 0) {
+            load_side(rt, loc_i);
+            set_rock_palette_fast(rt, sf_app_Rock_zoku);
+            sf_app_Rock_muteki_cnt = 0;
+            sf_app_Rock_hit_cnt = 0;
+            sf_app_Rock_non_cnt2 = 0;
+            g_pvp_rock_flip_override = 1;
+            draw_rock_readonly(rt, sf_app_CpCanvas_rock);
+            g_pvp_rock_flip_override = -1;
+        }
+        if (sf_app_CpCanvas_oki > 0) {
+            int on_cnt = std::min<int>(6, rt.array_length(sf_app_CpCanvas_oki));
+            for (int i = 0; i < on_cnt; ++i) {
+                Ref ok = rt.iaload(sf_app_CpCanvas_oki, i);
+                if (ok > 0 && rt.field_i32(ok, 1) != 0 && rt.field_i32(ok, 10) == row) {
+                    fn_app_Okimono_Draw_____V(rt, ok);
+                }
+            }
+        }
+        load_side(rt, loc_i);
+        set_rock_palette_fast(rt, sf_app_Rock_zoku);
+        if (sf_app_CpCanvas_ata > 0) {
+            int an = std::min<int>(30, rt.array_length(sf_app_CpCanvas_ata));
+            for (int i = 0; i < an; ++i) {
+                Ref a = rt.iaload(sf_app_CpCanvas_ata, i);
+                if (a > 0 && rt.field_i32(a, 38) != 0 && rt.field_i32(a, 4) == row) {
+                    draw_attack_readonly(rt, a, 1);
+                }
+            }
+        }
+        draw_mirrored_opponent_attacks(rt, opp_i, 1, row);
+    }
+
+    // 4. Layer-2 overhead effects for both players
+    load_side(rt, loc_i);
+    set_rock_palette_fast(rt, sf_app_Rock_zoku);
+    if (sf_app_CpCanvas_ata > 0) {
+        int an = std::min<int>(30, rt.array_length(sf_app_CpCanvas_ata));
+        for (int i = 0; i < an; ++i) {
+            Ref a = rt.iaload(sf_app_CpCanvas_ata, i);
+            if (a > 0 && rt.field_i32(a, 38) != 0) {
+                draw_attack_readonly(rt, a, 2);
+            }
+        }
+    }
+    draw_mirrored_opponent_attacks(rt, opp_i, 2, -1);
+
+    // 5. Opponent foot HP digits + top/bottom black bars (clears any previous scene bleed)
+    load_side(rt, loc_i);
+    sync_panel_occupancy_and_proxy(rt, loc_i);
+    if (sf_app_CpCanvas_ene > 0 && rt.array_length(sf_app_CpCanvas_ene) > 0) {
+        Ref e0 = rt.iaload(sf_app_CpCanvas_ene, 0);
+        if (e0 > 0 && rt.field_i32(e0, 23) != 0) {
+            fn_app_Ene_HpDraw_____V(rt, e0);
+        }
+    }
+    if (sf_app_CpCanvas_g > 0) {
+        Slot c_args[2];
+        c_args[0].r = sf_app_CpCanvas_g;
+        c_args[1].i = static_cast<int32_t>(0xFF000000u);
+        rt.invoke_external("com/nttdocomo/ui/Graphics", "setColor", "(I)V", c_args, 2);
+        Slot r_args[5];
+        r_args[0].r = sf_app_CpCanvas_g;
+        r_args[1].i = 0; r_args[2].i = 0; r_args[3].i = 240; r_args[4].i = 40;
+        rt.invoke_external("com/nttdocomo/ui/Graphics", "fillRect", "(IIII)V", r_args, 5);
+        r_args[1].i = 0; r_args[2].i = 200; r_args[3].i = 240; r_args[4].i = 40;
+        rt.invoke_external("com/nttdocomo/ui/Graphics", "fillRect", "(IIII)V", r_args, 5);
+    }
+
+    // Restore BattleTip tray/selection heap & statics intact before BattleTip executes
+    g_pvp_eng.core = std::move(saved_core);
+    generated_restore_statics(g_pvp_eng.render_statics);
+    rt.restore_combat_snapshot(g_pvp_eng.render_snap);
+    if (sf_app_CpCanvas_rock > 0) {
+        set_rock_palette_fast(rt, sf_app_Rock_zoku);
+    }
+    restore_host_runtime_state(rt, host_st, true);
     rt.set_suppress_av(prev_sup);
 }
 
-static void render_round_banner_overlay(DojaRuntime& rt, int frame_idx, uint16_t custom_round) {
-    static constexpr int32_t kHeights[15] = {4, 9, 16, 18, 16, 16, 16, 16, 16, 16, 16, 16, 16, 9, 4};
-    int idx = std::clamp(frame_idx, 0, 14);
-    int32_t kh = kHeights[idx];
-
-    if (custom_round <= 1) {
-        draw_native_battle_start_sprite(rt, idx, 8);
-        int32_t bh = std::max<int32_t>(4, (20 * kh) / 16);
-        int32_t by = 92 - bh / 2;
-        rt.fb_fill_rect_alpha(52, by, 136, bh, 0xE8101C38u);
-        rt.fb_draw_border(52, by, 136, bh, 0xFFFFD84Cu);
-        if (idx >= 2 && idx <= 12) {
-            std::string lbl = "TURN 1 START!";
-            rt.fb_draw_text(lbl, 120 - rt.fb_measure_text(lbl) / 2, by + bh - 5, 0xFFFFF088u);
-        }
-    } else if (custom_round <= 14) {
-        int32_t bh = std::max<int32_t>(6, (28 * kh) / 16);
-        int32_t by = 112 - bh / 2;
-        rt.fb_fill_rect_alpha(34, by, 172, bh, 0xEC101E3Cu);
-        rt.fb_draw_border(34, by, 172, bh, 0xFF58B8FFu);
-        if (bh >= 16) {
-            std::string lbl = "TURN " + std::to_string(custom_round) + " START!";
-            rt.fb_draw_text(lbl, 120 - rt.fb_measure_text(lbl) / 2, by + bh / 2 + 5, 0xFFFFF078u);
-        }
-    } else {
-        int32_t bh = std::max<int32_t>(6, (40 * kh) / 16);
-        int32_t by = 112 - bh / 2;
-        rt.fb_fill_rect_alpha(28, by, 184, bh, 0xF02C0E18u);
-        rt.fb_draw_border(28, by, 184, bh, 0xFFFF5868u);
-        if (idx >= 2 && idx <= 12 && bh >= 22) {
-            std::string line1 = "FINAL TURN!";
-            std::string line2 = "最终回合 · 限时 10 秒!";
-            rt.fb_draw_text(line1, 120 - rt.fb_measure_text(line1) / 2, by + 16, 0xFFFFE866u);
-            rt.fb_draw_text(line2, 120 - rt.fb_measure_text(line2) / 2, by + 33, 0xFFFFA8B0u);
-        }
-    }
-}
-
-static void play_pvp_result_bgm(DojaRuntime& rt) {
-    if (g_pvp_eng.core.winner == g_pvp_eng.local_idx) {
-        fn_app_CpCanvas_Audio___II__V(rt, 1, 5); // Victory / Enemy Deleted fanfare
-    } else if (g_pvp_eng.core.winner >= 0) {
-        fn_app_CpCanvas_Audio___II__V(rt, 1, 6); // Defeat BGM
-    } else {
-        fn_app_CpCanvas_Audio___II__V(rt, 0, 0); // Draw: stop BGM cleanly
-    }
-}
-
 static void adjudicate_peer_disconnect_win(DojaRuntime& rt) {
-    pvp::PvpClientSession& net = rt.pvp_session();
-    g_pvp_eng.core.winner = g_pvp_eng.local_idx;
-    g_pvp_eng.match_winner = g_pvp_eng.local_idx;
-    if (g_pvp_eng.is_triple_battle) {
-        if (g_pvp_eng.bo3_game_index < 3 &&
-            g_pvp_eng.bo3_game_results[g_pvp_eng.bo3_game_index] == -2) {
-            g_pvp_eng.bo3_game_results[g_pvp_eng.bo3_game_index] = static_cast<int8_t>(g_pvp_eng.local_idx);
-        }
-        g_pvp_eng.bo3_wins[g_pvp_eng.local_idx] = std::min<uint8_t>(
-            2, static_cast<uint8_t>(g_pvp_eng.bo3_wins[g_pvp_eng.local_idx] + 1));
-    }
-    if (net.active()) {
-        net.send_match_end(1);
-    }
-    g_pvp_eng.phase = Phase::RESULT;
-    g_pvp_eng.phase_timer = 0;
-    g_pvp_eng.result_ticks = 0;
-    play_pvp_result_bgm(rt);
-    rt.reset_interpolator();
+    adjudicate_peer_disconnect_win_common(rt, g_pvp_eng, 5, 6);
 }
 
 static void conclude_current_game(DojaRuntime& rt, Ref cp) {
     (void)cp;
-    pvp::PvpClientSession& net = rt.pvp_session();
-    int game_win = g_pvp_eng.core.winner;
-    if (g_pvp_eng.bo3_game_index < 3) {
-        g_pvp_eng.bo3_game_results[g_pvp_eng.bo3_game_index] = static_cast<int8_t>(game_win);
-    }
-    if (game_win == 0) {
-        g_pvp_eng.bo3_wins[0]++;
-    } else if (game_win == 1) {
-        g_pvp_eng.bo3_wins[1]++;
-    }
-
-    if (!g_pvp_eng.is_triple_battle) {
-        g_pvp_eng.match_winner = game_win;
-        g_pvp_eng.phase = Phase::RESULT;
-        g_pvp_eng.phase_timer = 0;
-        g_pvp_eng.result_ticks = 0;
-        play_pvp_result_bgm(rt);
-        rt.reset_interpolator();
-        uint8_t res_code = (game_win == -1)
-            ? 3
-            : ((game_win == g_pvp_eng.local_idx) ? 1 : 2);
-        if (net.active()) {
-            net.send_match_end(res_code);
-        }
-        return;
-    }
-
-    bool series_done = (g_pvp_eng.bo3_wins[0] >= 2 ||
-                        g_pvp_eng.bo3_wins[1] >= 2 ||
-                        g_pvp_eng.bo3_game_index >= 2);
-    if (!series_done) {
-        g_pvp_eng.phase = Phase::ROUND_RESULT;
-        g_pvp_eng.phase_timer = 0;
-        g_pvp_eng.round_result_ticks = 0;
-        play_pvp_result_bgm(rt);
-        rt.reset_interpolator();
-        // Never send PKT_MATCH_END mid-series (server prunes rooms 6s after PKT_MATCH_END).
-        return;
-    }
-
-    if (g_pvp_eng.bo3_wins[0] > g_pvp_eng.bo3_wins[1]) {
-        g_pvp_eng.match_winner = 0;
-    } else if (g_pvp_eng.bo3_wins[1] > g_pvp_eng.bo3_wins[0]) {
-        g_pvp_eng.match_winner = 1;
-    } else {
-        g_pvp_eng.match_winner = -1;
-    }
-    g_pvp_eng.core.winner = g_pvp_eng.match_winner;
-    g_pvp_eng.phase = Phase::RESULT;
-    g_pvp_eng.phase_timer = 0;
-    g_pvp_eng.result_ticks = 0;
-    play_pvp_result_bgm(rt);
-    rt.reset_interpolator();
-    uint8_t res_code = (g_pvp_eng.match_winner == -1)
-        ? 3
-        : ((g_pvp_eng.match_winner == g_pvp_eng.local_idx) ? 1 : 2);
-    if (net.active()) {
-        net.send_match_end(res_code);
-    }
+    conclude_current_game_common(rt, g_pvp_eng, 5, 6);
 }
 
 static void start_next_bo3_game(DojaRuntime& rt, Ref cp) {
-    g_pvp_eng.bo3_game_index++;
-    if (g_pvp_eng.has_pre_match_snap) {
-        int64_t saved_mill = sf_app_CpCanvas_mill;
-        fn_app_CpCanvas_Audio___II__V(rt, 0, 0);
-        rt.restore_full_snapshot(g_pvp_eng.pre_match_heap);
-        generated_restore_statics(g_pvp_eng.pre_match_statics);
-        sf_app_CpCanvas_mill = saved_mill;
-    }
-    g_pvp_eng.match_seed = derive_bo3_game_seed(g_pvp_eng.base_match_seed, g_pvp_eng.bo3_game_index);
-    g_pvp_eng.round_result_ticks = 0;
-    g_pvp_eng.phase_timer = 0;
-    g_pvp_eng.combat_stall_frames = 0;
-    rt.reset_interpolator();
+    restore_pre_match_snapshot_for_next_game(rt, g_pvp_eng);
     init_pvp_battle_arena(rt, cp);
     enter_custom_screen_phase(rt, cp);
 }
 
 static void cleanup_and_restore_singleplayer(DojaRuntime& rt, bool close_net = true) {
-    pvp::PvpClientSession& net = rt.pvp_session();
-    if (close_net) {
-        net.close_udp();
-    }
-    rt.set_pvp_match_active(false);
-    rt.set_suppress_av(false);
-    rt.set_keypad_override(false, 0);
-    rt.reset_interpolator();
     g_pvp_rock_flip_override = -1;
-    g_pvp_eng.in_combat_step = false;
-
-    if (g_pvp_eng.has_pre_match_snap) {
-        fn_app_CpCanvas_Audio___II__V(rt, 0, 0); // Stop PvP BGM before restoring single-player state
-        rt.restore_full_snapshot(g_pvp_eng.pre_match_heap);
-        generated_restore_statics(g_pvp_eng.pre_match_statics);
-        g_pvp_eng.has_pre_match_snap = false;
-        g_pvp_eng.pre_match_heap = FullHeapSnapshot{};
-        g_pvp_eng.pre_match_statics.clear();
-        sf_app_CpCanvas_play_flg = 1; // Resume pre-match BGM cleanly
-        sf_app_CpCanvas_mill = 0;     // Prevent frame-timer skew after restoring snapshot
-    }
-    sf_app_CpCanvas_key = 0;
-    g_pvp_eng.phase = Phase::IDLE;
-    g_pvp_eng.banner_ticks = 0;
-    g_pvp_eng.judge_ticks = 0;
-    g_pvp_eng.round_result_ticks = 0;
-    g_pvp_eng.phase_timer = 0;
-    g_pvp_eng.combat_stall_frames = 0;
-    g_pvp_eng.stall_frames = 0;
-    g_pvp_eng.last_hash_checked_turn = 0;
     g_pvp_eng.backdrop_cache = PvpEngineState::BackdropCache{};
-    g_pvp_eng.base_match_seed = 0;
-    g_pvp_eng.is_triple_battle = false;
-    g_pvp_eng.bo3_game_index = 0;
-    g_pvp_eng.bo3_wins[0] = 0;
-    g_pvp_eng.bo3_wins[1] = 0;
-    g_pvp_eng.bo3_game_results[0] = -2;
-    g_pvp_eng.bo3_game_results[1] = -2;
-    g_pvp_eng.bo3_game_results[2] = -2;
-    g_pvp_eng.match_winner = -2;
-    g_pvp_eng.desync_warnings = 0;
-    g_pvp_eng.active_room_id = 0;
-    g_pvp_eng.build_prepared = false;
-    g_pvp_eng.last_build_keepalive_ms = 0;
+    cleanup_common_and_restore_singleplayer(rt, g_pvp_eng, close_net);
 }
 
 } // namespace pvp_pon
@@ -7113,163 +6769,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
     std::printf("[PvP SELF-TEST] Suite E complete: Native virus-battle Time-Freeze dimming & announcement verified (failures=%d)\n",
                 failures);
 
-    // ------------------------------------------------------------------------
-    // Shared Loopback Relay & RAII Guards (used by Suite F & Suite H)
-    // ------------------------------------------------------------------------
-    struct LoopbackRelay {
-            plat::sock_t tcp_fd = plat::kInvalidSocket;
-            plat::sock_t udp_fd = plat::kInvalidSocket;
-            uint16_t port = 0;
-            std::atomic<bool> stop_flag{false};
-            pvp::PvpServerEngine engine;
-            std::thread worker;
-
-            bool start() {
-                plat::ensure_sockets_init();
-                for (int attempt = 0; attempt < 8; ++attempt) {
-                    plat::sock_t tfd = ::socket(AF_INET, SOCK_STREAM, 0);
-                    if (tfd == plat::kInvalidSocket) return false;
-                    plat::set_socket_reuseaddr(tfd);
-                    sockaddr_in addr{};
-                    addr.sin_family = AF_INET;
-                    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-                    addr.sin_port = 0;
-                    if (::bind(tfd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0 ||
-                        ::listen(tfd, 16) != 0) {
-                        plat::close_socket(tfd);
-                        continue;
-                    }
-                    sockaddr_in bound{};
-                    socklen_t blen = sizeof(bound);
-                    if (::getsockname(tfd, reinterpret_cast<sockaddr*>(&bound), &blen) != 0) {
-                        plat::close_socket(tfd);
-                        continue;
-                    }
-                    uint16_t p = ntohs(bound.sin_port);
-
-                    plat::sock_t ufd = ::socket(AF_INET, SOCK_DGRAM, 0);
-                    if (ufd == plat::kInvalidSocket) {
-                        plat::close_socket(tfd);
-                        continue;
-                    }
-                    plat::set_socket_reuseaddr(ufd);
-                    sockaddr_in uaddr{};
-                    uaddr.sin_family = AF_INET;
-                    uaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-                    uaddr.sin_port = htons(p);
-                    if (::bind(ufd, reinterpret_cast<const sockaddr*>(&uaddr), sizeof(uaddr)) != 0) {
-                        plat::close_socket(ufd);
-                        plat::close_socket(tfd);
-                        continue;
-                    }
-                    plat::set_socket_nonblocking(tfd, true);
-                    plat::set_socket_nonblocking(ufd, true);
-                    plat::disable_udp_connreset(ufd);
-                    tcp_fd = tfd;
-                    udp_fd = ufd;
-                    port = p;
-                    engine.set_udp_fd(udp_fd);
-                    worker = std::thread([this]() { run(); });
-                    return true;
-                }
-                return false;
-            }
-
-            void run() {
-                while (!stop_flag.load(std::memory_order_relaxed)) {
-                    pollfd pfds[2] = {
-                        pollfd{tcp_fd, POLLIN, 0},
-                        pollfd{udp_fd, POLLIN, 0},
-                    };
-                    int rc = plat::poll_sockets(pfds, 2, 5);
-                    if (rc <= 0) continue;
-
-                    if (pfds[1].revents & POLLIN) {
-                        uint8_t ubuf[1500];
-                        while (true) {
-                            sockaddr_storage src{};
-                            socklen_t slen = sizeof(src);
-                            ptrdiff_t n = plat::sock_recvfrom(
-                                udp_fd, ubuf, sizeof(ubuf), reinterpret_cast<sockaddr*>(&src), &slen);
-                            if (n <= 0) break;
-                            engine.handle_udp_datagram(udp_fd, ubuf, static_cast<size_t>(n), src, slen);
-                        }
-                    }
-
-                    if (pfds[0].revents & POLLIN) {
-                        while (true) {
-                            sockaddr_in caddr{};
-                            socklen_t clen = sizeof(caddr);
-                            plat::sock_t cfd = ::accept(tcp_fd, reinterpret_cast<sockaddr*>(&caddr), &clen);
-                            if (cfd == plat::kInvalidSocket) break;
-                            std::string req;
-                            uint8_t rbuf[2048];
-                            for (int w = 0; w < 20; ++w) {
-                                pollfd cpfd{cfd, POLLIN, 0};
-                                if (plat::poll_sockets(&cpfd, 1, 5) > 0 && (cpfd.revents & POLLIN)) {
-                                    ptrdiff_t rn = plat::sock_recv(cfd, rbuf, sizeof(rbuf));
-                                    if (rn > 0) {
-                                        req.append(reinterpret_cast<const char*>(rbuf), static_cast<size_t>(rn));
-                                        if (req.find("\r\n\r\n") != std::string::npos) break;
-                                    } else {
-                                        break;
-                                    }
-                                }
-                            }
-                            std::istringstream iss(req);
-                            std::string method, uri;
-                            if (iss >> method >> uri) {
-                                net::HttpResponse resp = engine.handle_http(method, uri);
-                                const char* reason = (resp.status_code == 200) ? "OK" :
-                                                     (resp.status_code == 404) ? "Not Found" : "Bad Request";
-                                std::ostringstream out;
-                                out << "HTTP/1.1 " << resp.status_code << " " << reason << "\r\n"
-                                    << "Content-Type: application/json\r\n"
-                                    << "Content-Length: " << resp.body.size() << "\r\n"
-                                    << "Connection: close\r\n\r\n";
-                                std::string hdr = out.str();
-                                std::vector<uint8_t> wire(hdr.begin(), hdr.end());
-                                wire.insert(wire.end(), resp.body.begin(), resp.body.end());
-                                size_t sent = 0;
-                                while (sent < wire.size()) {
-                                    ptrdiff_t sn = plat::sock_send(cfd, wire.data() + sent, wire.size() - sent);
-                                    if (sn <= 0) break;
-                                    sent += static_cast<size_t>(sn);
-                                }
-                            }
-                            plat::close_socket(cfd);
-                        }
-                    }
-                }
-            }
-
-            std::string addr() const { return "127.0.0.1:" + std::to_string(port); }
-
-            ~LoopbackRelay() {
-                stop_flag.store(true, std::memory_order_relaxed);
-                if (worker.joinable()) worker.join();
-                if (udp_fd != plat::kInvalidSocket) plat::close_socket(udp_fd);
-                if (tcp_fd != plat::kInvalidSocket) plat::close_socket(tcp_fd);
-            }
-        };
-
-        struct SelfTestFlagGuard {
-            DojaRuntime& rt;
-            explicit SelfTestFlagGuard(DojaRuntime& r) : rt(r) { rt.set_pvp_self_test(false); }
-            ~SelfTestFlagGuard() { rt.set_pvp_self_test(true); }
-        };
-
-        struct DefaultSingleFormatGuard {
-            pvp::PvpClientSession& sess;
-            uint8_t prev;
-            explicit DefaultSingleFormatGuard(pvp::PvpClientSession& s)
-                : sess(s), prev(s.preferred_format()) {
-                sess.set_preferred_format(pvp::PVP_FORMAT_SINGLE);
-            }
-        ~DefaultSingleFormatGuard() {
-            sess.set_preferred_format(prev);
-        }
-    };
+    // Uses shared LoopbackRelay, SelfTestFlagGuard & DefaultSingleFormatGuard from pvp_common.hpp
 
     // ------------------------------------------------------------------------
     // Suite F1: Immediate Custom Retract + "等待对手选牌确认..." + Synced 15f BATTLE START
@@ -10941,6 +10441,159 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                          " arena_diff=" + std::to_string(best_arena_diff));
             }
         });
+
+        // --- H12: CustomBackdropNoHandshakeBleed & Cold Init(0) Fallback ---
+        run_h_safe("SuiteH12-CustomBackdropNoHandshakeBleed", [&]() {
+            // 1) Cold no-.sav init(0) check
+            rt.restore_full_snapshot(base_heap);
+            generated_restore_statics(base_statics);
+            g_pvp_eng = PvpEngineState{};
+            sf_app_CpCanvas_max_hp = 0;
+            fn_app_CpCanvas_init___I__V(rt, cp, 0);
+            int32_t cold_hp = sf_app_CpCanvas_max_hp;
+            pvp::PvpFighterBuild cold_b = extract_local_build_from_sav(rt, cp);
+            if (cold_hp < 100 || cold_b.max_hp < 100) {
+                fail_msg("SuiteH12-ColdInit0", "cold_hp=" + std::to_string(cold_hp) +
+                         " ext_hp=" + std::to_string(cold_b.max_hp));
+            }
+
+            // 2) Live HANDSHAKE -> CUSTOM_SCREEN backdrop & selection persistence check
+            rt.restore_full_snapshot(base_heap);
+            generated_restore_statics(base_statics);
+            g_pvp_eng = PvpEngineState{};
+            rt.pvp_session().close_udp();
+
+            LoopbackRelay relay_12;
+            if (!relay_12.start()) {
+                fail_msg("SuiteH12-RelayStart", "LoopbackRelay::start failed");
+            } else {
+                SelfTestFlagGuard st_12(rt);
+                DefaultSingleFormatGuard def_fmt_12(rt.pvp_session());
+                pvp::PvpClientSession peer_12;
+                peer_12.set_preferred_format(pvp::PVP_FORMAT_SINGLE);
+                pvp::PvpFighterBuild peer_b = cold_b;
+                peer_b.player_name = "PeerP";
+
+                if (!rt.pvp_session().create_room(relay_12.addr(), "H12_H", "PoN0", "pon") ||
+                    !peer_12.join_room(relay_12.addr(), rt.pvp_session().room_id(), "H12_G", "PeerP", "pon")) {
+                    fail_msg("SuiteH12-RelayJoin", "create/join failed in H12");
+                } else {
+                    rt.set_suppress_av(false);
+                    for (int d = 0; d < 20; ++d) rt.present_screen();
+                    auto step_h12 = [&]() {
+                        (void)pvp_pon_tick_override_impl(rt, cp);
+                        rt.present_screen();
+                    };
+
+                    bool entered_custom = false;
+                    uint32_t hs_px = 0;
+                    for (int w = 0; w < 400; ++w) {
+                        peer_12.poll_udp();
+                        if (peer_12.match_started()) {
+                            peer_12.send_build_sync(peer_b);
+                        }
+                        step_h12();
+                        if (g_pvp_eng.phase == Phase::CUSTOM_SCREEN) {
+                            hs_px = rt.framebuffer()[50 * 240 + 200] & 0x00FFFFFFu;
+                            entered_custom = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    }
+
+                    if (!entered_custom) {
+                        fail_msg("SuiteH12-EnterCustom", "Did not reach Phase::CUSTOM_SCREEN");
+                    } else {
+                        const uint32_t* fb = rt.framebuffer();
+                        if (hs_px != 0x0A1428u) {
+                            fail_msg("SuiteH12-HandshakePrePaint", "Missing expected HANDSHAKE buffer before Custom");
+                        }
+
+                        // Advance past PoN's 3-frame MotionBack slide-in (cas_cnt == -3..0) to steady-state cas_cnt == 0
+                        for (int w = 0; w < 10 && sf_app_CpCanvas_cas_cnt < 0; ++w) {
+                            step_h12();
+                        }
+
+                        // Seed HANDSHAKE frame explicitly at steady-state cas_cnt == 0 (where native BattleTip skips imgMap)
+                        render_connecting_screen(rt, 1001, "PeerP", false);
+
+                        // Tick 1 & Tick 2 (idle)
+                        step_h12();
+                        step_h12();
+                        std::vector<uint32_t> tick2_fb(fb, fb + 240 * 240);
+
+                        int hs_bleed = 0;
+                        for (int y = 62; y <= 180; ++y) {
+                            for (int x = 130; x <= 236; ++x) {
+                                uint32_t rgb = tick2_fb[y * 240 + x] & 0x00FFFFFFu;
+                                if (rgb == 0x0A1428u || rgb == 0x081426u) hs_bleed++;
+                            }
+                        }
+                        int stage_px = 0;
+                        for (int y = 62; y <= 92; ++y) {
+                            for (int x = 130; x <= 236; ++x) {
+                                uint32_t rgb = tick2_fb[y * 240 + x] & 0x00FFFFFFu;
+                                if (rgb != 0 && rgb != 0x0A1428u && rgb != 0x081426u) stage_px++;
+                            }
+                        }
+                        int blue_panel_px = 0;
+                        for (int y = 122; y <= 178; ++y) {
+                            for (int x = 204; x <= 236; ++x) {
+                                uint32_t px = tick2_fb[y * 240 + x];
+                                int r = (px >> 16) & 0xFF;
+                                int b = px & 0xFF;
+                                if (b > r + 15 && b >= 100) blue_panel_px++;
+                            }
+                        }
+
+                        int opp_i = 1 - g_pvp_eng.local_idx;
+                        int32_t saved_opp_hp = g_pvp_eng.core.sides[opp_i].hp;
+                        g_pvp_eng.core.sides[opp_i].hp = 0;
+                        render_custom_screen_backdrop(rt, cp);
+                        int opp_sprite_diff = 0;
+                        for (int y = 70; y <= 180; ++y) {
+                            for (int x = 120; x < 240; ++x) {
+                                if ((fb[y * 240 + x] & 0x00FFFFFFu) != (tick2_fb[y * 240 + x] & 0x00FFFFFFu)) {
+                                    opp_sprite_diff++;
+                                }
+                            }
+                        }
+                        g_pvp_eng.core.sides[opp_i].hp = saved_opp_hp;
+                        std::copy_n(tick2_fb.data(), 240 * 240, rt.framebuffer());
+
+                        // Tick 3 (select slot 0) & Tick 4 (idle persistence)
+                        sf_app_CpCanvas_sel_cas_mode = 0;
+                        sf_app_CpCanvas_sel_cas_tip = 0;
+                        rt.inject_key_at_frame(rt.frame_count() + 1, 20);
+                        step_h12();
+                        int32_t t3_set0 = (sf_app_CpCanvas_set_tip > 0) ? rt.iaload(sf_app_CpCanvas_set_tip, 0) : -1;
+                        int32_t t3_sel = sf_app_CpCanvas_sel_cnt;
+
+                        step_h12();
+                        int32_t t4_set0 = (sf_app_CpCanvas_set_tip > 0) ? rt.iaload(sf_app_CpCanvas_set_tip, 0) : -1;
+                        int32_t t4_sel = sf_app_CpCanvas_sel_cnt;
+                        int32_t t4_soft1 = (sf_app_CpCanvas_soft_id > 0 && rt.array_length(sf_app_CpCanvas_soft_id) > 1)
+                            ? rt.iaload(sf_app_CpCanvas_soft_id, 1)
+                            : -1;
+
+                        if (hs_bleed != 0 || stage_px < 200 || blue_panel_px < 80 || opp_sprite_diff < 40 ||
+                            t3_set0 != 0 || t3_sel < 1 || t4_set0 != 0 || t4_sel < 1 || t4_soft1 != 0) {
+                            fail_msg("SuiteH12-RenderAndTray",
+                                     "bleed=" + std::to_string(hs_bleed) +
+                                     " stage=" + std::to_string(stage_px) +
+                                     " blue=" + std::to_string(blue_panel_px) +
+                                     " opp_diff=" + std::to_string(opp_sprite_diff) +
+                                     " set0=" + std::to_string(t3_set0) + "->" + std::to_string(t4_set0) +
+                                     " sel=" + std::to_string(t3_sel) + "->" + std::to_string(t4_sel) +
+                                     " soft1=" + std::to_string(t4_soft1));
+                        }
+                    }
+                }
+                peer_12.close_udp();
+                rt.pvp_session().close_udp();
+                cleanup_and_restore_singleplayer(rt, false);
+            }
+        });
     }
     std::printf("[PvP SELF-TEST] Suite H complete: PA, Pool Isolation, Traps, Shield/AntiDmg, Mine Judge, Disconnects, Sanitize & Interp verified (failures=%d)\n",
                 failures);
@@ -11054,11 +10707,7 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
         g_pvp_eng.local_idx = net.is_host() ? 0 : 1;
         g_pvp_eng.match_seed = net.rng_seed() ? net.rng_seed() : 0x2468ACE1u;
 
-        if (!g_pvp_eng.has_pre_match_snap) {
-            rt.save_full_snapshot(g_pvp_eng.pre_match_heap);
-            generated_save_statics(g_pvp_eng.pre_match_statics);
-            g_pvp_eng.has_pre_match_snap = true;
-        }
+        capture_pre_match_snapshot(rt, g_pvp_eng);
 
         g_pvp_eng.local_build = extract_local_build_from_sav(rt, cp);
         g_pvp_eng.build_prepared = true;
@@ -11094,40 +10743,17 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
             net.close_udp();
             rt.show_ui_toast("对手连接超时，判定获胜!", 150);
         } else {
-            // Draw cyber-grid connecting screen
-            rt.fb_fill_rect_alpha(0, 0, 240, 240, 0xFF0A1428u);
-            rt.fb_fill_rect_alpha(16, 68, 208, 104, 0xF0142448u);
-            rt.fb_draw_border(16, 68, 208, 104, 0xFF5898FFu);
-            std::string t1 = "NETBATTLE 联机对战准备中";
-            if (net.is_triple_battle()) {
-                t1 += " [三回战]";
-            }
-            std::string t2 = "房间 #" + std::to_string(net.room_id()) + "  VS  " + net.opponent_name();
-            std::string t3 = "正在同步双方存档牌组与领航员改造...";
-            rt.fb_draw_text(t1, 120 - rt.fb_measure_text(t1) / 2, 94, 0xFFFFE066u);
-            rt.fb_draw_text(t2, 120 - rt.fb_measure_text(t2) / 2, 122, 0xFFFFFFFFu);
-            rt.fb_draw_text(t3, 120 - rt.fb_measure_text(t3) / 2, 148, 0xFF88CCFFu);
+            render_connecting_screen(rt, net.room_id(), net.opponent_name(), net.is_triple_battle());
 
             if (net.has_remote_build() && net.local_build_acked()) {
                 int loc_i = g_pvp_eng.local_idx;
                 g_pvp_eng.builds[loc_i] = g_pvp_eng.local_build;
                 g_pvp_eng.builds[1 - loc_i] = sanitize_fighter_build(rt, net.remote_build());
 
-                g_pvp_eng.base_match_seed = net.rng_seed() ? net.rng_seed() : 0x2468ACE1u;
-                g_pvp_eng.is_triple_battle = net.is_triple_battle();
                 if (net.is_host() && net.preferred_format() == pvp::PVP_FORMAT_TRIPLE && !net.peer_supports_bo3()) {
                     rt.show_ui_toast("对手版本较旧，已自动切换为一回战", 150);
                 }
-                g_pvp_eng.bo3_game_index = 0;
-                g_pvp_eng.bo3_wins[0] = 0;
-                g_pvp_eng.bo3_wins[1] = 0;
-                g_pvp_eng.bo3_game_results[0] = -2;
-                g_pvp_eng.bo3_game_results[1] = -2;
-                g_pvp_eng.bo3_game_results[2] = -2;
-                g_pvp_eng.match_winner = -2;
-                g_pvp_eng.round_result_ticks = 0;
-                g_pvp_eng.desync_warnings = 0;
-                g_pvp_eng.match_seed = derive_bo3_game_seed(g_pvp_eng.base_match_seed, 0);
+                reset_bo3_series_state(g_pvp_eng, net.rng_seed(), net.is_triple_battle());
 
                 init_pvp_battle_arena(rt, cp);
                 enter_custom_screen_phase(rt, cp);
@@ -11245,6 +10871,7 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
                 }
                 sanitize_custom_tray_and_folder(rt, g_pvp_eng.local_permanently_consumed_mask);
             } else {
+                render_custom_screen_backdrop(rt, cp);
                 sf_app_CpCanvas_key = bt_key;
                 rt.set_keypad_override(true, local_mask);
                 fn_app_CpCanvas_BattleTip_____V(rt, cp);
@@ -11421,16 +11048,7 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
             } else {
                 // Render arena behind "Waiting for opponent..." banner
                 render_pvp_combat_frame(rt, cp);
-                if (g_pvp_eng.core.custom_round >= 15) {
-                    rt.fb_fill_rect_alpha(44, 78, 152, 20, 0xEE2C0C18u);
-                    rt.fb_draw_border(44, 78, 152, 20, 0xFFFF5868u);
-                    std::string ft_wait = "FINAL TURN · 最终回合";
-                    rt.fb_draw_text(ft_wait, 120 - rt.fb_measure_text(ft_wait) / 2, 92, 0xFFFFE866u);
-                }
-                rt.fb_fill_rect_alpha(28, 102, 184, 36, 0xE6101C38u);
-                rt.fb_draw_border(28, 102, 184, 36, 0xFF68A8FFu);
-                std::string wait_msg = "等待对手选牌确认...";
-                rt.fb_draw_text(wait_msg, 120 - rt.fb_measure_text(wait_msg) / 2, 125, 0xFFFFE878u);
+                render_waiting_custom_banner(rt, g_pvp_eng.core.custom_round >= 15);
                 if (rt.pvp_auto_bot()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
@@ -11476,20 +11094,9 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
         render_round_banner_overlay(rt, g_pvp_eng.banner_ticks, g_pvp_eng.core.custom_round);
         g_pvp_eng.banner_ticks++;
 
-        if (g_pvp_eng.banner_ticks >= 15) {
+        if (g_pvp_eng.banner_ticks >= kBannerTicks) {
             int loc_i = g_pvp_eng.local_idx;
-            int32_t held_now = rt.poll_local_pvp_keypad();
-            int32_t suppress_bits = (0xF << 16) | (1 << 21) | (1 << 22);
-            if (g_pvp_eng.core.sides[loc_i].tip_no >= 0) {
-                suppress_bits |= (1 << 20);
-            }
-            g_pvp_eng.round_held_edge_suppress_mask = held_now & suppress_bits;
-            g_pvp_eng.stall_frames = 0;
-            g_pvp_eng.combat_stall_frames = 0;
-            g_pvp_eng.phase_timer = 0;
-            g_pvp_eng.throttler.reset();
-            g_pvp_eng.phase = Phase::COMBAT;
-            rt.reset_interpolator();
+            transition_banner_to_combat(rt, g_pvp_eng, g_pvp_eng.core.sides[loc_i].tip_no >= 0);
         }
         return true;
     }
@@ -11527,32 +11134,12 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
         bool pending_transition = (g_pvp_eng.core.open_custom_req || g_pvp_eng.core.winner != -2);
 
         // Schedule new local inputs immutably: never overwrite an already-scheduled turn during a stall!
-        if (!pending_transition && g_pvp_eng.round_needs_initial_schedule) {
-            size_t s0 = cur_t % hist_n;
-            g_pvp_eng.local_inputs[s0] = raw_local;
-            g_pvp_eng.remote_confirmed[s0] = false;
-            g_pvp_eng.max_scheduled_turn = cur_t;
-            g_pvp_eng.round_needs_initial_schedule = false;
-        }
-        uint32_t target_sched = pending_transition
-            ? (cur_t > g_pvp_eng.round_start_turn ? cur_t - 1 : g_pvp_eng.round_start_turn)
-            : (cur_t + kInputDelayFrames);
-        while (g_pvp_eng.max_scheduled_turn < target_sched) {
-            uint32_t next_s = g_pvp_eng.max_scheduled_turn + 1;
-            size_t s_idx = next_s % hist_n;
-            g_pvp_eng.local_inputs[s_idx] = raw_local;
-            g_pvp_eng.remote_confirmed[s_idx] = false;
-            g_pvp_eng.max_scheduled_turn = next_s;
-        }
+        schedule_local_combat_inputs(g_pvp_eng, cur_t, raw_local, pending_transition);
 
         // Build up to 8-frame redundant input bundle scoped strictly to the current round
         uint32_t send_top = g_pvp_eng.max_scheduled_turn;
-        uint8_t bundle_cnt = static_cast<uint8_t>(
-            std::min<uint32_t>(8u, send_top - g_pvp_eng.round_start_turn + 1u));
         int32_t hist_newest_first[8] = {0};
-        for (uint8_t i = 0; i < bundle_cnt; ++i) {
-            hist_newest_first[i] = g_pvp_eng.local_inputs[(send_top - i) % hist_n];
-        }
+        uint8_t bundle_cnt = build_redundant_input_bundle(g_pvp_eng, send_top, hist_newest_first);
         uint16_t cur_hash = (!pending_transition &&
                              send_top == cur_t + kInputDelayFrames &&
                              g_pvp_eng.first_unconfirmed_turn >= cur_t)
@@ -11576,120 +11163,24 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
         net.poll_udp();
 
         // Check if any older turn within this round's rollback window received a mispredicted remote input
-        uint32_t oldest_rb = (cur_t >= kRollbackWindow - 2) ? (cur_t - (kRollbackWindow - 2)) : 0;
-        oldest_rb = std::max(oldest_rb, g_pvp_eng.round_start_turn);
-        uint32_t rollback_from = UINT32_MAX;
-        for (uint32_t t = oldest_rb; t < cur_t; ++t) {
-            int32_t net_rem = 0;
-            if (net.get_remote_turn_input(rnd, t, net_rem)) {
-                size_t idx = t % hist_n;
-                if (!g_pvp_eng.remote_confirmed[idx]) {
-                    if (g_pvp_eng.predicted_remote[idx] != net_rem && rollback_from == UINT32_MAX) {
-                        rollback_from = t;
-                    }
-                    g_pvp_eng.predicted_remote[idx] = net_rem;
-                    g_pvp_eng.remote_confirmed[idx] = true;
-                }
-            }
-        }
+        uint32_t rollback_from = scan_mispredicted_turns(g_pvp_eng, net, rnd, cur_t);
 
         // Execute GGPO Rollback & fast-forward resimulation if remote input differed from prediction!
-        if (rollback_from != UINT32_MAX && restore_rollback_slot(rt, rollback_from)) {
-            rt.reset_interpolator();
-            uint32_t prev_cur_t = cur_t;
-            for (uint32_t t = rollback_from; t < prev_cur_t; ++t) {
-                size_t idx = t % hist_n;
-                int32_t loc_m = g_pvp_eng.local_inputs[idx];
-                int32_t rem_m = 0;
-                bool is_pred = false;
-                if (g_pvp_eng.remote_confirmed[idx]) {
-                    rem_m = g_pvp_eng.predicted_remote[idx];
-                } else if (net.get_remote_turn_input(rnd, t, rem_m)) {
-                    g_pvp_eng.predicted_remote[idx] = rem_m;
-                    g_pvp_eng.remote_confirmed[idx] = true;
-                } else {
-                    rem_m = (t > g_pvp_eng.round_start_turn)
-                        ? g_pvp_eng.predicted_remote[(t - 1) % hist_n]
-                        : g_pvp_eng.round_initial_remote_pred;
-                    g_pvp_eng.predicted_remote[idx] = rem_m;
-                    is_pred = true;
-                }
-                int32_t p0_m = (g_pvp_eng.local_idx == 0) ? loc_m : rem_m;
-                int32_t p1_m = (g_pvp_eng.local_idx == 1) ? loc_m : rem_m;
+        cur_t = execute_rollback_resim(
+            rt, g_pvp_eng, net, rnd, rollback_from, cur_t,
+            [&](int32_t p0_m, int32_t p1_m) { step_pvp_combat_tick(rt, cp, p0_m, p1_m); },
+            [](DojaRuntime& r) { return compute_combat_state_hash(r); });
 
-                save_rollback_slot(rt, t, p0_m, p1_m, is_pred);
-                step_pvp_combat_tick(rt, cp, p0_m, p1_m);
-                if (g_pvp_eng.core.open_custom_req || g_pvp_eng.core.winner != -2) {
-                    break;
-                }
-            }
-            cur_t = g_pvp_eng.core.combat_turn;
-            for (uint32_t u = cur_t; u < prev_cur_t; ++u) {
-                if (u >= g_pvp_eng.round_start_turn) {
-                    g_pvp_eng.remote_confirmed[u % hist_n] = false;
-                }
-            }
-        }
-
-        // Advance monotonic confirmed frontier
-        while (g_pvp_eng.first_unconfirmed_turn < cur_t) {
-            uint32_t ft = g_pvp_eng.first_unconfirmed_turn;
-            size_t idx = ft % hist_n;
-            if (!g_pvp_eng.remote_confirmed[idx]) {
-                int32_t late_m = 0;
-                if (net.get_remote_turn_input(rnd, ft, late_m)) {
-                    g_pvp_eng.predicted_remote[idx] = late_m;
-                    g_pvp_eng.remote_confirmed[idx] = true;
-                } else {
-                    break;
-                }
-            }
-            g_pvp_eng.first_unconfirmed_turn++;
-        }
-
-        // Decoupled state-hash check up to first_unconfirmed_turn so out-of-order delayed hashes are not skipped
-        while (g_pvp_eng.last_hash_checked_turn < g_pvp_eng.first_unconfirmed_turn) {
-            uint32_t check_t = g_pvp_eng.last_hash_checked_turn;
-            if (check_t + kRollbackWindow <= cur_t + 2u) {
-                g_pvp_eng.last_hash_checked_turn++;
-                continue;
-            }
-            int32_t dummy_m = 0;
-            uint16_t peer_h = 0;
-            if (!net.get_remote_turn_input(rnd, check_t + kInputDelayFrames, dummy_m, &peer_h)) {
-                break;
-            }
-            if (peer_h != 0) {
-                const RollbackSlot& rbs = g_pvp_eng.rb_ring[check_t % kRollbackWindow];
-                if (rbs.turn == check_t && rbs.pre_hash != 0 && rbs.pre_hash != peer_h) {
-                    if (++g_pvp_eng.desync_warnings <= 8) {
-                        std::fprintf(stderr,
-                                     "[PvP DESYNC] round=%u turn=%u local_hash=0x%04x remote_hash=0x%04x\n",
-                                     static_cast<unsigned>(rnd), check_t,
-                                     static_cast<unsigned>(rbs.pre_hash),
-                                     static_cast<unsigned>(peer_h));
-                        rt.show_ui_toast("警告: 检测到对战状态不同步!", 150);
-                    }
-                }
-            }
-            g_pvp_eng.last_hash_checked_turn++;
-        }
+        // Advance monotonic confirmed frontier & decoupled state-hash desync verification
+        advance_confirmed_frontier(g_pvp_eng, net, rnd, cur_t);
+        verify_confirmed_state_hashes(rt, g_pvp_eng, net, rnd, cur_t);
 
         if (g_pvp_eng.first_unconfirmed_turn > pre_tick_unconf) {
             g_pvp_eng.combat_stall_frames = 0;
         }
 
         auto flush_round_tail_and_transition = [&]() -> bool {
-            if (cur_t > g_pvp_eng.round_start_turn) {
-                uint32_t last_t = cur_t - 1;
-                uint8_t fcnt = static_cast<uint8_t>(
-                    std::min<uint32_t>(8u, last_t - g_pvp_eng.round_start_turn + 1u));
-                int32_t fhist[8] = {0};
-                for (uint8_t i = 0; i < fcnt; ++i) {
-                    fhist[i] = g_pvp_eng.local_inputs[(last_t - i) % hist_n];
-                }
-                net.send_input_bundle(rnd, last_t, fhist, fcnt, 0);
-            }
+            flush_round_tail_bundle(g_pvp_eng, net, rnd, cur_t);
             g_pvp_eng.stall_frames = 0;
             g_pvp_eng.combat_stall_frames = 0;
             if (g_pvp_eng.core.winner != -2) {
@@ -11717,7 +11208,7 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
                 } else {
                     g_pvp_eng.combat_stall_frames = 0;
                 }
-                if (g_pvp_eng.combat_stall_frames >= 16 * 12) {
+                if (g_pvp_eng.combat_stall_frames >= kStallTimeoutTicks) {
                     std::fprintf(stderr,
                                  "[PvP STALL TIMEOUT] round=%u turn=%u unconf=%u (transition wait)\n",
                                  static_cast<unsigned>(rnd), cur_t, g_pvp_eng.first_unconfirmed_turn);
@@ -11730,10 +11221,7 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
                 net.request_missing_input(rnd, g_pvp_eng.first_unconfirmed_turn);
                 render_pvp_combat_frame(rt, cp);
                 if (g_pvp_eng.stall_frames >= 8) {
-                    std::string sync_txt = "网络同步中...";
-                    rt.fb_fill_rect_alpha(72, 108, 96, 22, 0xD8101830u);
-                    rt.fb_draw_border(72, 108, 96, 22, 0xFFFFB84Cu);
-                    rt.fb_draw_text(sync_txt, 120 - rt.fb_measure_text(sync_txt) / 2, 123, 0xFFFFE088u);
+                    render_sync_stall_banner(rt);
                 }
                 if (rt.pvp_auto_bot()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -11772,7 +11260,7 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
             } else {
                 g_pvp_eng.combat_stall_frames = 0;
             }
-            if (g_pvp_eng.combat_stall_frames >= 16 * 12) {
+            if (g_pvp_eng.combat_stall_frames >= kStallTimeoutTicks) {
                 std::fprintf(stderr,
                              "[PvP STALL TIMEOUT] round=%u turn=%u unconf=%u (max predict wait)\n",
                              static_cast<unsigned>(rnd), cur_t, g_pvp_eng.first_unconfirmed_turn);
@@ -11785,10 +11273,7 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
             net.request_missing_input(rnd, g_pvp_eng.first_unconfirmed_turn);
             render_pvp_combat_frame(rt, cp);
             if (g_pvp_eng.stall_frames >= 3) {
-                std::string sync_txt = "网络同步中...";
-                rt.fb_fill_rect_alpha(72, 108, 96, 22, 0xD8101830u);
-                rt.fb_draw_border(72, 108, 96, 22, 0xFFFFB84Cu);
-                rt.fb_draw_text(sync_txt, 120 - rt.fb_measure_text(sync_txt) / 2, 123, 0xFFFFE088u);
+                render_sync_stall_banner(rt);
             }
             if (rt.pvp_auto_bot()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -11798,37 +11283,8 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
         g_pvp_eng.stall_frames = 0;
         g_pvp_eng.combat_stall_frames = 0;
 
-        // HCTOrganization/trill (getgud + throttler.rs) rollback clock-drift synchronization:
-        //  1. Leading peer smoothly stretches sf_app_CpCanvas_mill by extra_wait_ms (0..38ms) using
-        //     latency-invariant skew = local_adv - remote_adv gated by speculation_balance.
-        //  2. Trailing peer with >= 2 confirmed future remote turns already buffered trims mill to catch up fast.
-        {
-            uint32_t max_rem_f = 0;
-            bool has_rem_f = net.get_highest_remote_turn_frame(rnd, max_rem_f);
-            int32_t fresh_rem_frontier = has_rem_f
-                ? static_cast<int32_t>(max_rem_f)
-                : static_cast<int32_t>(g_pvp_eng.round_start_turn);
-            int32_t fresh_local_adv = static_cast<int32_t>(send_top) - fresh_rem_frontier;
-            int16_t rem_adv = 0;
-            int32_t skew = 0;
-            if (net.get_remote_tick_advantage(rnd, rem_adv)) {
-                skew = fresh_local_adv - static_cast<int32_t>(rem_adv);
-            } else {
-                int32_t one_way_ticks = (net.rtt_ms() > 0) ? ((net.rtt_ms() + 62) / 124) : 0;
-                skew = 2 * (fresh_local_adv - one_way_ticks);
-            }
-            int64_t extra_wait_ms = g_pvp_eng.throttler.update_extra_wait_ms(skew, fresh_local_adv);
-            if (extra_wait_ms > 0) {
-                sf_app_CpCanvas_mill += extra_wait_ms;
-                if (rt.pvp_auto_bot()) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp<int64_t>(extra_wait_ms / 6, 1, 5)));
-                }
-            } else if (has_rem_f && fresh_local_adv <= -2 && !rt.fast_forward()) {
-                int32_t backlog = -fresh_local_adv;
-                int64_t catchup_ms = std::min<int64_t>(42, static_cast<int64_t>(backlog) * 14);
-                sf_app_CpCanvas_mill -= catchup_ms;
-            }
-        }
+        // HCTOrganization/trill (getgud + throttler.rs) rollback clock-drift synchronization
+        apply_trill_clock_sync(rt, g_pvp_eng, net, rnd, send_top);
 
         if (!cur_rem_confirmed) {
             cur_rem_mask = (cur_t > g_pvp_eng.round_start_turn)
@@ -11880,35 +11336,18 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
 
         int loc_i = g_pvp_eng.local_idx;
         int opp_i = 1 - loc_i;
-        int32_t loc_dmg = g_pvp_eng.core.damage_dealt[loc_i];
-        int32_t opp_dmg = g_pvp_eng.core.damage_dealt[opp_i];
-        bool is_draw = (g_pvp_eng.core.winner == -1);
-        bool is_win = (g_pvp_eng.core.winner == loc_i);
-
-        rt.fb_fill_rect_alpha(16, 68, 208, 92, 0xF00E1830u);
-        rt.fb_draw_border(16, 68, 208, 92, 0xFFFFD84Cu);
-
-        std::string title = "TIME UP! 伤害判定 (JUDGE)";
-        rt.fb_draw_text(title, 120 - rt.fb_measure_text(title) / 2, 88, 0xFFFFE866u);
-
-        std::string loc_line = g_pvp_eng.builds[loc_i].player_name + " 有效伤害: " + std::to_string(loc_dmg);
-        std::string opp_line = g_pvp_eng.builds[opp_i].player_name + " 有效伤害: " + std::to_string(opp_dmg);
-        rt.fb_draw_text(loc_line, 26, 110, 0xFF88CCFFu);
-        rt.fb_draw_text(opp_line, 26, 128, 0xFFFF98A8u);
-
-        if (g_pvp_eng.judge_ticks >= 12) {
-            uint32_t vcol = is_draw ? 0xFFFFD866u : (is_win ? 0xFF58FF98u : 0xFFFF6070u);
-            std::string verdict = is_draw
-                ? "判定结果: 平局 (DRAW)"
-                : (is_win ? "判定结果: 己方胜利!" : "判定结果: 对手胜利...");
-            rt.fb_draw_text(verdict, 120 - rt.fb_measure_text(verdict) / 2, 150, vcol);
-        }
+        render_judge_overlay(rt,
+                             g_pvp_eng.builds[loc_i].player_name, g_pvp_eng.core.damage_dealt[loc_i],
+                             g_pvp_eng.builds[opp_i].player_name, g_pvp_eng.core.damage_dealt[opp_i],
+                             g_pvp_eng.core.winner == -1,
+                             g_pvp_eng.core.winner == loc_i,
+                             g_pvp_eng.judge_ticks);
 
         if (rt.pvp_auto_bot() && !rt.fast_forward() && (g_pvp_eng.judge_ticks & 3) == 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         g_pvp_eng.judge_ticks++;
-        if (g_pvp_eng.judge_ticks >= 48) {
+        if (g_pvp_eng.judge_ticks >= kJudgeTicks) {
             conclude_current_game(rt, cp);
         }
         return true;
@@ -11936,24 +11375,18 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
         int g_win = (g_pvp_eng.bo3_game_index < 3)
             ? g_pvp_eng.bo3_game_results[g_pvp_eng.bo3_game_index]
             : g_pvp_eng.core.winner;
-        uint32_t hdr_col = (g_win == -1) ? 0xFFFFD866u : ((g_win == loc_i) ? 0xFF58FF98u : 0xFFFF6070u);
-        std::string line1 = "GAME " + std::to_string(g_pvp_eng.bo3_game_index + 1) +
-            (g_win == -1 ? " - DRAW!" : (g_win == loc_i ? " - WIN!" : " - LOSE"));
-        std::string line2 = "当前比分: " + std::to_string(g_pvp_eng.bo3_wins[loc_i]) + " - " +
-            std::to_string(g_pvp_eng.bo3_wins[1 - loc_i]);
-        std::string line3 = "即将进入第 " + std::to_string(g_pvp_eng.bo3_game_index + 2) + " 局...";
-
-        rt.fb_fill_rect_alpha(18, 74, 204, 76, 0xEE0E1830u);
-        rt.fb_draw_border(18, 74, 204, 76, 0xFF58B8FFu);
-        rt.fb_draw_text(line1, 120 - rt.fb_measure_text(line1) / 2, 96, hdr_col);
-        rt.fb_draw_text(line2, 120 - rt.fb_measure_text(line2) / 2, 118, 0xFFFFFFFFu);
-        rt.fb_draw_text(line3, 120 - rt.fb_measure_text(line3) / 2, 140, 0xFF88CCFFu);
+        render_round_result_overlay(rt,
+                                    g_pvp_eng.bo3_game_index,
+                                    g_win,
+                                    loc_i,
+                                    g_pvp_eng.bo3_wins[loc_i],
+                                    g_pvp_eng.bo3_wins[1 - loc_i]);
 
         if (rt.pvp_auto_bot() && !rt.fast_forward()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         g_pvp_eng.round_result_ticks++;
-        if (g_pvp_eng.round_result_ticks >= 48) {
+        if (g_pvp_eng.round_result_ticks >= kRoundResultTicks) {
             start_next_bo3_game(rt, cp);
         }
         return true;
@@ -11974,26 +11407,13 @@ static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp) {
 
         int loc_i = g_pvp_eng.local_idx;
         int eff_win = (g_pvp_eng.match_winner != -2) ? g_pvp_eng.match_winner : g_pvp_eng.core.winner;
-        bool is_draw = (eff_win == -1);
-        bool is_win = (eff_win == loc_i);
-        uint32_t border_col = is_draw ? 0xFFFFD866u : (is_win ? 0xFF58FF98u : 0xFFFF6070u);
-        std::string headline = is_draw ? "DRAW GAME - 平局!" : (is_win ? "YOU WIN!! 对战胜利!" : "YOU LOSE... 对战落败");
-        std::string subline = "按 决定键 返回游戏 (" + std::to_string(std::max(0, (96 - g_pvp_eng.result_ticks) / 16)) + "s)";
-
-        if (g_pvp_eng.is_triple_battle) {
-            std::string series_line = "三回战总比分 " + std::to_string(g_pvp_eng.bo3_wins[loc_i]) + " - " +
-                std::to_string(g_pvp_eng.bo3_wins[1 - loc_i]);
-            rt.fb_fill_rect_alpha(20, 82, 200, 66, 0xEE0C162Cu);
-            rt.fb_draw_border(20, 82, 200, 66, border_col);
-            rt.fb_draw_text(headline, 120 - rt.fb_measure_text(headline) / 2, 104, border_col);
-            rt.fb_draw_text(series_line, 120 - rt.fb_measure_text(series_line) / 2, 122, 0xFFFFE866u);
-            rt.fb_draw_text(subline, 120 - rt.fb_measure_text(subline) / 2, 140, 0xFFD8E6FFu);
-        } else {
-            rt.fb_fill_rect_alpha(20, 86, 200, 56, 0xEE0C162Cu);
-            rt.fb_draw_border(20, 86, 200, 56, border_col);
-            rt.fb_draw_text(headline, 120 - rt.fb_measure_text(headline) / 2, 110, border_col);
-            rt.fb_draw_text(subline, 120 - rt.fb_measure_text(subline) / 2, 132, 0xFFD8E6FFu);
-        }
+        render_match_result_overlay(rt,
+                                    eff_win == -1,
+                                    eff_win == loc_i,
+                                    g_pvp_eng.result_ticks,
+                                    g_pvp_eng.is_triple_battle,
+                                    g_pvp_eng.bo3_wins[loc_i],
+                                    g_pvp_eng.bo3_wins[1 - loc_i]);
 
         int32_t k = rt.poll_local_pvp_keypad();
         if (net.active() && g_pvp_eng.active_room_id != 0 && net.room_id() != g_pvp_eng.active_room_id) {

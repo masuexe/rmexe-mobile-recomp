@@ -34,12 +34,36 @@ enum PvpPktType : uint8_t {
     PKT_MATCH_END     = 15,
 };
 
+constexpr uint8_t kPvpProtocolVersion = 1;
+
 constexpr uint8_t PVP_FORMAT_SINGLE = 0;
 constexpr uint8_t PVP_FORMAT_TRIPLE = 1;
 constexpr uint8_t PVP_HDR_FLAG_TRIPLE = 0x01;
 constexpr uint8_t PVP_HDR_FLAG_FMT_KNOWN = 0x02;
 
-// Player's .sav Fighter Build (HP, Buster levels, Element, NaviCust skills, 30-chip Folder + Regular)
+inline void push_le32(std::vector<uint8_t>& buf, int32_t v) {
+    uint32_t u = static_cast<uint32_t>(v);
+    buf.push_back(static_cast<uint8_t>(u & 0xFFu));
+    buf.push_back(static_cast<uint8_t>((u >> 8) & 0xFFu));
+    buf.push_back(static_cast<uint8_t>((u >> 16) & 0xFFu));
+    buf.push_back(static_cast<uint8_t>((u >> 24) & 0xFFu));
+}
+
+inline uint16_t read_le16(const uint8_t* p) {
+    return static_cast<uint16_t>(static_cast<uint16_t>(p[0]) |
+                                 (static_cast<uint16_t>(p[1]) << 8));
+}
+
+inline int32_t read_le32(const uint8_t* p) {
+    uint32_t u = static_cast<uint32_t>(p[0]) |
+                 (static_cast<uint32_t>(p[1]) << 8) |
+                 (static_cast<uint32_t>(p[2]) << 16) |
+                 (static_cast<uint32_t>(p[3]) << 24);
+    return static_cast<int32_t>(u);
+}
+
+// Player's .sav Fighter Build (PoN v1 and LoN v2 compatible:
+// HP, Buster levels, Element, NaviCust skills, 30-chip Folder + Regular, optional LoN v2 trailer)
 struct PvpFighterBuild {
     int32_t max_hp = 100;
     int32_t ata_lv = 1;       // Buster Attack 1..5
@@ -47,29 +71,52 @@ struct PvpFighterBuild {
     int32_t r_zoku = 0;       // 0=Null, 1=Heat, 2=Aqua, 3=Elec, 4=Wood
     int32_t regu_flg = 0;     // 1 if Regular Chip active
     int32_t regu_id = 0;      // Regular slot index 0..29 in folder
-    int32_t skill_kouka[29]{};
-    int32_t folder_packed[30]{}; // (tip_id << 8) | code_id
+    int8_t  skill_kouka[31]{}; // [0..28] in v1 wire prefix; [29..30] in LoN v2 trailer
+    int32_t folder_packed[30]{}; // (tip_id << 8) | code_id (PoN tip_id 1..212, LoN tip_id 1..270)
     std::string player_name;
 
+    // LoN v2 optional extension fields (omitted on wire when has_lon_v2 == false)
+    bool     has_lon_v2 = false;
+    int32_t  dell_time[10]{};
+    uint8_t  arm_flg = 0;
+    uint8_t  get_arm_mask = 0; // 6-bit mask 0..0x3F for get_arm[0..5]
+
+    static constexpr size_t kV1MinWireSize = 261;
+    // Tagged 'L','N',2 trailer: magic+ver (3B) + skill[29..30] (2B) + arm_flg (1B) + get_arm_mask (1B) + 10*le32 dell_time (40B)
+    static constexpr size_t kLonV2TrailerSize = 47;
+    static constexpr size_t kMaxWireSize = kV1MinWireSize + 24 + kLonV2TrailerSize; // 332
+
     std::vector<uint8_t> serialize() const {
+        std::string nm = player_name.substr(0, 24);
         std::vector<uint8_t> out;
-        out.reserve(276);
+        out.reserve(kV1MinWireSize + nm.size() + (has_lon_v2 ? kLonV2TrailerSize : 0));
         net::push_be32(out, max_hp);
         net::push_be32(out, ata_lv);
         net::push_be32(out, cha_lv);
         net::push_be32(out, r_zoku);
         net::push_be32(out, regu_flg);
         net::push_be32(out, regu_id);
-        for (int i = 0; i < 29; ++i) net::push_be32(out, skill_kouka[i]);
+        for (int i = 0; i < 29; ++i) net::push_be32(out, static_cast<int32_t>(skill_kouka[i]));
         for (int i = 0; i < 30; ++i) net::push_be32(out, folder_packed[i]);
-        std::string nm = player_name.substr(0, 24);
         out.push_back(static_cast<uint8_t>(nm.size()));
         out.insert(out.end(), nm.begin(), nm.end());
+        if (has_lon_v2) {
+            out.push_back('L');
+            out.push_back('N');
+            out.push_back(2);
+            out.push_back(static_cast<uint8_t>(skill_kouka[29]));
+            out.push_back(static_cast<uint8_t>(skill_kouka[30]));
+            out.push_back(arm_flg);
+            out.push_back(get_arm_mask);
+            for (int i = 0; i < 10; ++i) push_le32(out, dell_time[i]);
+        }
         return out;
     }
 
     static bool deserialize(const uint8_t* d, size_t len, PvpFighterBuild& b) {
-        if (!d || len < 261) return false;
+        if (!d || len < kV1MinWireSize) return false;
+        const uint8_t nlen_chk = d[kV1MinWireSize - 1];
+        if (kV1MinWireSize + static_cast<size_t>(nlen_chk) > len) return false;
         auto rd32 = [&](size_t off) -> int32_t {
             return static_cast<int32_t>(
                 (static_cast<uint32_t>(d[off]) << 24) |
@@ -84,16 +131,41 @@ struct PvpFighterBuild {
         b.r_zoku   = rd32(p); p += 4;
         b.regu_flg = rd32(p); p += 4;
         b.regu_id  = rd32(p); p += 4;
-        for (int i = 0; i < 29; ++i) { b.skill_kouka[i] = rd32(p); p += 4; }
+        for (int i = 0; i < 29; ++i) {
+            b.skill_kouka[i] = static_cast<int8_t>(std::clamp<int32_t>(rd32(p), -128, 127));
+            p += 4;
+        }
         for (int i = 0; i < 30; ++i) { b.folder_packed[i] = rd32(p); p += 4; }
         uint8_t nlen = d[p++];
         if (p + nlen > len) return false;
         b.player_name.assign(reinterpret_cast<const char*>(d + p), nlen);
+        p += nlen;
+
+        b.has_lon_v2 = false;
+        b.skill_kouka[29] = 0;
+        b.skill_kouka[30] = 0;
+        b.arm_flg = 0;
+        b.get_arm_mask = 0;
+        for (int i = 0; i < 10; ++i) b.dell_time[i] = 0;
+
+        if ((len - p) == kLonV2TrailerSize &&
+            d[p] == 'L' && d[p + 1] == 'N' && d[p + 2] == 2) {
+            p += 3;
+            b.skill_kouka[29] = static_cast<int8_t>(d[p++]);
+            b.skill_kouka[30] = static_cast<int8_t>(d[p++]);
+            b.arm_flg         = d[p++];
+            b.get_arm_mask    = d[p++];
+            for (int i = 0; i < 10; ++i) {
+                b.dell_time[i] = read_le32(d + p);
+                p += 4;
+            }
+            b.has_lon_v2 = true;
+        }
         return true;
     }
 };
 
-// Custom Screen (BattleTip) locked-in chip queue for a given combat turn
+// Custom Screen (BattleTip) locked-in chip queue for a given combat turn (PoN v1 + LoN v2 trailer)
 struct PvpCustomCommit {
     uint16_t turn_no = 0;
     int8_t   tip_no = -1;       // -1 = empty/ADD, 0..8 = top index in rock.tip[]
@@ -101,14 +173,28 @@ struct PvpCustomCommit {
     uint8_t  regu_flg = 0;      // Updated regular chip availability
     uint8_t  sec_cha = 0;       // Updated shuffle availability
     int16_t  pa_no = -1;        // >= 0 if Program Advance formed
-    uint16_t rock_tip_ids[9]{}; // tip_id (0..255) in rock.tip[0..8]
+    uint16_t rock_tip_ids[9]{}; // tip_id (PoN 1..212, LoN 1..270; 0xFFFF = empty) in rock.tip[0..8]
     uint32_t fol_used_mask = 0; // Bitmask of used folder slots [0..29]
 
+    // LoN v2 optional extension fields (omitted on wire when has_lon_v2 == false)
+    bool     has_lon_v2 = false;
+    uint8_t  trance_action = 0; // 0=none, 1..6=activate soul zoku=1..6, 7=revert SetArm(-1)
+    uint16_t arm_chip = 0;      // 0 or 1..270
+    uint8_t  sha_cnt = 0;
+    uint8_t  trans_zan_mask = 0;
+    int8_t   rock_arm_cnt = 0;
+    uint8_t  cas_tip_max = 0;   // 0..8
+    uint16_t cas_tip_ids[8]{};  // compacted/shuffled 8-slot tray cas_tip[0..7]
+
     static constexpr size_t kWireSize = 30;
+    // Tagged 'L','N',2 trailer: magic+ver (3B) + trance_action(1B) + arm_chip(le16=2B) +
+    // sha_cnt(1B) + trans_zan_mask(1B) + rock_arm_cnt(1B) + cas_tip_max(1B) + 8*cas_tip_ids(le16=16B)
+    static constexpr size_t kLonV2TrailerSize = 26;
+    static constexpr size_t kMaxWireSize = kWireSize + kLonV2TrailerSize; // 56
 
     std::vector<uint8_t> serialize() const {
         std::vector<uint8_t> out;
-        out.reserve(kWireSize);
+        out.reserve(has_lon_v2 ? kMaxWireSize : kWireSize);
         net::push_be16(out, turn_no);
         out.push_back(static_cast<uint8_t>(tip_no));
         out.push_back(max_sel);
@@ -117,6 +203,18 @@ struct PvpCustomCommit {
         net::push_be16(out, static_cast<uint16_t>(pa_no));
         for (int i = 0; i < 9; ++i) net::push_be16(out, rock_tip_ids[i]);
         net::push_be32(out, static_cast<int32_t>(fol_used_mask));
+        if (has_lon_v2) {
+            out.push_back('L');
+            out.push_back('N');
+            out.push_back(2);
+            out.push_back(trance_action);
+            net::push_le16(out, arm_chip);
+            out.push_back(sha_cnt);
+            out.push_back(trans_zan_mask);
+            out.push_back(static_cast<uint8_t>(rock_arm_cnt));
+            out.push_back(cas_tip_max);
+            for (int i = 0; i < 8; ++i) net::push_le16(out, cas_tip_ids[i]);
+        }
         return out;
     }
 
@@ -139,6 +237,31 @@ struct PvpCustomCommit {
         c.pa_no    = static_cast<int16_t>(rd16(6));
         for (int i = 0; i < 9; ++i) c.rock_tip_ids[i] = rd16(8 + i * 2);
         c.fol_used_mask = rd32(26);
+
+        c.has_lon_v2 = false;
+        c.trance_action = 0;
+        c.arm_chip = 0;
+        c.sha_cnt = 0;
+        c.trans_zan_mask = 0;
+        c.rock_arm_cnt = 0;
+        c.cas_tip_max = 0;
+        for (int i = 0; i < 8; ++i) c.cas_tip_ids[i] = 0;
+
+        if ((len - kWireSize) == kLonV2TrailerSize &&
+            d[kWireSize] == 'L' && d[kWireSize + 1] == 'N' && d[kWireSize + 2] == 2) {
+            size_t p = kWireSize + 3;
+            c.trance_action  = d[p++];
+            c.arm_chip       = read_le16(d + p); p += 2;
+            c.sha_cnt        = d[p++];
+            c.trans_zan_mask = d[p++];
+            c.rock_arm_cnt   = static_cast<int8_t>(d[p++]);
+            c.cas_tip_max    = d[p++];
+            for (int i = 0; i < 8; ++i) {
+                c.cas_tip_ids[i] = read_le16(d + p);
+                p += 2;
+            }
+            c.has_lon_v2 = true;
+        }
         return true;
     }
 };
@@ -152,7 +275,9 @@ struct PvpRoomInfo {
 
 // 28-byte wire-safe network-order UDP packet header
 struct PvpPacketHeader {
-    uint8_t  version = 1;
+    static constexpr uint8_t kPvpProtocolVersion = rmexe::pvp::kPvpProtocolVersion;
+
+    uint8_t  version = kPvpProtocolVersion;
     uint8_t  pkt_type = 0;
     uint8_t  slot = 0;         // 1 = Host (P1), 2 = Challenger (P2)
     uint8_t  flags = 0;
@@ -365,8 +490,8 @@ public:
                     bool match0 = old_rm.peers[0].occupied && old_rm.peers[0].uid == req_uid;
                     bool match1 = old_rm.peers[1].occupied && old_rm.peers[1].uid == req_uid;
                     if (match0 || match1) {
-                        int surv = match0 ? 1 : 0;
-                        notify_peer_disconnect_unlocked(old_rm, surv);
+                        if (old_rm.peers[0].occupied) notify_peer_disconnect_unlocked(old_rm, 0);
+                        if (old_rm.peers[1].occupied) notify_peer_disconnect_unlocked(old_rm, 1);
                         it = rooms_.erase(it);
                     } else {
                         ++it;
@@ -480,7 +605,7 @@ public:
         PvpPacketHeader hdr{};
         const uint8_t* payload = nullptr;
         if (!PvpPacketHeader::deserialize(data, len, hdr, payload)) return;
-        if (hdr.version != 1) return;
+        if (hdr.version != PvpPacketHeader::kPvpProtocolVersion) return;
 
         std::lock_guard<std::mutex> lk(mtx_);
         uint64_t now = steady_millis();
@@ -555,19 +680,23 @@ public:
                 break;
             }
             case PKT_BUILD_SYNC: {
-                me.has_build = true;
-                me.build_wire.assign(data, data + len);
-                // Server ACK back so sender knows server cached it, AND relay to opponent
-                PvpPacketHeader ack{};
-                ack.pkt_type = PKT_BUILD_ACK;
-                ack.slot = hdr.slot;
-                ack.room_id = rm.room_id;
-                ack.token = me.token;
-                auto awire = ack.serialize();
-                plat::sock_sendto(udp_fd, awire.data(), awire.size(), reinterpret_cast<const sockaddr*>(&src_addr), src_len);
-                send_with_peer_token(udp_fd, opp, data, len);
-                if (opp.has_build && !opp.build_wire.empty()) {
-                    send_with_peer_token(udp_fd, me, opp.build_wire.data(), opp.build_wire.size());
+                if (payload && hdr.payload_len >= PvpFighterBuild::kV1MinWireSize &&
+                    hdr.payload_len <= PvpFighterBuild::kMaxWireSize) {
+                    const size_t wire_len = PvpPacketHeader::kWireSize + hdr.payload_len;
+                    me.has_build = true;
+                    me.build_wire.assign(data, data + wire_len);
+                    // Server ACK back so sender knows server cached it, AND relay to opponent
+                    PvpPacketHeader ack{};
+                    ack.pkt_type = PKT_BUILD_ACK;
+                    ack.slot = hdr.slot;
+                    ack.room_id = rm.room_id;
+                    ack.token = me.token;
+                    auto awire = ack.serialize();
+                    plat::sock_sendto(udp_fd, awire.data(), awire.size(), reinterpret_cast<const sockaddr*>(&src_addr), src_len);
+                    send_with_peer_token(udp_fd, opp, me.build_wire.data(), me.build_wire.size());
+                    if (opp.has_build && !opp.build_wire.empty()) {
+                        send_with_peer_token(udp_fd, me, opp.build_wire.data(), opp.build_wire.size());
+                    }
                 }
                 break;
             }
@@ -583,11 +712,13 @@ public:
                 break;
             }
             case PKT_CUSTOM_COMMIT: {
-                if (payload && hdr.payload_len >= PvpCustomCommit::kWireSize) {
+                if (payload && hdr.payload_len >= PvpCustomCommit::kWireSize &&
+                    hdr.payload_len <= PvpCustomCommit::kMaxWireSize) {
+                    const size_t wire_len = PvpPacketHeader::kWireSize + hdr.payload_len;
                     uint16_t cturn = static_cast<uint16_t>((payload[0] << 8) | payload[1]);
                     me.has_commit = true;
                     me.commit_turn = cturn;
-                    me.commit_wire.assign(data, data + len);
+                    me.commit_wire.assign(data, data + wire_len);
                     // Send ACK and relay to opponent; also push opponent's cached commit if same turn
                     PvpPacketHeader ack{};
                     ack.pkt_type = PKT_CUSTOM_ACK;
@@ -603,7 +734,7 @@ public:
                             drop_commit_remaining_ > 0) {
                             --drop_commit_remaining_;
                         } else {
-                            send_with_peer_token(udp_fd, opp, data, len);
+                            send_with_peer_token(udp_fd, opp, me.commit_wire.data(), me.commit_wire.size());
                         }
                     }
                     if (opp.has_commit && opp.commit_turn == cturn && !opp.commit_wire.empty()) {
@@ -765,10 +896,11 @@ private:
                 dissolve = true;
             } else if (!rm.match_started && !rm.peers[1].occupied) {
                 // Open waiting room: live hosts send PKT_BIND every 500ms (even inside F1 menu).
-                // Dissolve abandoned rooms after 8 seconds of silence!
+                // Dissolve abandoned rooms after 30 seconds of silence and notify host!
                 uint64_t seen0 = rm.peers[0].last_seen_ms;
-                if (now > seen0 && (now - seen0) > 8000ULL) {
+                if (now > seen0 && (now - seen0) > 30000ULL) {
                     dissolve = true;
+                    notify_surv = 0;
                 }
             } else {
                 // Paired / active match: live clients send PKT_PING every 2s + 16Hz combat inputs.
@@ -831,6 +963,7 @@ public:
     bool is_triple_battle() const { return active_match_format_ == PVP_FORMAT_TRIPLE; }
     bool peer_supports_bo3() const { return peer_fmt_capable_; }
     void set_send_legacy_build_for_test(bool v) { send_legacy_build_test_ = v; }
+    const std::string& last_join_error() const { return last_join_error_; }
 
     static bool check_server_status(const std::string& server_host_port, std::string& summary_out, int timeout_ms = 1500) {
         net::HttpResponse resp;
@@ -950,6 +1083,7 @@ public:
 
     bool join_room(const std::string& server_host_port, uint32_t room_id_or_zero, const std::string& uid, const std::string& name, const std::string& game = "pon") {
         close_udp();
+        last_join_error_.clear();
         std::string uri = "/pvp/join?uid=" + net::url_encode(uid) +
                           "&name=" + net::url_encode(name) +
                           "&game=" + net::url_encode(game);
@@ -957,11 +1091,18 @@ public:
             uri += "&room=" + std::to_string(room_id_or_zero);
         }
         net::HttpResponse resp;
-        if (!net::http_request_tcp(server_host_port, "POST", uri, {}, {}, resp, 2000) || resp.status_code != 200) {
+        if (!net::http_request_tcp(server_host_port, "POST", uri, {}, {}, resp, 2000)) {
+            last_join_error_ = "network_error";
             return false;
         }
         std::string js(reinterpret_cast<const char*>(resp.body.data()), resp.body.size());
-        if (json_extract_str(js, "ok") != "true") return false;
+        if (resp.status_code != 200 || json_extract_str(js, "ok") != "true") {
+            last_join_error_ = json_extract_str(js, "error");
+            if (last_join_error_.empty()) {
+                last_join_error_ = "http_" + std::to_string(resp.status_code);
+            }
+            return false;
+        }
 
         reset_match_buffers();
         room_id_       = static_cast<uint32_t>(std::strtoul(json_extract_str(js, "room_id").c_str(), nullptr, 10));
@@ -1175,6 +1316,7 @@ public:
         // Periodically refresh BIND until match_started_ so NAT mappings stay alive & dropped BINDs recover
         if (room_id_ != 0 && !match_started_ && (now - last_bind_ms_) >= 500) {
             last_bind_ms_ = now;
+            ++unacked_bind_streak_;
             PvpPacketHeader b{};
             b.pkt_type = PKT_BIND;
             b.slot = slot_;
@@ -1202,10 +1344,12 @@ public:
             PvpPacketHeader h{};
             const uint8_t* payload = nullptr;
             if (!PvpPacketHeader::deserialize(buf, static_cast<size_t>(n), h, payload)) continue;
-            if (room_id_ == 0 || h.version != 1 || h.room_id != room_id_ || h.token != token_) continue;
+            if (room_id_ == 0 || h.version != PvpPacketHeader::kPvpProtocolVersion ||
+                h.room_id != room_id_ || h.token != token_) continue;
 
             if (h.pkt_type == PKT_BIND_ACK) {
                 udp_bound_ = true;
+                unacked_bind_streak_ = 0;
                 rng_seed_ = h.frame_or_seq;
                 if (!has_host_build_fmt_) {
                     if (h.flags & PVP_HDR_FLAG_FMT_KNOWN) {
@@ -1215,6 +1359,7 @@ public:
                     }
                 }
             } else if (h.pkt_type == PKT_MATCH_START) {
+                unacked_bind_streak_ = 0;
                 rng_seed_ = h.frame_or_seq;
                 if (!has_host_build_fmt_) {
                     if (h.flags & PVP_HDR_FLAG_FMT_KNOWN) {
@@ -1236,7 +1381,8 @@ public:
                 }
             } else if (h.pkt_type == PKT_BUILD_SYNC) {
                 PvpFighterBuild fb{};
-                if (PvpFighterBuild::deserialize(payload, h.payload_len, fb)) {
+                if (h.payload_len <= PvpFighterBuild::kMaxWireSize &&
+                    PvpFighterBuild::deserialize(payload, h.payload_len, fb)) {
                     remote_build_ = std::move(fb);
                     if (!remote_build_.player_name.empty()) {
                         opponent_name_ = remote_build_.player_name;
@@ -1265,7 +1411,9 @@ public:
                 local_build_acked_ = true;
             } else if (h.pkt_type == PKT_CUSTOM_COMMIT) {
                 PvpCustomCommit cc{};
-                if (PvpCustomCommit::deserialize(payload, h.payload_len, cc)) {
+                if (h.payload_len >= PvpCustomCommit::kWireSize &&
+                    h.payload_len <= PvpCustomCommit::kMaxWireSize &&
+                    PvpCustomCommit::deserialize(payload, h.payload_len, cc)) {
                     remote_commits_[cc.turn_no] = cc;
                     PvpPacketHeader ack{};
                     ack.pkt_type = PKT_CUSTOM_ACK;
@@ -1363,6 +1511,9 @@ public:
                 match_started_ = false;
             }
         }
+        if (room_id_ != 0 && !match_started_ && unacked_bind_streak_ >= 20) {
+            peer_disconnected_ = true;
+        }
         return newly_started;
     }
 
@@ -1434,6 +1585,8 @@ private:
     int32_t remote_winner_slot_ = -1;
     bool has_remote_build_ = false;
     bool local_build_acked_ = false;
+    uint32_t unacked_bind_streak_ = 0;
+    std::string last_join_error_;
     PvpFighterBuild remote_build_{};
     uint64_t last_bind_ms_ = 0;
     uint64_t last_ping_ms_ = 0;
@@ -1486,6 +1639,7 @@ private:
         remote_winner_slot_ = -1;
         has_remote_build_ = false;
         local_build_acked_ = false;
+        unacked_bind_streak_ = 0;
         remote_build_ = PvpFighterBuild{};
         last_bind_ms_ = 0;
         last_ping_ms_ = 0;
@@ -1529,6 +1683,7 @@ private:
         srv_addr_len_ = static_cast<socklen_t>(res->ai_addrlen);
         freeaddrinfo(res);
 
+        unacked_bind_streak_ = 0;
         last_bind_ms_ = steady_millis();
         PvpPacketHeader b{};
         b.pkt_type = PKT_BIND;

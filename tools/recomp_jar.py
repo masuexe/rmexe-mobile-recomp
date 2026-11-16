@@ -9,6 +9,7 @@ standalone C++20 compilation unit that links against runtime/doja_runtime.cpp.
 from __future__ import annotations
 
 import argparse
+import re
 import struct
 import zipfile
 from dataclasses import dataclass, field
@@ -177,6 +178,13 @@ def mangle_ident(s: str) -> str:
     )
 
 
+def sanitize_ident(s: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", s)
+    if not cleaned or cleaned[0].isdigit():
+        cleaned = "_" + cleaned
+    return cleaned
+
+
 def parse_method_descriptor(desc: str) -> tuple[list[str], str]:
     assert desc.startswith("(")
     idx = 1
@@ -269,6 +277,66 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
         lines.append(f"static {c_type} {c_var} = 0;")
     if "sf_app_CpCanvas_bas_max_flg" in static_fields.values():
         lines.append("#define HAS_SF_app_CpCanvas_bas_max_flg 1")
+    if "sf_app_CpCanvas_imgMap2" in static_fields.values():
+        lines.append("#define HAS_SF_app_CpCanvas_imgMap2 1")
+    if ("app/CpCanvas", "PalSetBG", "()V") in defined_methods:
+        lines.append("#define HAS_FN_CpCanvas_PalSetBG 1")
+
+    # Auto-export per-class metadata & instance field offsets as constexpr
+    app_short_counts: dict[str, int] = {}
+    short_counts: dict[str, int] = {}
+    for cls_name in classes:
+        s_cls = sanitize_ident(cls_name.split("/")[-1])
+        short_counts[s_cls] = short_counts.get(s_cls, 0) + 1
+        if cls_name.startswith("app/"):
+            app_short_counts[s_cls] = app_short_counts.get(s_cls, 0) + 1
+    assert all(cnt == 1 for cnt in app_short_counts.values()), (
+        f"Non-unique short class names under app/: {app_short_counts}"
+    )
+
+    short_cls_map: dict[str, str] = {}
+    used_short_cls: set[str] = set()
+    for cls_name in sorted(classes.keys()):
+        if cls_name.startswith("app/"):
+            s_cls = sanitize_ident(cls_name.split("/")[-1])
+            short_cls_map[cls_name] = s_cls
+            used_short_cls.add(s_cls)
+    for cls_name in sorted(classes.keys()):
+        if cls_name in short_cls_map:
+            continue
+        s_cls = sanitize_ident(cls_name.split("/")[-1])
+        if s_cls in used_short_cls or short_counts.get(s_cls, 0) > 1:
+            s_cls = sanitize_ident(cls_name)
+        while s_cls in used_short_cls:
+            s_cls += "_dup"
+        short_cls_map[cls_name] = s_cls
+        used_short_cls.add(s_cls)
+
+    lines.extend(["", "// Class metadata constants across all classes"])
+    for cls_name in sorted(classes.keys()):
+        cls = classes[cls_name]
+        s_cls = short_cls_map[cls_name]
+        lines.append(f"static constexpr int32_t kClassId_{s_cls} = {cls.class_id};")
+        lines.append(f"static constexpr int32_t kNumI32_{s_cls} = {class_num_i32[cls_name]};")
+        lines.append(f"static constexpr int32_t kNumI64_{s_cls} = {class_num_i64[cls_name]};")
+
+    lines.extend(["", "// Instance field offset constants across all classes"])
+    emitted_fld_consts: set[str] = set()
+
+    def emit_field_consts(idx_map: dict[tuple[str, str, str], int], prefix: str) -> None:
+        for (c_name, f_name, f_desc), f_idx in sorted(idx_map.items()):
+            s_cls = short_cls_map[c_name]
+            s_fld = sanitize_ident(f_name)
+            const_name = f"{prefix}_{s_cls}_{s_fld}"
+            if const_name in emitted_fld_consts:
+                const_name = f"{const_name}_{sanitize_ident(f_desc)}"
+            while const_name in emitted_fld_consts:
+                const_name += "_dup"
+            emitted_fld_consts.add(const_name)
+            lines.append(f"static constexpr int32_t {const_name} = {f_idx};")
+
+    emit_field_consts(instance_i32_idx, "kFld")
+    emit_field_consts(instance_i64_idx, "kFld64")
 
     sorted_statics = [(f_desc, c_var) for (_, _, f_desc), c_var in sorted(static_fields.items())]
     lines.extend(
@@ -300,14 +368,26 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
         and ("app/CpCanvas", "EnSet", "()V") in defined_methods
         and ("app/CpCanvas", "Load", "(I)V") in defined_methods
     )
-    if is_pon_pvp:
+    is_lon_pvp = (
+        "app/Rock" in classes
+        and ("app/Ene", "Hit", "(III)Z") in defined_methods
+        and ("app/Rock", "Hit", "(III)Z") in defined_methods
+        and ("app/CpCanvas", "EnSet", "()V") in defined_methods
+        and ("app/CpCanvas", "Load", "(I)I") in defined_methods
+        and ("app/Rock", "SetArm", "(I)V") in defined_methods
+    )
+    assert not (is_pon_pvp and is_lon_pvp), f"Ambiguous PvP target detected in {jar_path}"
+    is_pvp = is_pon_pvp or is_lon_pvp
+    pvp_prefix = "pvp_pon" if is_pon_pvp else "pvp_lon"
+    pvp_inl = "pvp_pon_engine.inl" if is_pon_pvp else "pvp_lon_engine.inl"
+    if is_pvp:
         lines.extend(
             [
                 "",
-                "// Online PvP NetBattle hooks (implemented in pvp_pon_engine.inl)",
-                "static bool pvp_pon_tick_override(DojaRuntime& rt, Ref cp);",
-                "static int32_t pvp_pon_intercept_ene_hit(DojaRuntime& rt, Ref ene_thiz, int32_t a0, int32_t a1, int32_t a2);",
-                "static bool pvp_pon_intercept_ene_draw(DojaRuntime& rt, Ref ene_thiz, int32_t a0);",
+                f"// Online PvP NetBattle hooks (implemented in {pvp_inl})",
+                f"static bool {pvp_prefix}_tick_override(DojaRuntime& rt, Ref cp);",
+                f"static int32_t {pvp_prefix}_intercept_ene_hit(DojaRuntime& rt, Ref ene_thiz, int32_t a0, int32_t a1, int32_t a2);",
+                f"static bool {pvp_prefix}_intercept_ene_draw(DojaRuntime& rt, Ref ene_thiz, int32_t a0);",
                 "static bool g_pvp_in_ene_hit_passthrough = false;",
                 "static int32_t g_pvp_rock_flip_override = -1;",
             ]
@@ -325,6 +405,11 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
         lines.append(f"static {c_ret} {fn_name}({', '.join(c_params)});")
 
     lines.append("")
+
+    matched_cp_exe = False
+    matched_rock_draw = False
+    matched_ene_hit = False
+    matched_ene_draw = False
 
     # Emit each method implementation
     for cls_name, cls in classes.items():
@@ -375,18 +460,21 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
             lines.append("    auto push_j = [&](int64_t v) { stk[sp++].j = v; stk[sp++].j = 0; };")
             lines.append("    auto pop_j  = [&]() -> int64_t { sp -= 2; return stk[sp].j; };")
 
-            if is_pon_pvp and (cls_name, m.name, m.descriptor) == ("app/Ene", "Hit", "(III)Z"):
+            if is_pvp and (cls_name, m.name, m.descriptor) == ("app/Ene", "Hit", "(III)Z"):
+                matched_ene_hit = True
                 lines.append("    if (!g_pvp_in_ene_hit_passthrough) {")
-                lines.append("        int32_t pvp_hr = pvp_pon_intercept_ene_hit(rt, thiz, a0, a1, a2);")
+                lines.append(f"        int32_t pvp_hr = {pvp_prefix}_intercept_ene_hit(rt, thiz, a0, a1, a2);")
                 lines.append("        if (pvp_hr >= 0) return pvp_hr;")
                 lines.append("    }")
-            if is_pon_pvp and (cls_name, m.name, m.descriptor) == ("app/Ene", "Draw", "(I)V"):
-                lines.append("    if (pvp_pon_intercept_ene_draw(rt, thiz, a0)) return;")
+            if is_pvp and (cls_name, m.name, m.descriptor) == ("app/Ene", "Draw", "(I)V"):
+                matched_ene_draw = True
+                lines.append(f"    if ({pvp_prefix}_intercept_ene_draw(rt, thiz, a0)) return;")
 
-            is_cp_exe = is_pon_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "exe", "()V")
-            is_rock_draw = is_pon_pvp and (cls_name, m.name, m.descriptor) == ("app/Rock", "Draw", "(I)V")
+            is_cp_exe = is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "exe", "()V")
+            is_rock_draw = is_pvp and (cls_name, m.name, m.descriptor) == ("app/Rock", "Draw", "(I)V")
             seen_exe_gfx_lock = False
             emitted_exe_join = False
+            rock_flip_hook_count = 0
 
             has_exc = len(m.exceptions) > 0
             if has_exc:
@@ -644,8 +732,13 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                                 lines.append(f"            int64_t call_a{a_i} = pop_j();")
                             else:
                                 lines.append(f"            int32_t call_a{a_i} = pop_i();")
-                        if is_rock_draw and ref == ("app/CpCanvas", "Ani", "(IIIIIIII)I"):
-                            lines.append("            if (g_pvp_rock_flip_override >= 0) call_a7 = g_pvp_rock_flip_override;")
+                        if is_rock_draw:
+                            if is_pon_pvp and ref == ("app/CpCanvas", "Ani", "(IIIIIIII)I"):
+                                rock_flip_hook_count += 1
+                                lines.append("            if (g_pvp_rock_flip_override >= 0) call_a7 = g_pvp_rock_flip_override;")
+                            elif is_lon_pvp and ref == ("app/CpCanvas", "DrawAni", "(IIIIII)I"):
+                                rock_flip_hook_count += 1
+                                lines.append("            if (g_pvp_rock_flip_override >= 0) call_a4 = g_pvp_rock_flip_override;")
                         call_args = ["rt"]
                         if not callee_static:
                             lines.append("            Ref call_thiz = pop_i();")
@@ -683,7 +776,7 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                         lines.append("        }")
                         if is_cp_exe and not seen_exe_gfx_lock and t_cls == "com/nttdocomo/ui/Graphics" and t_name == "lock":
                             seen_exe_gfx_lock = True
-                            lines.append("        if (pvp_pon_tick_override(rt, loc[0].r)) goto pvp_exe_frame_join;")
+                            lines.append(f"        if ({pvp_prefix}_tick_override(rt, loc[0].r)) goto pvp_exe_frame_join;")
                     pc += 5 if op == 0xB9 else 3
                 elif op == 0xBB:  # new
                     c_idx = struct.unpack_from(">H", code, pc + 1)[0]
@@ -763,15 +856,32 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                 lines.append("        throw;")
                 lines.append("    }")
 
+            if is_cp_exe:
+                assert seen_exe_gfx_lock and emitted_exe_join, (
+                    f"CpCanvas.exe PvP hook mismatch in {jar_path}: "
+                    f"seen_exe_gfx_lock={seen_exe_gfx_lock}, emitted_exe_join={emitted_exe_join}"
+                )
+                matched_cp_exe = True
+            if is_rock_draw:
+                assert rock_flip_hook_count > 0, (
+                    f"Rock.Draw PvP flip hook mismatch in {jar_path}: no Ani/DrawAni call matched"
+                )
+                matched_rock_draw = True
+
             if ret_type != "V":
                 lines.append("    return 0;")
             lines.append("}")
             lines.append("")
 
-    if is_pon_pvp:
+    if is_pvp:
+        assert matched_cp_exe and matched_rock_draw and matched_ene_hit and matched_ene_draw, (
+            f"Missing PvP hook method in {jar_path}: "
+            f"cp_exe={matched_cp_exe}, rock_draw={matched_rock_draw}, "
+            f"ene_hit={matched_ene_hit}, ene_draw={matched_ene_draw}"
+        )
         lines.extend(
             [
-                '#include "pvp_pon_engine.inl"',
+                f'#include "{pvp_inl}"',
                 "",
             ]
         )

@@ -10,6 +10,7 @@
 #include <windows.h>
 #else
 #include <iconv.h>
+#include <unistd.h>
 #endif
 #ifdef __linux__
 #include <sys/prctl.h>
@@ -1785,11 +1786,41 @@ struct HttpConnState {
 
 static std::unordered_map<Ref, HttpConnState> g_http_conns;
 
+static uint32_t entropy_mix32() {
+    static std::atomic<uint32_t> s_seq{0};
+    uint64_t x = 0x9E3779B97F4A7C15ULL * static_cast<uint64_t>(s_seq.fetch_add(1, std::memory_order_relaxed) + 1u);
+    try {
+        std::random_device rd;
+        x ^= static_cast<uint64_t>(rd()) << 32;
+        x ^= static_cast<uint64_t>(rd());
+    } catch (...) {
+    }
+    x ^= static_cast<uint64_t>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    x ^= static_cast<uint64_t>(
+        std::chrono::system_clock::now().time_since_epoch().count()) << 13;
+#ifdef _WIN32
+    x ^= static_cast<uint64_t>(GetCurrentProcessId()) << 21;
+#else
+    x ^= static_cast<uint64_t>(getpid()) << 21;
+#endif
+    uintptr_t stack_addr = reinterpret_cast<uintptr_t>(&x);
+    x ^= static_cast<uint64_t>(stack_addr);
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    x = x ^ (x >> 31);
+    return static_cast<uint32_t>(x & 0xFFFFFFFFu);
+}
+
 static std::string generate_random_uid() {
-    std::random_device rd;
-    uint32_t v = rd();
     char buf[16];
-    std::snprintf(buf, sizeof(buf), "NV%06X", v & 0xFFFFFFu);
+    std::snprintf(buf, sizeof(buf), "NV%06X", entropy_mix32() & 0xFFFFFFu);
+    return std::string(buf);
+}
+
+static std::string generate_pvp_session_nonce() {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%06X", entropy_mix32() & 0xFFFFFFu);
     return std::string(buf);
 }
 
@@ -1805,7 +1836,12 @@ struct UiInputManager {
     bool online_mode = false;
     std::string server_url = "127.0.0.1:8765";
     std::string player_uid = generate_random_uid();
+    std::string pvp_session_nonce = generate_pvp_session_nonce();
     std::string player_name = "ROCKMAN";
+
+    std::string effective_pvp_uid() const {
+        return cli_player_uid.empty() ? (player_uid + "-" + pvp_session_nonce) : cli_player_uid;
+    }
     bool pvp_bo3_mode = false;
     bool is_lon_game = false;
     int pvp_menu_choice = 0; // 0 = Create Room, 1 = Join Room
@@ -2395,6 +2431,7 @@ struct UiInputManager {
     bool probe_has_req = false;
     bool probe_inflight = false;
     uint64_t probe_seq = 0;
+    uint64_t last_probe_ms = 0;
     ProbeRequest probe_req{};
     ProbeResult probe_res{};
 
@@ -2423,11 +2460,11 @@ struct UiInputManager {
                 bool ok_so_far = true;
                 if (req.probe_status) {
                     res.has_status = true;
-                    res.status_ok = pvp::PvpClientSession::check_server_status(req.server_url, res.stat_msg, 350);
+                    res.status_ok = pvp::PvpClientSession::check_server_status(req.server_url, res.stat_msg, 1500);
                     ok_so_far = res.status_ok;
                 }
                 if (ok_so_far && req.fetch_rooms) {
-                    res.rooms_ok = pvp::PvpClientSession::list_open_rooms(req.server_url, req.game, res.rooms, 350);
+                    res.rooms_ok = pvp::PvpClientSession::list_open_rooms(req.server_url, req.game, res.rooms, 1500);
                 }
 
                 {
@@ -2470,6 +2507,7 @@ struct UiInputManager {
         std::lock_guard<std::mutex> lk(probe_mtx);
         if (probe_stop) return;
         ensure_probe_worker_locked();
+        last_probe_ms = pvp::steady_millis();
         ProbeRequest req{};
         req.seq = ++probe_seq;
         req.probe_status = probe_status;
@@ -2500,23 +2538,41 @@ struct UiInputManager {
             res = std::move(probe_res);
             probe_res = ProbeResult{};
         }
+        uint32_t prev_sel_room_id = 0;
+        if (pvp_menu_choice >= 2 && static_cast<size_t>(pvp_menu_choice - 2) < overlay_open_rooms.size()) {
+            prev_sel_room_id = overlay_open_rooms[static_cast<size_t>(pvp_menu_choice - 2)].room_id;
+        }
         if (res.has_status) {
             if (res.status_ok) {
                 show_toast("已连接 " + res.server_url + " (" + res.stat_msg + ")", 120);
             } else {
                 overlay_open_rooms.clear();
-                if (pvp_menu_choice >= 2) pvp_menu_choice = 0;
+                if (pvp_menu_choice >= 2) pvp_menu_choice = 1;
                 show_toast("未连上 " + res.server_url + " (请检查地址或端口)", 120);
                 return;
             }
         }
-        if (online_mode && !g_pvp.active() && !is_lon_game && res.rooms_ok) {
-            overlay_open_rooms = std::move(res.rooms);
-        } else {
+        if (!online_mode || g_pvp.active()) {
             overlay_open_rooms.clear();
+            if (pvp_menu_choice >= 2) pvp_menu_choice = 0;
+            return;
         }
-        int max_choices = 2 + static_cast<int>(overlay_open_rooms.size());
-        if (pvp_menu_choice >= max_choices) pvp_menu_choice = 0;
+        if (res.rooms_ok) {
+            overlay_open_rooms = std::move(res.rooms);
+            if (prev_sel_room_id != 0) {
+                int new_choice = 1; // Keep cursor near join options if the previously highlighted room vanished
+                for (size_t i = 0; i < overlay_open_rooms.size(); ++i) {
+                    if (overlay_open_rooms[i].room_id == prev_sel_room_id) {
+                        new_choice = 2 + static_cast<int>(i);
+                        break;
+                    }
+                }
+                pvp_menu_choice = new_choice;
+            } else {
+                int max_choices = 2 + static_cast<int>(overlay_open_rooms.size());
+                if (pvp_menu_choice >= max_choices) pvp_menu_choice = 1;
+            }
+        }
     }
 
     static void pop_utf8_char(std::string& s) {
@@ -2537,7 +2593,7 @@ struct UiInputManager {
     }
 
     void refresh_open_rooms() {
-        if (!online_mode || server_url.empty() || g_pvp.active() || is_lon_game) {
+        if (!online_mode || server_url.empty() || g_pvp.active()) {
             cancel_pending_probe();
             overlay_open_rooms.clear();
             if (pvp_menu_choice >= 2) pvp_menu_choice = 0;
@@ -2546,11 +2602,21 @@ struct UiInputManager {
         start_async_probe(false, true);
     }
 
+    void maybe_periodic_room_refresh() {
+        if (!overlay_open || !online_mode || server_url.empty() || g_pvp.active() || is_probe_inflight()) return;
+        uint64_t now = pvp::steady_millis();
+        if (now >= last_probe_ms && (now - last_probe_ms) >= 2500ULL) {
+            refresh_open_rooms();
+        }
+    }
+
     void connect_and_probe_server() {
         online_mode = true;
+        overlay_open_rooms.clear();
+        if (pvp_menu_choice >= 2) pvp_menu_choice = 0;
         save_config();
         show_toast("正在连接 " + server_url + "...", 90);
-        start_async_probe(true, !is_lon_game);
+        start_async_probe(true, true);
     }
 
     void cycle_server_preset(int dir) {
@@ -2578,10 +2644,6 @@ struct UiInputManager {
     }
 
     void toggle_pvp_format() {
-        if (is_lon_game) {
-            show_toast("LoN 实时双人对战暂未开放 (请使用幻影网络 PoN)", 120);
-            return;
-        }
         if (g_pvp.active()) {
             show_toast("对战房间进行中，无法更改赛制", 90);
             return;
@@ -2636,10 +2698,6 @@ struct UiInputManager {
     }
 
     void exec_pvp_action() {
-        if (is_lon_game) {
-            show_toast("LoN 实时双人对战暂未开放 (请使用幻影网络 PoN)", 120);
-            return;
-        }
         if (g_pvp.active()) {
             uint32_t old_rm = g_pvp.room_id();
             if (g_pvp.match_started()) {
@@ -2653,9 +2711,10 @@ struct UiInputManager {
         online_mode = true;
         save_config();
         std::string gm = is_lon_game ? "lon" : "pon";
+        std::string pvp_uid = effective_pvp_uid();
         if (pvp_menu_choice == 0) {
             g_pvp.set_preferred_format(pvp_bo3_mode ? pvp::PVP_FORMAT_TRIPLE : pvp::PVP_FORMAT_SINGLE);
-            if (g_pvp.create_room(server_url, player_uid, player_name, gm)) {
+            if (g_pvp.create_room(server_url, pvp_uid, player_name, gm)) {
                 std::string fmt_tag = g_pvp.is_triple_battle() ? " [三回战]" : "";
                 show_toast("已创建房间 #" + std::to_string(g_pvp.room_id()) + fmt_tag + " 等待挑战者...", 180);
                 close_overlay();
@@ -2667,12 +2726,19 @@ struct UiInputManager {
             if (pvp_menu_choice >= 2 && static_cast<size_t>(pvp_menu_choice - 2) < overlay_open_rooms.size()) {
                 target_room = overlay_open_rooms[static_cast<size_t>(pvp_menu_choice - 2)].room_id;
             }
-            if (g_pvp.join_room(server_url, target_room, player_uid, player_name, gm)) {
+            if (g_pvp.join_room(server_url, target_room, pvp_uid, player_name, gm)) {
                 show_toast("已加入 #" + std::to_string(g_pvp.room_id()) + " VS " + g_pvp.opponent_name(), 150);
                 close_overlay();
             } else {
+                const std::string& jerr = g_pvp.last_join_error();
                 refresh_open_rooms();
-                show_toast("暂无可加入的对战房间 (" + server_url + ")", 120);
+                if (jerr == "same_uid") {
+                    show_toast("无法加入自己创建的房间", 120);
+                } else if (jerr == "network_error") {
+                    show_toast("加入失败: 无法连接 " + server_url, 120);
+                } else {
+                    show_toast("暂无可加入的对战房间 (" + server_url + ")", 120);
+                }
             }
         }
     }
@@ -2786,8 +2852,11 @@ struct UiInputManager {
         } else {
             auto adjust_row_lr = [&](int dir) {
                 if (overlay_sel_row == 0 && !g_pvp.active()) {
-                    if (online_mode && !is_lon_game && !is_probe_inflight()) {
-                        refresh_open_rooms();
+                    if (online_mode && !is_probe_inflight()) {
+                        uint64_t now = pvp::steady_millis();
+                        if (now < last_probe_ms || (now - last_probe_ms) >= 1500ULL) {
+                            refresh_open_rooms();
+                        }
                     }
                     int max_choices = 2 + static_cast<int>(overlay_open_rooms.size());
                     pvp_menu_choice = (pvp_menu_choice + dir + max_choices) % max_choices;
@@ -2955,10 +3024,7 @@ struct UiInputManager {
                 draw_ui_text(display_buf, 240, 260, "联机对战", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFFFE484u);
                 std::string pstr;
                 uint32_t pcol = 0xFFFFD874u;
-                if (is_lon_game) {
-                    pstr = "[ 暂仅支持幻影网络 PoN ]";
-                    pcol = 0xFF8EA0BCu;
-                } else if (g_pvp.active()) {
+                if (g_pvp.active()) {
                     pstr = g_pvp.match_started()
                         ? ("[ 退出对战 #" + std::to_string(g_pvp.room_id()) + " ]")
                         : ("[ 取消等待 #" + std::to_string(g_pvp.room_id()) + " ]");
@@ -2980,10 +3046,7 @@ struct UiInputManager {
                 draw_ui_text(display_buf, 240, 260, "对战赛制", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string fstr;
                 uint32_t fcol = 0xFF88FFAAu;
-                if (is_lon_game) {
-                    fstr = "[ 暂仅支持幻影网络 PoN ]";
-                    fcol = 0xFF8EA0BCu;
-                } else if (g_pvp.active()) {
+                if (g_pvp.active()) {
                     bool is_bo3 = g_pvp.is_triple_battle();
                     fstr = is_bo3 ? "三回战 (BO3·三局两胜)" : "一回战 (Single)";
                     fcol = is_bo3 ? 0xFFFFD874u : 0xFF88FFAAu;
@@ -3067,9 +3130,7 @@ struct UiInputManager {
         // Footer instructions
         fill_rect_alpha(display_buf, 240, 260, 6, 196, 228, 1, 0xFF324672u);
         if (overlay_sel_row == 1) {
-            if (is_lon_game) {
-                draw_ui_text(display_buf, 240, 260, "LoN 实时双人对战暂未开放 (请使用幻影网络 PoN)", 6, 211, 0xFF8EA0BCu);
-            } else if (live_pvp) {
+            if (live_pvp) {
                 draw_ui_text(display_buf, 240, 260, "当前房间赛制已锁定 (退出房间后可修改)", 6, 211, 0xFF88FFAAu);
             } else {
                 draw_ui_text(display_buf, 240, 260, "←→/Enter:建房赛制 一回战 / 三回战(BO3·加入时随房主)", 6, 211, 0xFFFFD874u);
@@ -3079,9 +3140,7 @@ struct UiInputManager {
         } else if (overlay_sel_row == 3) {
             draw_ui_text(display_buf, 240, 260, "Enter:输入/粘贴昵称 (自动保存)", 14, 211, 0xFFFFEC88u);
         } else if (overlay_sel_row == 0) {
-            if (is_lon_game) {
-                draw_ui_text(display_buf, 240, 260, "LoN 实时双人对战暂未开放 (请使用幻影网络 PoN)", 6, 211, 0xFF8EA0BCu);
-            } else if (live_pvp) {
+            if (live_pvp) {
                 draw_ui_text(display_buf, 240, 260, "Enter:立即退出房间   F1/Esc:继续对战", 10, 211, 0xFF88FFAAu);
             } else {
                 draw_ui_text(display_buf, 240, 260, "←→:选建房/快速加入/房间号  Enter:出发!", 6, 211, 0xFFFFE484u);
@@ -3145,10 +3204,15 @@ struct UiInputManager {
                 break;
             }
             poll_async_probe();
+            maybe_periodic_room_refresh();
             if (g_pvp.poll_udp()) {
                 show_toast("对战配对成功! VS " + g_pvp.opponent_name(), 150);
                 close_overlay();
                 break;
+            }
+            if (g_pvp.active() && !g_pvp.match_started() && g_pvp.peer_disconnected()) {
+                g_pvp.close_udp();
+                show_toast("房间已超时或对手已离开", 150);
             }
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
@@ -3751,19 +3815,14 @@ std::string DojaRuntime::player_nickname() const {
 
 int DojaRuntime::take_cli_pvp_action(uint32_t& room_id_out) {
     if (g_ui.cli_pvp_mode == 0) return 0;
-    if (g_ui.is_lon_game) {
-        g_ui.cli_pvp_mode = 0;
-        g_ui.show_toast("LoN 实时双人对战暂未开放 (请使用幻影网络 PoN)", 120);
-        std::cerr << "[PvP] LoN 实时双人对战暂未开放 (请使用幻影网络 PoN)\n";
-        return -1;
-    }
-    std::string gm = "pon";
+    std::string gm = g_ui.is_lon_game ? "lon" : "pon";
+    std::string pvp_uid = g_ui.effective_pvp_uid();
     g_ui.online_mode = true;
     if (g_ui.cli_pvp_mode == 1) {
         g_ui.cli_pvp_mode = 0;
         bool use_bo3 = g_ui.has_cli_pvp_bo3 ? g_ui.cli_pvp_bo3 : g_ui.pvp_bo3_mode;
         g_pvp.set_preferred_format(use_bo3 ? pvp::PVP_FORMAT_TRIPLE : pvp::PVP_FORMAT_SINGLE);
-        if (g_pvp.create_room(g_ui.server_url, g_ui.player_uid, g_ui.player_name, gm)) {
+        if (g_pvp.create_room(g_ui.server_url, pvp_uid, g_ui.player_name, gm)) {
             room_id_out = g_pvp.room_id();
             std::string fmt_tag = g_pvp.is_triple_battle() ? " [三回战]" : "";
             g_ui.show_toast("已创建房间 #" + std::to_string(room_id_out) + fmt_tag + " 等待加入...", 180);
@@ -3772,7 +3831,7 @@ int DojaRuntime::take_cli_pvp_action(uint32_t& room_id_out) {
         return -1;
     }
     if (g_ui.cli_pvp_mode == 2) {
-        if (g_pvp.join_room(g_ui.server_url, g_ui.cli_pvp_room_id, g_ui.player_uid, g_ui.player_name, gm)) {
+        if (g_pvp.join_room(g_ui.server_url, g_ui.cli_pvp_room_id, pvp_uid, g_ui.player_name, gm)) {
             g_ui.cli_pvp_mode = 0;
             room_id_out = g_pvp.room_id();
             g_ui.show_toast("已加入 #" + std::to_string(room_id_out) + " VS " + g_pvp.opponent_name(), 150);
@@ -3994,10 +4053,14 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
 
     load_sav_overlay();
     g_ui.load_config();
-    if (g_ui.is_lon_game && g_ui.cli_pvp_mode != 0) {
-        uint32_t dummy_rm = 0;
-        take_cli_pvp_action(dummy_rm);
-    }
+#ifdef __linux__
+    prctl(PR_SET_PDEATHSIG, SIGHUP);
+#endif
+    std::signal(SIGINT, on_termination_signal);
+    std::signal(SIGTERM, on_termination_signal);
+#ifdef SIGHUP
+    std::signal(SIGHUP, on_termination_signal);
+#endif
 
     // Allocate screen Graphics object and default Font
     HeapObject gfx{};
@@ -4312,6 +4375,13 @@ void DojaRuntime::poll_events() {
         clean_exit_runtime(*this, sdl_window_ != nullptr, 0);
     }
     g_ui.poll_async_probe();
+    g_ui.maybe_periodic_room_refresh();
+    if (!pvp_self_test_ && !suppress_av_ && !pvp_match_active_ &&
+        g_pvp.active() && !g_pvp.match_started()) {
+        if (g_pvp.poll_udp()) {
+            g_ui.show_toast("挑战者已连接! VS " + g_ui.player_name + " <-> " + g_pvp.opponent_name(), 150);
+        }
+    }
     if (!sdl_window_) return;
     static bool in_modal = false;
 
