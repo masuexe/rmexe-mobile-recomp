@@ -3264,13 +3264,7 @@ static void draw_opponent_soul_badge_and_trap(DojaRuntime& rt, const SideContext
         Ref s = rt.alloc_string("????");
         fn_app_CpCanvas_strDraw___Ljava_lang_String_II__V(rt, s, 210, 95);
     }
-    // Mirror opponent Soul badge + emblem + remaining turns onto top-right when opp_sc.zoku > 0
-    if (opp_sc.zoku >= 1 && opp_sc.zoku <= 6) {
-        fn_app_CpCanvas_drawImg3___IIIIZ__V(rt, 58, 151 + opp_sc.zoku, 206, 64, 0);
-        fn_app_CpCanvas_drawImg3___IIIIZ__V(rt, 58, 123 + opp_sc.zoku, 222, 66, 0);
-        int32_t turns = std::clamp<int32_t>(opp_sc.arm_cnt, 0, 5);
-        fn_app_CpCanvas_drawImg3___IIIIZ__V(rt, 58, 158 + turns, 198, 68, 0);
-    }
+    // Opponent Soul/Trance badge and remaining turns are intentionally hidden on the local screen.
 }
 
 static void draw_tf_cutin_fx_sprite(DojaRuntime& rt, int interrupted_ch, int seq_idx) {
@@ -6561,11 +6555,84 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
     });
     std::printf("[PvP SELF-TEST] Suite N complete (failures=%d)\n", failures);
 
+    // =========================================================================
+    // Suite O: Opponent Soul/Trance Badge & Turn Counter Hidden on Local Screen
+    // =========================================================================
+    run_safe("SuiteO", [&]() {
+        for (int loc = 0; loc < 2; ++loc) {
+            setup_basic_arena(500, 500, 0xF0001u + loc, loc);
+            const int opp = 1 - loc;
+
+            auto capture_rect = [&](int x0, int x1, int y0, int y1) {
+                std::vector<uint32_t> out;
+                const uint32_t* fb = rt.framebuffer();
+                out.reserve(static_cast<size_t>((x1 - x0 + 1) * (y1 - y0 + 1)));
+                for (int y = y0; y <= y1; ++y) {
+                    for (int x = x0; x <= x1; ++x) {
+                        out.push_back(fb[y * 240 + x] & 0x00FFFFFFu);
+                    }
+                }
+                return out;
+            };
+
+            auto render_and_capture = [&](bool custom_backdrop) {
+                g_pvp_eng.backdrop_cache = PvpEngineState::BackdropCache{};
+                rt.set_suppress_av(false);
+                if (custom_backdrop) {
+                    render_custom_screen_backdrop(rt, cp);
+                } else {
+                    render_pvp_combat_frame(rt, cp);
+                }
+                rt.set_suppress_av(true);
+            };
+
+            // 1) Baseline: neither side has Soul/Trance active
+            g_pvp_eng.core.sides[loc].zoku = 0;
+            g_pvp_eng.core.sides[loc].arm_cnt = 0;
+            g_pvp_eng.core.sides[loc].wana = 0;
+            g_pvp_eng.core.sides[opp].zoku = 0;
+            g_pvp_eng.core.sides[opp].arm_cnt = 0;
+            g_pvp_eng.core.sides[opp].wana = 0;
+            render_and_capture(false);
+            const auto base_tr_combat = capture_rect(192, 239, 58, 86);
+            const auto base_tl_combat = capture_rect(0, 48, 58, 86);
+            render_and_capture(true);
+            const auto base_tr_custom = capture_rect(192, 239, 58, 86);
+
+            // 2) Opponent activates Soul/Trance (zoku=2, arm_cnt=3) -> top-right HUD must stay unchanged
+            g_pvp_eng.core.sides[opp].zoku = 2;
+            g_pvp_eng.core.sides[opp].arm_cnt = 3;
+            render_and_capture(false);
+            const auto opp_tr_combat = capture_rect(192, 239, 58, 86);
+            if (opp_tr_combat != base_tr_combat) {
+                fail_msg("SuiteO-OppSoulHiddenCombat",
+                         "loc=" + std::to_string(loc) + " opponent Soul/Trance HUD leaked into top-right during combat");
+            }
+            render_and_capture(true);
+            const auto opp_tr_custom = capture_rect(192, 239, 58, 86);
+            if (opp_tr_custom != base_tr_custom) {
+                fail_msg("SuiteO-OppSoulHiddenCustom",
+                         "loc=" + std::to_string(loc) + " opponent Soul/Trance HUD leaked into top-right during custom backdrop");
+            }
+
+            // 3) Local player activates Soul/Trance (zoku=2, arm_cnt=3) -> local top-left HUD still renders
+            g_pvp_eng.core.sides[loc].zoku = 2;
+            g_pvp_eng.core.sides[loc].arm_cnt = 3;
+            render_and_capture(false);
+            const auto loc_tl_combat = capture_rect(0, 48, 58, 86);
+            if (loc_tl_combat == base_tl_combat) {
+                fail_msg("SuiteO-LocalSoulVisible",
+                         "loc=" + std::to_string(loc) + " local Soul/Trance HUD missing on top-left");
+            }
+        }
+    });
+    std::printf("[PvP SELF-TEST] Suite O complete (failures=%d)\n", failures);
+
     if (failures == 0) {
-        std::printf("[PvP SELF-TEST PASS] LoN Suites A-N passed (0 failures).\n");
+        std::printf("[PvP SELF-TEST PASS] LoN Suites A-O passed (0 failures).\n");
         return 0;
     }
-    std::fprintf(stderr, "[PvP SELF-TEST FAIL] LoN Suites A-N failed (failures=%d).\n", failures);
+    std::fprintf(stderr, "[PvP SELF-TEST FAIL] LoN Suites A-O failed (failures=%d).\n", failures);
     return 1;
 }
 
