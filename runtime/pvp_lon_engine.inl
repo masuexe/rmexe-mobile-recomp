@@ -339,6 +339,7 @@ static void sync_panel_occupancy_and_proxy(DojaRuntime& rt, int active_idx);
 static void set_rock_palette_fast(DojaRuntime& rt, int32_t zoku);
 static void compute_lon_stage_base_rgb(int32_t& out_r, int32_t& out_g, int32_t& out_b);
 static void refresh_sp_tip_powers(DojaRuntime& rt);
+static void cancel_buster_charge_glow(DojaRuntime& rt);
 static void trigger_opponent_elemental_trap(DojaRuntime& rt, int att_idx, int32_t wana_elem);
 static void step_pvp_combat_tick(DojaRuntime& rt, Ref cp, int32_t p0_mask, int32_t p1_mask);
 static uint16_t compute_combat_state_hash(DojaRuntime& rt);
@@ -635,10 +636,16 @@ static void save_side(DojaRuntime& rt, int idx) {
             Ref a = rt.iaload(sf_app_CpCanvas_ata, i);
             if (a <= 0) {
                 std::fill(std::begin(sc.ata_data[i]), std::end(sc.ata_data[i]), 0);
+                for (int f = 0; f < kNumI32_Attack; ++f) {
+                    if (kAttackFields[f] == kFld_Attack_ata_id) sc.ata_data[i][f] = i;
+                    else if (kAttackFields[f] == kFld_Attack_hon_id) sc.ata_data[i][f] = -1;
+                }
                 continue;
             }
             for (int f = 0; f < kNumI32_Attack; ++f) {
-                sc.ata_data[i][f] = rt.field_i32(a, kAttackFields[f]);
+                sc.ata_data[i][f] = (kAttackFields[f] == kFld_Attack_ata_id)
+                    ? i
+                    : rt.field_i32(a, kAttackFields[f]);
             }
             Ref p_arr = rt.field_i32(a, kFld_Attack_param);
             std::fill(std::begin(sc.ata_param[i]), std::end(sc.ata_param[i]), 0);
@@ -817,7 +824,7 @@ static void load_side(DojaRuntime& rt, int idx) {
             for (int f = 0; f < kNumI32_Attack; ++f) {
                 int32_t fld = kAttackFields[f];
                 if (fld == kFld_Attack_param) continue;
-                rt.field_i32(a, fld) = sc.ata_data[i][f];
+                rt.field_i32(a, fld) = (fld == kFld_Attack_ata_id) ? i : sc.ata_data[i][f];
             }
             if (orig_p > 0) {
                 rt.field_i32(a, kFld_Attack_param) = orig_p;
@@ -1202,6 +1209,12 @@ static void init_side_context(DojaRuntime& rt, Ref cp, int idx, const pvp::PvpFi
     sc.next_tip = 1;
     sc.bas_no = -1;
     sc.pa_no = -1;
+    for (int i = 0; i < kMaxAttacks; ++i) {
+        for (int f = 0; f < kNumI32_Attack; ++f) {
+            if (kAttackFields[f] == kFld_Attack_ata_id) sc.ata_data[i][f] = i;
+            else if (kAttackFields[f] == kFld_Attack_hon_id) sc.ata_data[i][f] = -1;
+        }
+    }
 }
 
 static void init_pvp_battle_arena(DojaRuntime& rt, Ref cp) {
@@ -1952,6 +1965,8 @@ static void apply_trance_decision_for_side(DojaRuntime& rt, int s_idx, uint8_t a
     if (action == 0) return;
     ensure_board_orient(rt, s_idx);
     load_side(rt, s_idx);
+    cancel_buster_charge_glow(rt);
+    g_pvp_eng.core.sides[s_idx].buster_charge_glow = false;
     if (action == 7) {
         fn_app_Rock_SetArm___I__V(rt, sf_app_CpCanvas_rock, -1);
     } else if (action >= 1 && action <= 6) {
@@ -2279,6 +2294,43 @@ static void execute_elemental_trap_hit(DojaRuntime& rt, int def_idx, int32_t wan
 
 static void start_root_time_freeze(int s_idx, const TfSlot& slot);
 
+static void cancel_buster_charge_glow(DojaRuntime& rt) {
+    if (sf_app_Rock_bas_no >= 0 && sf_app_CpCanvas_ata > 0 &&
+        sf_app_Rock_bas_no < rt.array_length(sf_app_CpCanvas_ata)) {
+        Ref bas_ata = rt.iaload(sf_app_CpCanvas_ata, sf_app_Rock_bas_no);
+        if (bas_ata > 0) {
+            fn_app_Attack_init_____V(rt, bas_ata);
+        }
+    }
+    sf_app_Rock_bas_no = -1;
+    sf_app_CpCanvas_key_cnt = 0;
+}
+
+static void cleanup_orphaned_charge_attacks(DojaRuntime& rt) {
+    if (sf_app_CpCanvas_ata <= 0) return;
+    int32_t an = std::min<int32_t>(kMaxAttacks, rt.array_length(sf_app_CpCanvas_ata));
+    bool charge_valid = (sf_app_Rock_bas_no >= 0 && sf_app_Rock_bas_no < an &&
+                         (sf_app_CpCanvas_key_cnt >= 4 || sf_app_Rock_tmp_ata >= 0));
+    if (!charge_valid && sf_app_Rock_bas_no >= 0) {
+        if (sf_app_Rock_bas_no < an) {
+            Ref bas_ata = rt.iaload(sf_app_CpCanvas_ata, sf_app_Rock_bas_no);
+            if (bas_ata > 0) fn_app_Attack_init_____V(rt, bas_ata);
+        }
+        sf_app_Rock_bas_no = -1;
+    }
+    for (int32_t i = 0; i < an; ++i) {
+        if (charge_valid && i == sf_app_Rock_bas_no) continue;
+        Ref a = rt.iaload(sf_app_CpCanvas_ata, i);
+        if (a <= 0 || rt.field_i32(a, kFld_Attack_on) == 0) continue;
+        int32_t eid = rt.field_i32(a, kFld_Attack_eff_id);
+        int32_t tid = rt.field_i32(a, kFld_Attack_tmp_id);
+        int32_t wid = rt.field_i32(a, kFld_Attack_waza_id);
+        if (eid == 227 || eid == 228 || tid == 227 || tid == 228 || wid == 227 || wid == 228) {
+            fn_app_Attack_init_____V(rt, a);
+        }
+    }
+}
+
 static void trigger_opponent_elemental_trap(DojaRuntime& rt, int att_idx, int32_t wana_elem) {
     if (wana_elem < 1 || wana_elem > 4) return;
     int def_idx = 1 - att_idx;
@@ -2371,6 +2423,9 @@ static void restore_tf_interrupted_actions() {
             sc.tmp_ata = -1;
             sc.move_flg = 0;
             sc.move_cnt = 0;
+            sc.bas_no = -1;
+            sc.key_cnt = 0;
+            sc.buster_charge_glow = false;
         } else {
             sc.waza_flg = sv.waza_flg;
             sc.waza_wait = sv.waza_wait;
@@ -2523,13 +2578,19 @@ static void step_side_input_phase(DojaRuntime& rt, int s_idx, int32_t mask) {
         int32_t tid = (t_obj > 0) ? rt.field_i32(t_obj, kFld_Tip_tip_id) : 0;
         if (tid > 0) {
             int32_t z_elem = rt.field_i32(t_obj, kFld_Tip_zoku);
-            if (sf_app_Rock_non_cnt <= 0 && sf_app_Rock_non_cnt2 <= 0 && sf_app_Rock_move_flg == 0 &&
-                z_elem >= 1 && z_elem <= 4 && opp.wana == z_elem) {
-                trigger_opponent_elemental_trap(rt, s_idx, z_elem);
-            }
+            bool fire_chip_trap =
+                (sf_app_Rock_non_cnt <= 0 && sf_app_Rock_non_cnt2 <= 0 &&
+                 sf_app_Rock_move_flg == 0 && z_elem >= 1 && z_elem <= 4 && opp.wana == z_elem);
             fn_app_Rock_Action___I__V(rt, rock, 0);
             if (sf_app_Rock_tip_no < pre_act_tip_no) {
                 record_nondim_hud_popup(rt, sc, t_obj, safe_iaload(rt, sf_app_Rock_pow, 3));
+            }
+            if (fire_chip_trap) {
+                sf_app_Rock_non_bas = 0;
+                update_oki_owner_from_snapshot(rt, s_idx, prev_oki_on);
+                save_side(rt, s_idx);
+                trigger_opponent_elemental_trap(rt, s_idx, z_elem);
+                return;
             }
         }
     }
@@ -2551,62 +2612,72 @@ static void step_side_input_phase(DojaRuntime& rt, int s_idx, int32_t mask) {
     int32_t z_clamped = std::clamp<int32_t>(sf_app_Rock_zoku, 0, 6);
     int32_t charge_thresh = (42 - sf_app_CpCanvas_cha_lv * 5) + kChargeDelayAdd[z_clamped];
 
-    if (sf_app_CpCanvas_key_cnt < 0) {
-        sf_app_CpCanvas_key_cnt++;
-        sc.buster_charge_glow = false;
-    } else if (buster_held) {
-        if (sf_app_Rock_non_bas == 0 && sf_app_Rock_tmp_ata < 0 &&
-            sf_app_Rock_non_cnt2 == 0 && sf_app_Rock_joutai == 0) {
+    if (sf_app_Rock_tmp_ata < 0 && sf_app_Rock_non_cnt2 == 0) {
+        if (sf_app_CpCanvas_key_cnt < 0) {
             sf_app_CpCanvas_key_cnt++;
-            if (sf_app_CpCanvas_rock > 0) {
-                if (sf_app_CpCanvas_key_cnt == 4) {
-                    fn_app_Rock_Chage___I__I(rt, sf_app_CpCanvas_rock, 0);
-                } else if (sf_app_CpCanvas_key_cnt == charge_thresh) {
-                    fn_app_Rock_Chage___I__I(rt, sf_app_CpCanvas_rock, 1);
+            sc.buster_charge_glow = false;
+        } else if (buster_held) {
+            if (sf_app_Rock_non_bas == 0 && sf_app_Rock_joutai == 0 && sf_app_Rock_mahi_id < 0 &&
+                sf_app_CpCanvas_key_cnt <= charge_thresh) {
+                if (sf_app_CpCanvas_rock > 0) {
+                    if (sf_app_CpCanvas_key_cnt == 4) {
+                        sf_app_CpCanvas_key_cnt -= fn_app_Rock_Chage___I__I(rt, sf_app_CpCanvas_rock, 0);
+                    } else if (sf_app_CpCanvas_key_cnt == charge_thresh) {
+                        fn_app_Rock_Chage___I__I(rt, sf_app_CpCanvas_rock, 1);
+                    }
                 }
+                sf_app_CpCanvas_key_cnt++;
             }
-        }
-        sc.buster_charge_glow = (sf_app_CpCanvas_key_cnt >= charge_thresh);
-    } else {
-        if (sf_app_CpCanvas_key_cnt > 0 &&
-            sf_app_Rock_tmp_ata < 0 && sf_app_Rock_non_cnt2 == 0 &&
-            sf_app_Rock_joutai == 0 && sf_app_Rock_mahi_id < 0 && sf_app_Rock_non_cnt == 0) {
-            // Release Normal Buster (tid=0) or Charge Shot via rock.tip[5] & Rock.Action(0)
-            bool is_charged = (sf_app_CpCanvas_key_cnt >= charge_thresh);
-            int32_t tid = is_charged ? kChargeShotTipId[z_clamped] : 0;
-            int32_t saved_tip_no = sf_app_Rock_tip_no;
-            int32_t saved_pow0 = safe_iaload(rt, sf_app_Rock_pow, 0);
-            int32_t saved_pow3 = safe_iaload(rt, sf_app_Rock_pow, 3);
-            Ref rock = sf_app_CpCanvas_rock;
-            Ref r_tip_arr = (rock > 0) ? rt.field_i32(rock, kFld_Rock_tip) : 0;
-            Ref saved_slot5 = safe_iaload(rt, r_tip_arr, 5);
-            Ref shot_tip = safe_iaload(rt, sf_app_CpCanvas_tip, tid);
-            if (r_tip_arr > 0 && shot_tip > 0) {
-                rt.iaload(r_tip_arr, 5) = shot_tip;
-                sf_app_Rock_tip_no = 5;
-                safe_iastore(rt, sf_app_Rock_pow, 0, 0);
-#ifdef HAS_SF_app_CpCanvas_bas_max_flg
-                sf_app_CpCanvas_bas_max_flg = 0;
-#endif
-                // Trigger opponent elemental trap if Charge Shot element matches opp.wana
-                if (is_charged && z_clamped >= 1 && z_clamped <= 4 && opp.wana == z_clamped) {
-                    trigger_opponent_elemental_trap(rt, s_idx, z_clamped);
-                }
-                fn_app_Rock_Action___I__V(rt, rock, 0);
-                rt.iaload(r_tip_arr, 5) = saved_slot5;
-            }
-            sf_app_Rock_tip_no = saved_tip_no;
-            safe_iastore(rt, sf_app_Rock_pow, 0, saved_pow0);
-            safe_iastore(rt, sf_app_Rock_pow, 3, saved_pow3);
-            sf_app_CpCanvas_key_cnt = -4;
-            sc.opp_buster_visual_ticks = is_charged ? 6 : 4;
+            sc.buster_charge_glow = (sf_app_CpCanvas_key_cnt > charge_thresh && sf_app_Rock_bas_no >= 0);
         } else if (sf_app_CpCanvas_key_cnt > 0) {
-            sf_app_CpCanvas_key_cnt = 0;
+            if (sf_app_Rock_joutai != 0 || sf_app_Rock_mahi_id >= 0) {
+                cancel_buster_charge_glow(rt);
+                sc.buster_charge_glow = false;
+            } else if (sf_app_Rock_non_cnt <= 0) {
+                // Release Normal Buster (tid=0) or Charge Shot via rock.tip[5] & Rock.Action(0).
+                // Keep shot_tip in rock.tip[5] (matching BattleMain L_4572) so deferred tmp_ata
+                // during movement fires the full Charge Shot when move_flg reaches 0.
+                bool is_charged = (sf_app_CpCanvas_key_cnt > charge_thresh);
+                int32_t tid = is_charged ? kChargeShotTipId[z_clamped] : 0;
+                int32_t saved_tip_no = sf_app_Rock_tip_no;
+                int32_t saved_pow0 = safe_iaload(rt, sf_app_Rock_pow, 0);
+                int32_t saved_pow3 = safe_iaload(rt, sf_app_Rock_pow, 3);
+                int32_t pre_bas_waza_flg = sf_app_Rock_waza_flg;
+                Ref rock = sf_app_CpCanvas_rock;
+                Ref r_tip_arr = (rock > 0) ? rt.field_i32(rock, kFld_Rock_tip) : 0;
+                Ref shot_tip = safe_iaload(rt, sf_app_CpCanvas_tip, tid);
+                bool fire_trap = (is_charged && sf_app_Rock_move_flg == 0 &&
+                                  z_clamped >= 1 && z_clamped <= 4 && opp.wana == z_clamped);
+                if (r_tip_arr > 0 && shot_tip > 0) {
+                    rt.iaload(r_tip_arr, 5) = shot_tip;
+                    sf_app_Rock_tip_no = 5;
+                    safe_iastore(rt, sf_app_Rock_pow, 0, 0);
+#ifdef HAS_SF_app_CpCanvas_bas_max_flg
+                    sf_app_CpCanvas_bas_max_flg = 0;
+#endif
+                    fn_app_Rock_Action___I__V(rt, rock, 0);
+                }
+                sf_app_Rock_tip_no = saved_tip_no;
+                safe_iastore(rt, sf_app_Rock_pow, 0, saved_pow0);
+                if (sf_app_Rock_waza_flg == pre_bas_waza_flg) {
+                    safe_iastore(rt, sf_app_Rock_pow, 3, saved_pow3);
+                }
+                sf_app_CpCanvas_key_cnt = -4;
+                sc.opp_buster_visual_ticks = is_charged ? 6 : 4;
+                sc.buster_charge_glow = false;
+                if (fire_trap) {
+                    sf_app_Rock_non_bas = 0;
+                    update_oki_owner_from_snapshot(rt, s_idx, prev_oki_on);
+                    save_side(rt, s_idx);
+                    trigger_opponent_elemental_trap(rt, s_idx, z_clamped);
+                    return;
+                }
+            }
         }
-        sc.buster_charge_glow = false;
     }
     sf_app_Rock_non_bas = 0;
 
+    cleanup_orphaned_charge_attacks(rt);
     update_oki_owner_from_snapshot(rt, s_idx, prev_oki_on);
     save_side(rt, s_idx);
 }
@@ -2643,6 +2714,7 @@ static void step_side_move_phase(DojaRuntime& rt, int s_idx) {
         }
     }
 
+    cleanup_orphaned_charge_attacks(rt);
     update_oki_owner_from_snapshot(rt, s_idx, prev_oki_on);
     save_side(rt, s_idx);
 }
@@ -2702,6 +2774,7 @@ static void step_side_hit_phase(DojaRuntime& rt, int s_idx) {
         g_pvp_rock_flip_override = prev_flip;
     }
 
+    cleanup_orphaned_charge_attacks(rt);
     update_oki_owner_from_snapshot(rt, s_idx, prev_oki_on);
 
     SideContext& sc = g_pvp_eng.core.sides[s_idx];
@@ -6011,11 +6084,255 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
     });
     std::printf("[PvP SELF-TEST] Suite L complete (failures=%d)\n", failures);
 
+    // =========================================================================
+    // Suite M: Buster Charge VFX Lifecycle & Move-While-Charging Parity
+    // =========================================================================
+    run_safe("SuiteM", [&]() {
+        auto count_charge_vfx_slots = [&](int side_idx, int& out_active_count, int& out_mismatch_pos) {
+            out_active_count = 0;
+            out_mismatch_pos = 0;
+            const SideContext& sctx = g_pvp_eng.core.sides[side_idx];
+            for (int i = 0; i < kMaxAttacks; ++i) {
+                const auto& ad = sctx.ata_data[i];
+                if (ad[kFld_Attack_on] == 0) continue;
+                int32_t eid = ad[kFld_Attack_eff_id];
+                int32_t tid = ad[kFld_Attack_tmp_id];
+                if (eid == 227 || eid == 228 || tid == 227 || tid == 228) {
+                    out_active_count++;
+                    if (ad[kFld_Attack_pos_x] != sctx.pos_x || ad[kFld_Attack_pos_y] != sctx.pos_y) {
+                        out_mismatch_pos++;
+                    }
+                }
+            }
+        };
+
+        auto check_no_residual_attacks = [&](const char* label) -> bool {
+            for (int s = 0; s < 2; ++s) {
+                for (int i = 0; i < kMaxAttacks; ++i) {
+                    if (g_pvp_eng.core.sides[s].ata_data[i][kFld_Attack_on] != 0) {
+                        fail_msg(label,
+                                 "side=" + std::to_string(s) +
+                                 " slot=" + std::to_string(i) +
+                                 " eff=" + std::to_string(g_pvp_eng.core.sides[s].ata_data[i][kFld_Attack_eff_id]) +
+                                 " wid=" + std::to_string(g_pvp_eng.core.sides[s].ata_data[i][kFld_Attack_waza_id]) +
+                                 " on=" + std::to_string(g_pvp_eng.core.sides[s].ata_data[i][kFld_Attack_on]));
+                        return false;
+                    }
+                }
+            }
+            return true;
+        };
+
+        // M1: Hold Charge across Lv1->Lv2 + Multi-Panel Moves -> VFX follows every step, 0 residual pixels on both views
+        for (int actor = 0; actor < 2; ++actor) {
+            setup_basic_arena(1000, 1000, 0xCA500u + static_cast<uint32_t>(actor), 0);
+            g_pvp_eng.core.sides[0].pos_x = 1; g_pvp_eng.core.sides[0].tmp_x = 1;
+            g_pvp_eng.core.sides[0].pos_y = 1; g_pvp_eng.core.sides[0].tmp_y = 1;
+            g_pvp_eng.core.sides[1].pos_x = 1; g_pvp_eng.core.sides[1].tmp_x = 1;
+            g_pvp_eng.core.sides[1].pos_y = 1; g_pvp_eng.core.sides[1].tmp_y = 1;
+
+            const int chg_thresh = (42 - sf_app_CpCanvas_cha_lv * 5) + kChargeDelayAdd[0];
+            bool bad_ata_id = false;
+            bool bad_bas_no = false;
+            bool bad_charge_follow = false;
+            int peak_charge_slots = 0;
+
+            for (int t = 0; t < chg_thresh + 24; ++t) {
+                int32_t m = (1 << 10); // Hold ACT_CANCEL (Buster)
+                // Trigger panel moves spaced 8 ticks apart while holding charge (triggers Rock_Check waza 225 in ata[1])
+                if (t == 8)       m |= (1 << 17); // Up -> (1, 0)
+                else if (t == 16) m |= (1 << 16); // Left -> (0, 0)
+                else if (t == 24) m |= (1 << 19); // Down -> (0, 1)
+                else if (t == 32) m |= (1 << 18); // Right -> (1, 1)
+                step_pvp_combat_tick(rt, cp, (actor == 0) ? m : 0, (actor == 1) ? m : 0);
+
+                const SideContext& act_sc = g_pvp_eng.core.sides[actor];
+                for (int i = 0; i < kMaxAttacks; ++i) {
+                    if (act_sc.ata_data[i][0] != i) bad_ata_id = true;
+                }
+                int cnt = 0, mis = 0;
+                count_charge_vfx_slots(actor, cnt, mis);
+                peak_charge_slots = std::max(peak_charge_slots, cnt);
+                if (t >= 4 && act_sc.bas_no < 0) bad_bas_no = true;
+                if (cnt > 1 || mis > 0 || (t >= 4 && cnt != 1)) bad_charge_follow = true;
+            }
+
+            // Release Buster and settle 36 ticks
+            for (int t = 0; t < 36; ++t) {
+                step_pvp_combat_tick(rt, cp, 0, 0);
+            }
+
+            int opp = 1 - actor;
+            int32_t dmg = 1000 - g_pvp_eng.core.sides[opp].hp;
+            bool bas_cleared = (g_pvp_eng.core.sides[actor].bas_no == -1 && g_pvp_eng.core.sides[actor].key_cnt == 0);
+            bool no_leftover = check_no_residual_attacks("SuiteM1-Leftover");
+
+            // Render clean post-settle frame from both P0 & P1 views and diff [y: 58..178) against zero-attack board
+            std::array<std::vector<uint32_t>, 2> fb_after;
+            for (int loc = 0; loc < 2; ++loc) {
+                g_pvp_eng.local_idx = loc;
+                g_pvp_eng.backdrop_cache = PvpEngineState::BackdropCache{};
+                rt.set_suppress_av(false);
+                render_pvp_combat_frame(rt, cp);
+                rt.set_suppress_av(true);
+                const uint32_t* fb = rt.framebuffer();
+                fb_after[loc].assign(fb, fb + 240 * 240);
+            }
+            const auto post_panels = capture_panels_canonical();
+            const int32_t post_cus = g_pvp_eng.core.cus_gage;
+            const int32_t post_game_cnt = sf_app_CpCanvas_game_cnt;
+            const int32_t post_round = g_pvp_eng.core.custom_round;
+            const SideContext post_s0 = g_pvp_eng.core.sides[0];
+            const SideContext post_s1 = g_pvp_eng.core.sides[1];
+
+            setup_basic_arena(1000, 1000, 0xCA599u, 0);
+            g_pvp_eng.core.cus_gage = post_cus;
+            g_pvp_eng.core.custom_round = post_round;
+            g_pvp_eng.core.sides[0].cus_gage = post_cus;
+            g_pvp_eng.core.sides[1].cus_gage = post_cus;
+            auto copy_rock_vis = [](SideContext& dst, const SideContext& src) {
+                dst.hp = src.hp; dst.max_hp = src.max_hp;
+                dst.pos_x = src.pos_x; dst.pos_y = src.pos_y;
+                dst.tmp_x = src.tmp_x; dst.tmp_y = src.tmp_y;
+                dst.ani_id = src.ani_id; dst.ani_cnt = src.ani_cnt;
+                dst.ani_wait_cnt = src.ani_wait_cnt; dst.tmp_ani_cnt = src.tmp_ani_cnt;
+                dst.hit_cnt = src.hit_cnt; dst.muteki_cnt = src.muteki_cnt;
+                dst.noke_cnt = src.noke_cnt; dst.rock_t_ani_cnt = src.rock_t_ani_cnt;
+                dst.opp_nondim_tip_id = src.opp_nondim_tip_id;
+                dst.opp_nondim_ticks = src.opp_nondim_ticks;
+                dst.opp_buster_visual_ticks = src.opp_buster_visual_ticks;
+                dst.tip_no = src.tip_no;
+                for (int k = 0; k < 9; ++k) dst.rock_tip_ids[k] = src.rock_tip_ids[k];
+            };
+            copy_rock_vis(g_pvp_eng.core.sides[0], post_s0);
+            copy_rock_vis(g_pvp_eng.core.sides[1], post_s1);
+            sf_app_CpCanvas_game_cnt = post_game_cnt;
+            ensure_board_orient(rt, 0);
+            if (sf_app_CpCanvas_panel > 0 && rt.array_length(sf_app_CpCanvas_panel) >= 3) {
+                for (int y = 0; y < 3; ++y) {
+                    Ref row = rt.iaload(sf_app_CpCanvas_panel, y);
+                    if (row <= 0 || rt.array_length(row) < 6) continue;
+                    for (int x = 0; x < 6; ++x) {
+                        Ref p = rt.iaload(row, x);
+                        if (p <= 0) continue;
+                        rt.field_i32(p, kFld_BtPanel_jin) = post_panels[y][x].jin;
+                        rt.field_i32(p, kFld_BtPanel_jou) = post_panels[y][x].jou;
+                        rt.field_i32(p, kFld_BtPanel_ana_cnt) = post_panels[y][x].ana_cnt;
+                        rt.field_i32(p, kFld_BtPanel_mag_cnt) = post_panels[y][x].mag_cnt;
+                        rt.field_i32(p, kFld_BtPanel_aria_cnt) = post_panels[y][x].aria_cnt;
+                        rt.field_i32(p, kFld_BtPanel_yokoku) = post_panels[y][x].yokoku;
+                        rt.field_i32(p, kFld_BtPanel_bom_pow) = post_panels[y][x].bom_pow;
+                    }
+                }
+            }
+            int diff_px[2] = {0, 0};
+            for (int loc = 0; loc < 2; ++loc) {
+                g_pvp_eng.local_idx = loc;
+                g_pvp_eng.backdrop_cache = PvpEngineState::BackdropCache{};
+                rt.set_suppress_av(false);
+                render_pvp_combat_frame(rt, cp);
+                rt.set_suppress_av(true);
+                const uint32_t* fb = rt.framebuffer();
+                for (int y = 58; y < 178; ++y) {
+                    for (int x = 0; x < 240; ++x) {
+                        if ((fb[y * 240 + x] & 0x00FFFFFFu) != (fb_after[loc][y * 240 + x] & 0x00FFFFFFu)) {
+                            diff_px[loc]++;
+                        }
+                    }
+                }
+            }
+            g_pvp_eng.local_idx = 0;
+
+            if (bad_ata_id || bad_bas_no || bad_charge_follow || peak_charge_slots != 1 ||
+                dmg < 10 || !bas_cleared || !no_leftover || diff_px[0] != 0 || diff_px[1] != 0) {
+                fail_msg("SuiteM1-MoveWhileCharging",
+                         "actor=" + std::to_string(actor) +
+                         " ata_id=" + std::to_string(!bad_ata_id) +
+                         " bas=" + std::to_string(!bad_bas_no) +
+                         " follow=" + std::to_string(!bad_charge_follow) +
+                         " peak=" + std::to_string(peak_charge_slots) +
+                         " dmg=" + std::to_string(dmg) +
+                         " cleared=" + std::to_string(bas_cleared) +
+                         " diff=(" + std::to_string(diff_px[0]) + "," + std::to_string(diff_px[1]) + ")");
+            }
+        }
+
+        // M2: Releasing Buster mid-move (move_flg != 0) at partial and full charge cleans up VFX and preserves Charge Shot
+        {
+            // Partial charge + D-pad Up + release on next tick (mid-move)
+            setup_basic_arena(1000, 1000, 0xCA502u, 0);
+            for (int t = 0; t < 12; ++t) {
+                int32_t m = (1 << 10) | ((t == 11) ? (1 << 17) : 0);
+                step_pvp_combat_tick(rt, cp, m, 0);
+            }
+            for (int t = 0; t < 24; ++t) {
+                step_pvp_combat_tick(rt, cp, 0, 0);
+            }
+            bool m2a_ok = (g_pvp_eng.core.sides[0].bas_no == -1 && check_no_residual_attacks("SuiteM2a-PartialMidMove"));
+
+            // Full charge at y=0 (opp at y=1), press Down (1 << 19) + release Buster simultaneously
+            setup_basic_arena(1000, 1000, 0xCA503u, 0);
+            g_pvp_eng.core.sides[0].pos_y = 0; g_pvp_eng.core.sides[0].tmp_y = 0;
+            g_pvp_eng.core.sides[1].pos_y = 1; g_pvp_eng.core.sides[1].tmp_y = 1;
+            const int chg_ticks = (42 - sf_app_CpCanvas_cha_lv * 5) + kChargeDelayAdd[0] + 4;
+            for (int t = 0; t < chg_ticks; ++t) {
+                step_pvp_combat_tick(rt, cp, (1 << 10), 0);
+            }
+            step_pvp_combat_tick(rt, cp, (1 << 19), 0); // D-pad sets move_flg != 0 while Buster releases!
+            for (int t = 0; t < 24; ++t) {
+                step_pvp_combat_tick(rt, cp, 0, 0);
+            }
+            int32_t mid_move_chg_dmg = 1000 - g_pvp_eng.core.sides[1].hp;
+            bool m2b_ok = (mid_move_chg_dmg >= 10 && g_pvp_eng.core.sides[0].bas_no == -1 &&
+                           check_no_residual_attacks("SuiteM2b-FullMidMove"));
+            if (!m2a_ok || !m2b_ok || g_pvp_eng.core.sides[0].pos_y != 1) {
+                fail_msg("SuiteM2-ReleaseMidMove",
+                         "m2a=" + std::to_string(m2a_ok) +
+                         " m2b=" + std::to_string(m2b_ok) +
+                         " dmg=" + std::to_string(mid_move_chg_dmg) +
+                         " y=" + std::to_string(g_pvp_eng.core.sides[0].pos_y));
+            }
+        }
+
+        // M3: Charge interrupted by moving + chip press, and by joutai!=0 release
+        if (tid_cannon > 0) {
+            setup_basic_arena(1000, 1000, 0xCA504u, 0);
+            queue_tips_fifo(0, {static_cast<int16_t>(tid_cannon)});
+            for (int t = 0; t < 12; ++t) {
+                step_pvp_combat_tick(rt, cp, (1 << 10), 0);
+            }
+            // Start moving Up while pressing chip ACT_SELECT and releasing Buster
+            step_pvp_combat_tick(rt, cp, (1 << 17) | (1 << 20), 0);
+            for (int t = 0; t < 24; ++t) {
+                step_pvp_combat_tick(rt, cp, 0, 0);
+            }
+            int32_t chip_dmg = 1000 - g_pvp_eng.core.sides[1].hp;
+            bool m3a_ok = (chip_dmg > 0 && g_pvp_eng.core.sides[0].bas_no == -1 &&
+                           check_no_residual_attacks("SuiteM3a-MoveChipCharge"));
+
+            // Joutai != 0 while charging -> releasing Buster must clean up bas_no & charge attack
+            setup_basic_arena(1000, 1000, 0xCA505u, 0);
+            for (int t = 0; t < 12; ++t) {
+                step_pvp_combat_tick(rt, cp, (1 << 10), 0);
+            }
+            g_pvp_eng.core.sides[0].joutai = 1;
+            step_pvp_combat_tick(rt, cp, 0, 0);
+            bool m3b_ok = (g_pvp_eng.core.sides[0].bas_no == -1 && g_pvp_eng.core.sides[0].key_cnt == 0 &&
+                           check_no_residual_attacks("SuiteM3b-JoutaiRelease"));
+            if (!m3a_ok || !m3b_ok) {
+                fail_msg("SuiteM3-ChargeInterrupts",
+                         "m3a=" + std::to_string(m3a_ok) + " cdmg=" + std::to_string(chip_dmg) +
+                         " m3b=" + std::to_string(m3b_ok));
+            }
+        }
+    });
+    std::printf("[PvP SELF-TEST] Suite M complete (failures=%d)\n", failures);
+
     if (failures == 0) {
-        std::printf("[PvP SELF-TEST PASS] LoN Suites A-L passed (0 failures).\n");
+        std::printf("[PvP SELF-TEST PASS] LoN Suites A-M passed (0 failures).\n");
         return 0;
     }
-    std::fprintf(stderr, "[PvP SELF-TEST FAIL] LoN Suites A-L failed (failures=%d).\n", failures);
+    std::fprintf(stderr, "[PvP SELF-TEST FAIL] LoN Suites A-M failed (failures=%d).\n", failures);
     return 1;
 }
 

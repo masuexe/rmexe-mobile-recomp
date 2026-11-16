@@ -246,7 +246,7 @@ def run_self_test(label: str, bin_path: str) -> None:
         assert "JavaException" not in combined and "[PvP Exception]" not in combined, (
             f"{label} threw JavaException\n{combined}"
         )
-        for suite in "ABCDEFGHIJKL":
+        for suite in "ABCDEFGHIJKLM":
             expected = f"Suite {suite} complete (failures=0)"
             assert expected in combined, f"{label} missing '{expected}'\n{combined}"
         print(f"  -> {label} self-test PASSED in {dt:.2f}s!", flush=True)
