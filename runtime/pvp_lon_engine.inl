@@ -2791,6 +2791,13 @@ static void step_side_hit_phase(DojaRuntime& rt, int s_idx) {
     cleanup_orphaned_charge_attacks(rt);
     update_oki_owner_from_snapshot(rt, s_idx, prev_oki_on);
 
+    // Non-dimming Invis (Attack.HitExp case 16) writes sf_app_Rock_tmp_muteki_cnt = 90 while
+    // stop_cnt == 0. Promote it into muteki_cnt here since TF restore does not run in TF_IDLE.
+    if (sf_app_Rock_tmp_muteki_cnt > 0) {
+        sf_app_Rock_muteki_cnt = std::max<int32_t>(sf_app_Rock_muteki_cnt, sf_app_Rock_tmp_muteki_cnt);
+        sf_app_Rock_tmp_muteki_cnt = 0;
+    }
+
     SideContext& sc = g_pvp_eng.core.sides[s_idx];
     if (sc.opp_nondim_ticks > 0) sc.opp_nondim_ticks--;
     if (sc.opp_buster_visual_ticks > 0) sc.opp_buster_visual_ticks--;
@@ -6750,11 +6757,92 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
     });
     std::printf("[PvP SELF-TEST] Suite P complete (failures=%d)\n", failures);
 
+    // =========================================================================
+    // Suite Q: Invis Chip (tmp_muteki_cnt -> muteki_cnt & Damage Immunity)
+    // =========================================================================
+    run_safe("SuiteQ", [&]() {
+        int invis_tid = 0;
+        for (int cid = 1; cid <= 270 && invis_tid == 0; ++cid) {
+            setup_basic_arena(500, 500, 0x110000u + cid, 0);
+            queue_tips_fifo(0, {static_cast<int16_t>(cid)});
+            for (int t = 0; t < 48; ++t) {
+                step_pvp_combat_tick(rt, cp, (t == 0) ? (1 << 20) : 0, 0);
+                if (g_pvp_eng.core.sides[0].muteki_cnt >= 60) {
+                    invis_tid = cid;
+                    break;
+                }
+            }
+        }
+        if (invis_tid == 0) {
+            fail_msg("SuiteQ-NoInvisFound", "No chip in 1..270 granted Invis muteki_cnt >= 60");
+            return;
+        }
+        if (tid_cannon <= 0) {
+            fail_msg("SuiteQ-NoCannon", "Could not find Cannon tip for Invis immunity test");
+            return;
+        }
+
+        // Verify both sides (actor=0 and actor=1):
+        // 1) Invis grants muteki_cnt > 0 after TF ends and blocks Cannon damage while active
+        // 2) After Invis expires (90 ticks), Cannon deals damage normally
+        for (int actor = 0; actor < 2; ++actor) {
+            int opp = 1 - actor;
+            setup_basic_arena(500, 500, 0x110100u + actor, 0);
+            g_pvp_eng.core.sides[0].pos_y = 1;
+            g_pvp_eng.core.sides[1].pos_y = 1;
+            queue_tips_fifo(actor, {static_cast<int16_t>(invis_tid)});
+            queue_tips_fifo(opp, {static_cast<int16_t>(tid_cannon), static_cast<int16_t>(tid_cannon)});
+
+            int32_t peak_muteki = 0;
+            bool tf_done = false;
+            int cannon_t = -1;
+            for (int t = 0; t < 80; ++t) {
+                int32_t m_actor = (t == 0) ? (1 << 20) : 0;
+                int32_t m_opp = 0;
+                if (tf_done && cannon_t < 0) {
+                    cannon_t = t;
+                    m_opp = (1 << 20); // Fire first Cannon right after Invis TF ends
+                }
+                step_pvp_combat_tick(rt, cp, (actor == 0) ? m_actor : m_opp, (actor == 1) ? m_actor : m_opp);
+                if (t > 0 && g_pvp_eng.core.tf_state == TF_IDLE) tf_done = true;
+                peak_muteki = std::max(peak_muteki, g_pvp_eng.core.sides[actor].muteki_cnt);
+            }
+            if (!tf_done || peak_muteki < 60 || g_pvp_eng.core.sides[actor].tmp_muteki_cnt != 0 ||
+                g_pvp_eng.core.sides[actor].hp != 500) {
+                fail_msg("SuiteQ-InvisImmunity",
+                         "actor=" + std::to_string(actor) + " tf_done=" + std::to_string(tf_done) +
+                         " peak_mut=" + std::to_string(peak_muteki) +
+                         " tmp_mut=" + std::to_string(g_pvp_eng.core.sides[actor].tmp_muteki_cnt) +
+                         " hp=" + std::to_string(g_pvp_eng.core.sides[actor].hp));
+            }
+
+            // Wait for Invis (90 ticks) to expire, then fire second Cannon
+            for (int t = 0; t < 70; ++t) {
+                step_pvp_combat_tick(rt, cp, 0, 0);
+            }
+            if (g_pvp_eng.core.sides[actor].muteki_cnt != 0) {
+                fail_msg("SuiteQ-InvisNotExpired",
+                         "actor=" + std::to_string(actor) + " muteki_cnt=" +
+                         std::to_string(g_pvp_eng.core.sides[actor].muteki_cnt));
+            }
+            for (int t = 0; t < 30; ++t) {
+                int32_t m_opp = (t == 0) ? (1 << 20) : 0;
+                step_pvp_combat_tick(rt, cp, (actor == 1) ? m_opp : 0, (actor == 0) ? m_opp : 0);
+            }
+            if (g_pvp_eng.core.sides[actor].hp >= 500) {
+                fail_msg("SuiteQ-PostInvisDamage",
+                         "actor=" + std::to_string(actor) + " did not take damage after Invis expired, hp=" +
+                         std::to_string(g_pvp_eng.core.sides[actor].hp));
+            }
+        }
+    });
+    std::printf("[PvP SELF-TEST] Suite Q complete (failures=%d)\n", failures);
+
     if (failures == 0) {
-        std::printf("[PvP SELF-TEST PASS] LoN Suites A-P passed (0 failures).\n");
+        std::printf("[PvP SELF-TEST PASS] LoN Suites A-Q passed (0 failures).\n");
         return 0;
     }
-    std::fprintf(stderr, "[PvP SELF-TEST FAIL] LoN Suites A-P failed (failures=%d).\n", failures);
+    std::fprintf(stderr, "[PvP SELF-TEST FAIL] LoN Suites A-Q failed (failures=%d).\n", failures);
     return 1;
 }
 
