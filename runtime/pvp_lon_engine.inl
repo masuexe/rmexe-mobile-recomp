@@ -797,7 +797,7 @@ static void load_side(DojaRuntime& rt, int idx) {
     sf_app_CpCanvas_key_cnt = sc.key_cnt;
     sf_app_CpCanvas_bas_cnt = sc.bas_cnt;
     sf_app_CpCanvas_bas_flg = sc.bas_flg;
-    sf_app_CpCanvas_cus_gage = sc.cus_gage;
+    sf_app_CpCanvas_cus_gage = g_pvp_eng.core.cus_gage;
     sf_app_CpCanvas_rock_mu = sc.rock_mu;
     sf_app_CpCanvas_hit_flg = sc.hit_flg;
     sf_app_CpCanvas_ok_tip = sc.ok_tip;
@@ -2026,6 +2026,8 @@ static void init_round_rollback_window(DojaRuntime& rt) {
         g_pvp_eng.core.cus_gage = 0;
         sf_app_CpCanvas_cus_gage = 0;
     }
+    g_pvp_eng.core.sides[0].cus_gage = g_pvp_eng.core.cus_gage;
+    g_pvp_eng.core.sides[1].cus_gage = g_pvp_eng.core.cus_gage;
     for (uint32_t d = 0; d <= kInputDelayFrames + 8; ++d) {
         size_t slot = (cur_t + d) % hist_n;
         g_pvp_eng.local_inputs[slot] = 0;
@@ -2682,6 +2684,16 @@ static void step_side_input_phase(DojaRuntime& rt, int s_idx, int32_t mask) {
     save_side(rt, s_idx);
 }
 
+static inline void sync_shared_cus_gage_from_canvas() {
+    PvpCombatCore& core = g_pvp_eng.core;
+    if (core.custom_round < kMaxTurns && sf_app_CpCanvas_cus_gage > core.cus_gage) {
+        core.cus_gage = std::clamp<int32_t>(sf_app_CpCanvas_cus_gage, 0, 128);
+        core.sides[0].cus_gage = core.cus_gage;
+        core.sides[1].cus_gage = core.cus_gage;
+    }
+    sf_app_CpCanvas_cus_gage = core.cus_gage;
+}
+
 static void step_side_move_phase(DojaRuntime& rt, int s_idx) {
     g_pvp_eng.active_side = s_idx;
     ensure_board_orient(rt, s_idx);
@@ -2714,6 +2726,7 @@ static void step_side_move_phase(DojaRuntime& rt, int s_idx) {
         }
     }
 
+    sync_shared_cus_gage_from_canvas();
     cleanup_orphaned_charge_attacks(rt);
     update_oki_owner_from_snapshot(rt, s_idx, prev_oki_on);
     save_side(rt, s_idx);
@@ -2774,6 +2787,7 @@ static void step_side_hit_phase(DojaRuntime& rt, int s_idx) {
         g_pvp_rock_flip_override = prev_flip;
     }
 
+    sync_shared_cus_gage_from_canvas();
     cleanup_orphaned_charge_attacks(rt);
     update_oki_owner_from_snapshot(rt, s_idx, prev_oki_on);
 
@@ -2890,6 +2904,7 @@ static void step_tf_stack_tick(DojaRuntime& rt, int32_t p0_mask, int32_t p1_mask
             } else if (top.tip_kind == 2) {
                 execute_elemental_trap_hit(rt, owner, top.tip_id, top.captured_plus_pow);
             }
+            sync_shared_cus_gage_from_canvas();
             save_side(rt, owner);
             update_oki_owner_from_snapshot(rt, owner, prev_oki_on);
             snapshot_oki_on(rt, prev_oki_on);
@@ -2950,6 +2965,7 @@ static void step_tf_stack_tick(DojaRuntime& rt, int32_t p0_mask, int32_t p1_mask
             fn_app_Rock_Draw___I__V(rt, sf_app_CpCanvas_rock, 0);
             g_pvp_rock_flip_override = prev_flip;
         }
+        sync_shared_cus_gage_from_canvas();
         save_side(rt, owner);
         update_oki_owner_from_snapshot(rt, owner, prev_oki_on);
     }
@@ -3918,11 +3934,11 @@ static void start_next_bo3_game(DojaRuntime& rt, Ref cp) {
 }
 
 // ============================================================================
-// Stage 4 Headless --pvp-self-test Suites A-L
+// Stage 4 Headless --pvp-self-test Suites A-N
 // ============================================================================
 static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
     SelfTestFlagGuard test_guard(rt);
-    std::printf("[PvP SELF-TEST] LoN Suites A-L starting...\n");
+    std::printf("[PvP SELF-TEST] LoN Suites A-N starting...\n");
 
     FullHeapSnapshot base_heap;
     std::vector<int64_t> base_statics;
@@ -6328,11 +6344,228 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
     });
     std::printf("[PvP SELF-TEST] Suite M complete (failures=%d)\n", failures);
 
+    // =========================================================================
+    // Suite N: FullCust BattleChip Gauge Fill, Counter-Cut-In, Rollback & Turn 15
+    // =========================================================================
+    run_safe("SuiteN", [&]() {
+        int32_t tid_fullcust = -1;
+        int32_t tid_dim_other = -1;
+        {
+            setup_basic_arena(1000, 1000, 0xCA600u, 0);
+            Ref tmp_a = rt.alloc_object(kClassId_Attack, kNumI32_Attack, kNumI64_Attack);
+            fn_app_Attack__init____I__V(rt, tmp_a, 29);
+            const int32_t max_tid = std::min<int32_t>(270, tip_len - 1);
+            for (int32_t tid = 2; tid <= max_tid; ++tid) {
+                Ref to = safe_iaload(rt, sf_app_CpCanvas_tip, tid);
+                if (to <= 0) continue;
+                int32_t wid = rt.field_i32(to, kFld_Tip_waza_id);
+                if (wid <= 0) continue;
+                int32_t stime = 0;
+                if (sf_app_CpCanvas_waza > 0 && wid < rt.array_length(sf_app_CpCanvas_waza)) {
+                    Ref w_obj = rt.iaload(sf_app_CpCanvas_waza, wid);
+                    if (w_obj > 0) stime = rt.field_i32(w_obj, kFld_Waza_stop_time);
+                }
+                fn_app_Attack_Set___IIIII__I(rt, tmp_a, wid, 1, 1, 0, 1);
+                Ref p_arr = rt.field_i32(tmp_a, kFld_Attack_param);
+                int32_t p7 = safe_iaload(rt, p_arr, 7);
+                if (tid_fullcust < 0 && p7 == 20) {
+                    tid_fullcust = tid;
+                } else if (tid_dim_other < 0 && stime > 0 && p7 == 15) {
+                    tid_dim_other = tid;
+                }
+            }
+        }
+        if (tid_fullcust <= 0 || tid_dim_other <= 0) {
+            fail_msg("SuiteN-Discover",
+                     "fullcust=" + std::to_string(tid_fullcust) +
+                     " dim_other=" + std::to_string(tid_dim_other));
+            return;
+        }
+
+        // N1: P0 & P1 FullCust fills shared Custom Gauge to 128, renders full green bar, and allows Custom open
+        for (int actor = 0; actor < 2; ++actor) {
+            setup_basic_arena(1000, 1000, 0xCA610u + static_cast<uint32_t>(actor), 0);
+            g_pvp_eng.core.custom_round = 1;
+            g_pvp_eng.core.cus_gage = 10;
+            g_pvp_eng.core.sides[0].cus_gage = 10;
+            g_pvp_eng.core.sides[1].cus_gage = 10;
+            sf_app_CpCanvas_cus_gage = 10;
+            queue_tips_fifo(actor, {static_cast<int16_t>(tid_fullcust)});
+
+            bool saw_tf = false;
+            bool exited_tf = false;
+            for (int t = 0; t < 80; ++t) {
+                int32_t m = (t == 0) ? (1 << 20) : 0;
+                step_pvp_combat_tick(rt, cp, (actor == 0) ? m : 0, (actor == 1) ? m : 0);
+                if (g_pvp_eng.core.tf_state != TF_IDLE) saw_tf = true;
+                else if (saw_tf) {
+                    exited_tf = true;
+                    break;
+                }
+            }
+
+            int leftover_on = 0;
+            for (int s = 0; s < 2; ++s) {
+                for (int i = 0; i < kMaxAttacks; ++i) {
+                    if (g_pvp_eng.core.sides[s].ata_data[i][kFld_Attack_on] != 0) leftover_on++;
+                }
+            }
+
+            bool bar_green_ok = true;
+            const int32_t saved_gc = sf_app_CpCanvas_game_cnt;
+            sf_app_CpCanvas_game_cnt = 0;
+            for (int loc = 0; loc < 2; ++loc) {
+                g_pvp_eng.local_idx = loc;
+                g_pvp_eng.backdrop_cache = PvpEngineState::BackdropCache{};
+                rt.set_suppress_av(false);
+                render_pvp_combat_frame(rt, cp);
+                rt.set_suppress_av(true);
+                const uint32_t* fb = rt.framebuffer();
+                for (int x = 60; x < 180; ++x) {
+                    uint32_t rgb = fb[52 * 240 + x] & 0x00FFFFFFu;
+                    uint32_t r = (rgb >> 16) & 0xFFu;
+                    uint32_t g = (rgb >> 8) & 0xFFu;
+                    uint32_t b = rgb & 0xFFu;
+                    if (!(g >= 240 && r < 32 && b < 32)) {
+                        bar_green_ok = false;
+                        break;
+                    }
+                }
+            }
+            sf_app_CpCanvas_game_cnt = saved_gc;
+            g_pvp_eng.local_idx = 0;
+
+            bool gauge_state_ok = (saw_tf && exited_tf && leftover_on == 0 &&
+                                   g_pvp_eng.core.sides[actor].tip_no == -1 &&
+                                   g_pvp_eng.core.cus_gage == 128 &&
+                                   g_pvp_eng.core.sides[0].cus_gage == 128 &&
+                                   g_pvp_eng.core.sides[1].cus_gage == 128 &&
+                                   sf_app_CpCanvas_cus_gage == 128);
+
+            step_pvp_combat_tick(rt, cp, (actor == 0) ? (1 << 21) : 0, (actor == 1) ? (1 << 22) : 0);
+            bool opened_custom = g_pvp_eng.core.open_custom_req;
+            if (!gauge_state_ok || !bar_green_ok || !opened_custom) {
+                fail_msg("SuiteN1-FullCustFill",
+                         "actor=" + std::to_string(actor) +
+                         " tid=" + std::to_string(tid_fullcust) +
+                         " state=" + std::to_string(gauge_state_ok) +
+                         " tf=(" + std::to_string(saw_tf) + "," + std::to_string(exited_tf) + ")" +
+                         " cus=(" + std::to_string(g_pvp_eng.core.cus_gage) + "," +
+                         std::to_string(g_pvp_eng.core.sides[0].cus_gage) + "," +
+                         std::to_string(g_pvp_eng.core.sides[1].cus_gage) + "," +
+                         std::to_string(sf_app_CpCanvas_cus_gage) + ")" +
+                         " left=" + std::to_string(leftover_on) +
+                         " green=" + std::to_string(bar_green_ok) +
+                         " open=" + std::to_string(opened_custom));
+            }
+        }
+
+        // N2: FullCust Counter-Dimming Cut-In + GGPO Rollback Determinism
+        {
+            constexpr int kFrames = 112;
+            std::array<int32_t, kFrames> p0_in{}, p1_in{};
+            p0_in[0] = (1 << 20);
+            p1_in[2] = (1 << 20);
+
+            auto setup_n2 = [&]() {
+                setup_basic_arena(1000, 1000, 0xCA620u, 0);
+                g_pvp_eng.core.custom_round = 1;
+                g_pvp_eng.core.cus_gage = 5;
+                g_pvp_eng.core.sides[0].cus_gage = 5;
+                g_pvp_eng.core.sides[1].cus_gage = 5;
+                sf_app_CpCanvas_cus_gage = 5;
+                queue_tips_fifo(0, {static_cast<int16_t>(tid_dim_other)});
+                queue_tips_fifo(1, {static_cast<int16_t>(tid_fullcust)});
+            };
+
+            setup_n2();
+            bool saw_depth2 = false;
+            bool exited_tf = false;
+            for (int t = 0; t < kFrames; ++t) {
+                step_pvp_combat_tick(rt, cp, p0_in[t], p1_in[t]);
+                if (g_pvp_eng.core.tf_depth == 2) saw_depth2 = true;
+                if (saw_depth2 && g_pvp_eng.core.tf_state == TF_IDLE) exited_tf = true;
+            }
+            const int32_t canon_cus = g_pvp_eng.core.cus_gage;
+            const uint16_t canon_hash = compute_combat_state_hash(rt);
+
+            setup_n2();
+            std::array<int32_t, kFrames> spec_p1{};
+            bool rb_ok = true;
+            for (int t = 0; t < kFrames; ++t) {
+                save_rollback_slot(rt, g_pvp_eng, static_cast<uint32_t>(t), p0_in[t], spec_p1[t],
+                                   true, compute_combat_state_hash(rt));
+                step_pvp_combat_tick(rt, cp, p0_in[t], spec_p1[t]);
+                if (t == 12) {
+                    for (uint32_t k = 2; k <= 12u; ++k) spec_p1[k] = p1_in[k];
+                    if (!restore_rollback_slot(rt, g_pvp_eng, 2u)) {
+                        rb_ok = false;
+                        break;
+                    }
+                    g_pvp_eng.in_resim = true;
+                    for (uint32_t k = 2; k <= 12u; ++k) {
+                        save_rollback_slot(rt, g_pvp_eng, k, p0_in[k], spec_p1[k],
+                                           false, compute_combat_state_hash(rt));
+                        step_pvp_combat_tick(rt, cp, p0_in[k], spec_p1[k]);
+                    }
+                    g_pvp_eng.in_resim = false;
+                }
+            }
+            const uint16_t rb_hash = compute_combat_state_hash(rt);
+            if (!saw_depth2 || !exited_tf || canon_cus != 128 || !rb_ok ||
+                g_pvp_eng.core.cus_gage != 128 || rb_hash != canon_hash) {
+                fail_msg("SuiteN2-FullCustCounterRollback",
+                         "d2=" + std::to_string(saw_depth2) +
+                         " ex=" + std::to_string(exited_tf) +
+                         " cus=(" + std::to_string(canon_cus) + "," + std::to_string(g_pvp_eng.core.cus_gage) + ")" +
+                         " rb=" + std::to_string(rb_ok) +
+                         " h=(" + std::to_string(canon_hash) + "," + std::to_string(rb_hash) + ")");
+            }
+        }
+
+        // N3: Turn 15 Final Countdown Immunity (FullCust must not override final countdown or open Custom)
+        {
+            setup_basic_arena(1000, 1000, 0xCA630u, 0);
+            g_pvp_eng.core.custom_round = kMaxTurns;
+            g_pvp_eng.core.final_turn_ticks_left = 80;
+            const int32_t init_gage = static_cast<int32_t>((80u * 128u) / kFinalTurnDurationTicks);
+            g_pvp_eng.core.cus_gage = init_gage;
+            g_pvp_eng.core.sides[0].cus_gage = init_gage;
+            g_pvp_eng.core.sides[1].cus_gage = init_gage;
+            sf_app_CpCanvas_cus_gage = init_gage;
+            queue_tips_fifo(0, {static_cast<int16_t>(tid_fullcust)});
+
+            bool saw_tf = false;
+            bool exited_tf = false;
+            for (int t = 0; t < 80; ++t) {
+                step_pvp_combat_tick(rt, cp, (t == 0) ? (1 << 20) : 0, 0);
+                if (g_pvp_eng.core.tf_state != TF_IDLE) saw_tf = true;
+                else if (saw_tf) {
+                    exited_tf = true;
+                    break;
+                }
+            }
+            step_pvp_combat_tick(rt, cp, (1 << 21), 0);
+            const int32_t exp_gage_79 = static_cast<int32_t>((79u * 128u) / kFinalTurnDurationTicks);
+            if (!saw_tf || !exited_tf || g_pvp_eng.core.final_turn_ticks_left != 79 ||
+                g_pvp_eng.core.cus_gage != exp_gage_79 || sf_app_CpCanvas_cus_gage != exp_gage_79 ||
+                g_pvp_eng.core.open_custom_req) {
+                fail_msg("SuiteN3-Turn15FullCustImmunity",
+                         "tf=(" + std::to_string(saw_tf) + "," + std::to_string(exited_tf) + ")" +
+                         " left=" + std::to_string(g_pvp_eng.core.final_turn_ticks_left) +
+                         " cus=(" + std::to_string(g_pvp_eng.core.cus_gage) + "," +
+                         std::to_string(sf_app_CpCanvas_cus_gage) + ") exp=" + std::to_string(exp_gage_79) +
+                         " open=" + std::to_string(g_pvp_eng.core.open_custom_req));
+            }
+        }
+    });
+    std::printf("[PvP SELF-TEST] Suite N complete (failures=%d)\n", failures);
+
     if (failures == 0) {
-        std::printf("[PvP SELF-TEST PASS] LoN Suites A-M passed (0 failures).\n");
+        std::printf("[PvP SELF-TEST PASS] LoN Suites A-N passed (0 failures).\n");
         return 0;
     }
-    std::fprintf(stderr, "[PvP SELF-TEST FAIL] LoN Suites A-M failed (failures=%d).\n", failures);
+    std::fprintf(stderr, "[PvP SELF-TEST FAIL] LoN Suites A-N failed (failures=%d).\n", failures);
     return 1;
 }
 
