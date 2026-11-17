@@ -1669,7 +1669,7 @@ static void enter_custom_screen_phase(DojaRuntime& rt, Ref cp) {
     sf_app_CpCanvas_arm_cnt = 0;
     sf_app_CpCanvas_pa_cnt2 = 0;
     sf_app_CpCanvas_arm_chip = 0;
-    sf_app_CpCanvas_arm_on = 0;
+    sf_app_CpCanvas_arm_on = (sf_app_CpCanvas_arm_flg != 0) ? 1 : 0;
     sf_app_CpCanvas_arm_mode = 0;
     sf_app_CpCanvas_sel_cas_tip = 0;
     sf_app_CpCanvas_sel_cas_mode = 0;
@@ -2838,7 +2838,8 @@ static void sync_tf_canvas_statics_from_core(const PvpCombatCore& core, bool pos
             sf_app_CpCanvas_stop_cnt = std::min<int32_t>(14, eff_timer + 1);
         } else if (core.tf_state == TF_COUNTER_BANNER) {
             sf_app_CpCanvas_stop_time = std::max<int32_t>(20, top_slot.stop_time - 3);
-            sf_app_CpCanvas_stop_cnt = std::min<int32_t>(14, eff_timer + 1);
+            int32_t banner_t = (eff_timer >= 14) ? (eff_timer - 14) : eff_timer;
+            sf_app_CpCanvas_stop_cnt = std::min<int32_t>(14, banner_t + 1);
         } else {
             int32_t action_tick = (core.tf_state == TF_ROOT_INTRO)
                 ? (eff_timer - 15)
@@ -2875,8 +2876,12 @@ static void step_tf_stack_tick(DojaRuntime& rt, int32_t p0_mask, int32_t p1_mask
 
     if (core.tf_state == TF_COUNTER_BANNER) {
         top.timer++;
-        core.tf_cutin_fx_seq = std::min<int32_t>(7, top.timer / 2);
-        if (top.timer >= 14) {
+        if (top.timer < 14) {
+            core.tf_cutin_fx_seq = std::min<int32_t>(7, top.timer / 2);
+        } else if (top.timer < 29) {
+            core.tf_cutin_fx_seq = -1;
+        } else {
+            core.tf_cutin_fx_seq = -1;
             top.timer = 0;
             core.tf_state = TF_COUNTER_ACTION;
         }
@@ -3486,7 +3491,10 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
          g_pvp_eng.core.tf_state == TF_COUNTER_ACTION || g_pvp_eng.core.tf_state == TF_ROOT_RESUME) &&
         g_pvp_eng.core.tf_depth >= 1) {
         const TfSlot& top = g_pvp_eng.core.tf_stack[(g_pvp_eng.core.tf_depth >= 2) ? 1 : 0];
-        if (g_pvp_eng.core.tf_state == TF_ROOT_INTRO && top.timer < 15 && top.tip_id > 0 &&
+        bool show_chip_name =
+            (g_pvp_eng.core.tf_state == TF_ROOT_INTRO && top.timer < 15) ||
+            (g_pvp_eng.core.tf_state == TF_COUNTER_BANNER && top.timer >= 14 && top.timer < 29);
+        if (show_chip_name && top.tip_id > 0 &&
             sf_app_CpCanvas_tip > 0 && top.tip_id < rt.array_length(sf_app_CpCanvas_tip)) {
             Ref t_obj = rt.iaload(sf_app_CpCanvas_tip, top.tip_id);
             Ref disp_name = (t_obj > 0) ? rt.field_i32(t_obj, kFld_Tip_name) : 0;
