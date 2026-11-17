@@ -2133,11 +2133,12 @@ static void step_and_render_trance_cutscene(DojaRuntime& rt, Ref cp) {
                 int soul = act - 1;
                 const SideContext& sc = g_pvp_eng.core.sides[s];
                 int32_t screen_gx = (s == g_pvp_eng.local_idx) ? sc.pos_x : (5 - sc.pos_x);
-                int32_t cx = screen_gx * 40 + 20;
+                int32_t cx = screen_gx * 40;
                 int32_t cy = sc.pos_y * 24 + 105;
+                int32_t flp = (s == g_pvp_eng.local_idx) ? 1 : 0;
                 int32_t anim_id = kSoulEffectAni[soul];
-                fn_app_CpCanvas_DrawAni___IIIIII__I(rt, anim_id, 0, cx + dx, cy, 0, 1);
-                fn_app_CpCanvas_DrawAni___IIIIII__I(rt, anim_id, 0, cx - dx, cy, 0, 1);
+                fn_app_CpCanvas_DrawAni___IIIIII__I(rt, anim_id, 0, cx + dx, cy, flp, 1);
+                fn_app_CpCanvas_DrawAni___IIIIII__I(rt, anim_id, 0, cx - dx, cy, flp, 1);
             }
             rt.restore_combat_snapshot(conv_snap);
             restore_host_runtime_state(rt, conv_host, true);
