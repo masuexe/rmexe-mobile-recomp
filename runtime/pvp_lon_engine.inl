@@ -303,6 +303,24 @@ struct PvpEngineState : PvpCommonState<PvpCombatCore> {
     int32_t prev_raw_keypad = 0;
     bool pending_self_test = false;
 
+    // Presentation-only ring buffer to replay 1-tick opponent Normal Buster pose & muzzle flash
+    // skipped when GGPO rollback fast-forwards through remote input ticks.
+    static constexpr size_t kBusterVisWindow = 64;
+    struct TurnBusterVisual {
+        uint32_t turn = UINT32_MAX;
+        uint8_t fired_mask = 0;      // bit s_idx: side fired Normal Buster on `turn`
+        uint8_t presented_mask = 0;  // bit s_idx: already rendered on screen (persists across rollbacks)
+        int8_t pos_x[2]{};
+        int8_t pos_y[2]{};
+        int16_t ani_id[2]{};
+        int16_t t_ani_cnt[2]{};
+        int16_t ani_cnt[2]{};
+        int16_t buster_waza_id[2]{-1, -1};
+        bool has_ata[2]{};
+        int32_t ata_fields[2][kNumI32_Attack]{};
+    };
+    std::array<TurnBusterVisual, kBusterVisWindow> turn_buster_vis{};
+
     // Backdrop panel/palette cache (avoids redundant graMap repaints when panels & RGB stay constant)
     struct BackdropCache {
         bool valid = false;
@@ -2009,6 +2027,7 @@ static void init_round_rollback_window(DojaRuntime& rt) {
         em.count = 0;
     }
     g_pvp_eng.round_start_turn = cur_t;
+    for (auto& bv : g_pvp_eng.turn_buster_vis) bv = PvpEngineState::TurnBusterVisual{};
     g_pvp_eng.first_unconfirmed_turn = cur_t;
     g_pvp_eng.last_hash_checked_turn = cur_t;
     g_pvp_eng.max_scheduled_turn = cur_t;
@@ -2506,19 +2525,21 @@ static bool try_push_counter_dim(DojaRuntime& rt, int s_idx, int interrupted_own
     load_side(rt, s_idx);
     if (!is_dimming_tip_id(rt, tid, stop_t, t_cls)) return false;
 
-    if (core.tf_depth >= PvpCombatCore::kMaxTfStack) return false;
     int32_t plus_pow = safe_iaload(rt, sf_app_Rock_pow, 0);
     consume_current_dim_chip(rt);
-    int32_t new_idx = core.tf_depth;
-    core.tf_depth = static_cast<int8_t>(core.tf_depth + 1);
-    core.tf_stack[new_idx] = TfSlot{};
-    core.tf_stack[new_idx].owner = static_cast<int8_t>(s_idx);
-    core.tf_stack[new_idx].tip_id = tid;
-    core.tf_stack[new_idx].tip_kind = 0;
-    core.tf_stack[new_idx].stop_time = stop_t + kTfActionExtraTicks;
-    core.tf_stack[new_idx].captured_plus_pow = plus_pow;
-    core.tf_stack[new_idx].flags = (t_cls == 2) ? TFF_IS_NAVI : TFF_NONE;
-    core.tf_stack[new_idx].timer = 0;
+    if (core.tf_depth >= 2) {
+        // Multi-chaining cancels this side's older chained chip; only each side's latest chip executes.
+        core.tf_stack[0] = core.tf_stack[1];
+    }
+    core.tf_depth = 2;
+    core.tf_stack[1] = TfSlot{};
+    core.tf_stack[1].owner = static_cast<int8_t>(s_idx);
+    core.tf_stack[1].tip_id = tid;
+    core.tf_stack[1].tip_kind = 0;
+    core.tf_stack[1].stop_time = stop_t + kTfActionExtraTicks;
+    core.tf_stack[1].captured_plus_pow = plus_pow;
+    core.tf_stack[1].flags = (t_cls == 2) ? TFF_IS_NAVI : TFF_NONE;
+    core.tf_stack[1].timer = 0;
     core.tf_cutin_interrupted_side = static_cast<int8_t>(interrupted_owner);
     core.tf_cutin_fx_seq = 0;
     core.tf_state = TF_COUNTER_BANNER;
@@ -2686,6 +2707,14 @@ static void step_side_input_phase(DojaRuntime& rt, int s_idx, int32_t mask) {
                     sf_app_CpCanvas_bas_max_flg = 0;
 #endif
                     fn_app_Rock_Action___I__V(rt, rock, 0);
+                    {
+                        const uint32_t cur_turn = g_pvp_eng.core.combat_turn;
+                        auto& bv = g_pvp_eng.turn_buster_vis[cur_turn % PvpEngineState::kBusterVisWindow];
+                        if (bv.turn == cur_turn) {
+                            bv.fired_mask |= static_cast<uint8_t>(1u << s_idx);
+                            bv.buster_waza_id[s_idx] = static_cast<int16_t>(rt.field_i32(shot_tip, kFld_Tip_waza_id));
+                        }
+                    }
                 }
                 sf_app_Rock_tip_no = saved_tip_no;
                 safe_iastore(rt, sf_app_Rock_pow, 0, saved_pow0);
@@ -2829,6 +2858,34 @@ static void step_side_hit_phase(DojaRuntime& rt, int s_idx) {
     SideContext& sc = g_pvp_eng.core.sides[s_idx];
     if (sc.opp_nondim_ticks > 0) sc.opp_nondim_ticks--;
     if (sc.opp_buster_visual_ticks > 0) sc.opp_buster_visual_ticks--;
+
+    {
+        const uint32_t cur_turn = g_pvp_eng.core.combat_turn;
+        auto& bv = g_pvp_eng.turn_buster_vis[cur_turn % PvpEngineState::kBusterVisWindow];
+        if (bv.turn == cur_turn && (bv.fired_mask & static_cast<uint8_t>(1u << s_idx)) != 0) {
+            bv.pos_x[s_idx] = static_cast<int8_t>(sf_app_Rock_pos_x);
+            bv.pos_y[s_idx] = static_cast<int8_t>(sf_app_Rock_pos_y);
+            bv.ani_id[s_idx] = static_cast<int16_t>(sf_app_Rock_ani_id);
+            bv.t_ani_cnt[s_idx] = static_cast<int16_t>(
+                (sf_app_CpCanvas_rock > 0) ? rt.field_i32(sf_app_CpCanvas_rock, kFld_Rock_t_ani_cnt) : 0);
+            bv.ani_cnt[s_idx] = static_cast<int16_t>(sf_app_Rock_ani_cnt);
+            bv.has_ata[s_idx] = false;
+            if (sf_app_CpCanvas_ata > 0 && bv.buster_waza_id[s_idx] >= 0) {
+                int32_t an = std::min<int32_t>(kMaxAttacks, rt.array_length(sf_app_CpCanvas_ata));
+                for (int32_t i = 0; i < an; ++i) {
+                    Ref a = rt.iaload(sf_app_CpCanvas_ata, i);
+                    if (a <= 0 || rt.field_i32(a, kFld_Attack_on) == 0) continue;
+                    if (rt.field_i32(a, kFld_Attack_waza_id) == bv.buster_waza_id[s_idx]) {
+                        bv.has_ata[s_idx] = true;
+                        for (int32_t f = 0; f < kNumI32_Attack; ++f) {
+                            bv.ata_fields[s_idx][f] = rt.field_i32(a, kAttackFields[f]);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     save_side(rt, s_idx);
 }
@@ -3092,6 +3149,18 @@ static void step_pvp_combat_tick(DojaRuntime& rt, Ref cp, int32_t p0_mask, int32
     g_pvp_eng.in_combat_step = true;
     core.combat_turn++;
     core.combat_tick_in_round++;
+    {
+        const uint32_t tick_turn = core.combat_turn;
+        auto& bvis = g_pvp_eng.turn_buster_vis[tick_turn % PvpEngineState::kBusterVisWindow];
+        if (bvis.turn != tick_turn) {
+            bvis = PvpEngineState::TurnBusterVisual{};
+            bvis.turn = tick_turn;
+        } else {
+            bvis.fired_mask = 0;
+            bvis.has_ata[0] = false;
+            bvis.has_ata[1] = false;
+        }
+    }
 
     // Deterministic per-tick RNG state for shared Java Random
     uint32_t r = static_cast<uint32_t>(core.rng_state) * 1664525u + 1013904223u;
@@ -3291,6 +3360,9 @@ static void draw_rock_readonly(DojaRuntime& rt, Ref rock) {
     int32_t sv_ani_wait = sf_app_Rock_ani_wait_cnt;
     int32_t sv_tmp_ani = sf_app_Rock_tmp_ani_cnt;
     int32_t sv_t_ani = rt.field_i32(rock, kFld_Rock_t_ani_cnt);
+    if (sf_app_CpCanvas_stop_cnt <= 1 && sf_app_Rock_ani_cnt > 0) {
+        sf_app_Rock_ani_cnt = sv_t_ani;
+    }
     fn_app_Rock_Draw___I__V(rt, rock, 0);
     sf_app_Rock_ani_cnt = sv_ani_cnt;
     sf_app_Rock_ani_wait_cnt = sv_ani_wait;
@@ -3367,6 +3439,92 @@ static void draw_tf_cutin_fx_sprite(DojaRuntime& rt, int interrupted_ch, int seq
     fn_app_CpCanvas_DrawAni___IIIIII__I(rt, 38, seq_idx, x, 76, 0, 1);
 }
 
+static void apply_unpresented_opp_buster_visual(DojaRuntime& rt, int opp_i) {
+    const uint32_t cur_t = g_pvp_eng.core.combat_turn;
+    const uint32_t min_t = std::max<uint32_t>(
+        g_pvp_eng.round_start_turn, cur_t > 8u ? (cur_t - 8u) : 0u);
+    const uint8_t opp_bit = static_cast<uint8_t>(1u << opp_i);
+    auto mark_presented_range = [&](uint32_t lo, uint32_t hi) {
+        if (lo > hi) return;
+        for (uint32_t u = lo;; ++u) {
+            auto& u_bv = g_pvp_eng.turn_buster_vis[u % PvpEngineState::kBusterVisWindow];
+            if (u_bv.turn == u) {
+                u_bv.presented_mask |= opp_bit;
+            }
+            if (u == hi) break;
+        }
+    };
+
+    if (cur_t > g_pvp_eng.round_start_turn) {
+        const uint32_t last_t = cur_t - 1u;
+        const auto& last_bv = g_pvp_eng.turn_buster_vis[last_t % PvpEngineState::kBusterVisWindow];
+        if (last_bv.turn == last_t && (last_bv.fired_mask & opp_bit) != 0 &&
+            g_pvp_eng.core.sides[opp_i].ani_id != 0) {
+            mark_presented_range(min_t, last_t);
+            return;
+        }
+    }
+
+    if (g_pvp_eng.phase != Phase::COMBAT || sf_app_CpCanvas_stop_cnt != 0 || cur_t <= min_t) {
+        return;
+    }
+
+    uint32_t found_t = UINT32_MAX;
+    for (uint32_t t = cur_t; t-- > min_t;) {
+        const auto& bv = g_pvp_eng.turn_buster_vis[t % PvpEngineState::kBusterVisWindow];
+        if (bv.turn == t && (bv.fired_mask & opp_bit) != 0 && (bv.presented_mask & opp_bit) == 0) {
+            found_t = t;
+            break;
+        }
+    }
+    if (found_t == UINT32_MAX) {
+        return;
+    }
+
+    mark_presented_range(min_t, found_t);
+    const SideContext& cur_opp = g_pvp_eng.core.sides[opp_i];
+    if (!(cur_opp.hp > 0 && cur_opp.hit_cnt == 0 && cur_opp.waza_flg < 0 &&
+          (cur_opp.ani_id == 0 || cur_opp.move_flg != 0))) {
+        return;
+    }
+
+    const auto& bv = g_pvp_eng.turn_buster_vis[found_t % PvpEngineState::kBusterVisWindow];
+    load_side(rt, opp_i);
+    sf_app_Rock_pos_x = bv.pos_x[opp_i];
+    sf_app_Rock_pos_y = bv.pos_y[opp_i];
+    sf_app_Rock_ani_id = bv.ani_id[opp_i];
+    sf_app_Rock_ani_cnt = bv.ani_cnt[opp_i];
+    if (sf_app_CpCanvas_rock > 0) {
+        rt.field_i32(sf_app_CpCanvas_rock, kFld_Rock_t_ani_cnt) = bv.t_ani_cnt[opp_i];
+    }
+
+    if (bv.has_ata[opp_i] && sf_app_CpCanvas_ata > 0) {
+        bool has_active_buster_ata = false;
+        Ref free_ata = 0;
+        int32_t an = std::min<int32_t>(kMaxAttacks, rt.array_length(sf_app_CpCanvas_ata));
+        for (int32_t i = 0; i < an; ++i) {
+            Ref a = rt.iaload(sf_app_CpCanvas_ata, i);
+            if (a <= 0) continue;
+            if (rt.field_i32(a, kFld_Attack_on) != 0) {
+                if (rt.field_i32(a, kFld_Attack_waza_id) == bv.buster_waza_id[opp_i]) {
+                    has_active_buster_ata = true;
+                    break;
+                }
+            } else if (free_ata <= 0) {
+                free_ata = a;
+            }
+        }
+        if (!has_active_buster_ata && free_ata > 0) {
+            for (int32_t f = 0; f < kNumI32_Attack; ++f) {
+                rt.field_i32(free_ata, kAttackFields[f]) = bv.ata_fields[opp_i][f];
+            }
+            rt.field_i32(free_ata, kFld_Attack_hit_time) = 0;
+            rt.field_i32(free_ata, kFld_Attack_ani_cnt) = rt.field_i32(free_ata, kFld_Attack_t_ani_cnt);
+        }
+    }
+    save_side(rt, opp_i);
+}
+
 static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
     // Snapshot canonical simulation state so read-only Draw methods can never mutate combat or rollback state
     HostRuntimeState host_st = capture_host_runtime_state(rt);
@@ -3418,6 +3576,7 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
     }
 
     // 3. Y-sorted 2.5D row rendering (row = 0..2): Opponent Rock, Local Rock, Okimono, Layer-1 Attacks
+    apply_unpresented_opp_buster_visual(rt, opp);
     const SideContext& loc_sc = g_pvp_eng.core.sides[loc];
     const SideContext& opp_sc = g_pvp_eng.core.sides[opp];
     for (int32_t row = 0; row < 3; ++row) {
@@ -3562,6 +3721,12 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
             Ref t_obj = rt.iaload(sf_app_CpCanvas_tip, top.tip_id);
             Ref disp_name = (t_obj > 0) ? rt.field_i32(t_obj, kFld_Tip_name) : 0;
             if (disp_name > 0) {
+                if (sf_app_CpCanvas_g > 0) {
+                    Slot c_args[2];
+                    c_args[0].r = sf_app_CpCanvas_g;
+                    c_args[1].i = static_cast<int32_t>(0xFFFFFFFFu);
+                    rt.invoke_external("com/nttdocomo/ui/Graphics", "setColor", "(I)V", c_args, 2);
+                }
                 int32_t ch = (top.owner == opp) ? 1 : 0;
                 fn_app_CpCanvas_strDraw___Ljava_lang_String_II__V(rt, disp_name, 37 + 95 * ch, 76);
             }
