@@ -243,10 +243,11 @@ struct PvpCombatCore {
     int32_t winner = -2; // -2 = ongoing, -1 = draw, 0 = p0, 1 = p1
     int32_t damage_dealt[2] = {0, 0};
 
-    // Time-Freeze 2-slot Cut-In stack
+    // Time-Freeze multi-level Cut-In stack
+    static constexpr int32_t kMaxTfStack = 10;
     TfState tf_state = TF_IDLE;
-    TfSlot tf_stack[2];
-    int8_t tf_depth = 0; // 0..2
+    TfSlot tf_stack[kMaxTfStack];
+    int8_t tf_depth = 0; // 0..kMaxTfStack
     TfSavedAction tf_saved[2];
     int32_t tf_root_pre_muteki[2] = {0, 0};
     int32_t tf_root_pre_hit_cnt[2] = {0, 0};
@@ -262,8 +263,9 @@ struct PvpCombatCore {
 static inline void reset_combat_tf_state(PvpCombatCore& core) {
     core.tf_state = TF_IDLE;
     core.tf_depth = 0;
-    core.tf_stack[0] = TfSlot{};
-    core.tf_stack[1] = TfSlot{};
+    for (int32_t i = 0; i < PvpCombatCore::kMaxTfStack; ++i) {
+        core.tf_stack[i] = TfSlot{};
+    }
     core.tf_saved[0] = TfSavedAction{};
     core.tf_saved[1] = TfSavedAction{};
     core.tf_root_pre_muteki[0] = 0;
@@ -1421,7 +1423,7 @@ static void apply_lon_backdrop_tint(int32_t base_r, int32_t base_g, int32_t base
             }
         }
     } else if (g_pvp_eng.core.tf_state != TF_IDLE && g_pvp_eng.core.tf_depth >= 1) {
-        const TfSlot& top = g_pvp_eng.core.tf_stack[(g_pvp_eng.core.tf_depth >= 2) ? 1 : 0];
+        const TfSlot& top = g_pvp_eng.core.tf_stack[g_pvp_eng.core.tf_depth - 1];
         if (g_pvp_eng.core.tf_depth == 1 && g_pvp_eng.core.tf_state == TF_ROOT_INTRO) {
             int32_t target_dur = 15 + top.stop_time;
             if (top.timer >= target_dur - 4) {
@@ -2382,11 +2384,12 @@ static void trigger_opponent_elemental_trap(DojaRuntime& rt, int att_idx, int32_
 
     if (core.tf_state == TF_IDLE) {
         start_root_time_freeze(def_idx, tf_trap);
-    } else if (core.tf_depth < 2) {
-        core.tf_depth = 2;
-        core.tf_stack[1] = tf_trap;
-        core.tf_stack[1].stop_time = 32;
-        core.tf_stack[1].timer = 0;
+    } else if (core.tf_depth < PvpCombatCore::kMaxTfStack) {
+        int32_t new_idx = core.tf_depth;
+        core.tf_depth = static_cast<int8_t>(core.tf_depth + 1);
+        core.tf_stack[new_idx] = tf_trap;
+        core.tf_stack[new_idx].stop_time = 32;
+        core.tf_stack[new_idx].timer = 0;
         core.tf_cutin_interrupted_side = static_cast<int8_t>(1 - def_idx);
         core.tf_cutin_fx_seq = -1;
         core.tf_state = TF_COUNTER_ACTION;
@@ -2479,6 +2482,18 @@ static void record_nondim_hud_popup(DojaRuntime& rt, SideContext& sc, Ref t_obj,
 
 constexpr int32_t kTfActionExtraTicks = 23; // BattleMain: stop_cnt = 2..(waza.stop_time + 24) => stop_time + 23 Move(0) ticks
 
+static void consume_current_dim_chip(DojaRuntime& rt) {
+    if (sf_app_Rock_tip_no >= 0 && sf_app_Rock_tip_no < 5) {
+        sf_app_Rock_tip_no -= sf_app_Rock_next_tip;
+        sf_app_CpCanvas_col_pow = 0;
+        if (sf_app_CpCanvas_rock > 0) {
+            fn_app_Rock_TipNext_____V(rt, sf_app_CpCanvas_rock);
+        }
+        sf_app_Rock_tmp_ata = -1;
+        sf_app_Rock_non_bas = 1;
+    }
+}
+
 static bool try_push_counter_dim(DojaRuntime& rt, int s_idx, int interrupted_owner, int32_t mask, bool require_edge) {
     PvpCombatCore& core = g_pvp_eng.core;
     SideContext& sc = core.sides[s_idx];
@@ -2491,15 +2506,19 @@ static bool try_push_counter_dim(DojaRuntime& rt, int s_idx, int interrupted_own
     load_side(rt, s_idx);
     if (!is_dimming_tip_id(rt, tid, stop_t, t_cls)) return false;
 
-    core.tf_depth = 2;
-    core.tf_stack[1] = TfSlot{};
-    core.tf_stack[1].owner = static_cast<int8_t>(s_idx);
-    core.tf_stack[1].tip_id = tid;
-    core.tf_stack[1].tip_kind = 0;
-    core.tf_stack[1].stop_time = stop_t + kTfActionExtraTicks;
-    core.tf_stack[1].captured_plus_pow = sc.pow[3];
-    core.tf_stack[1].flags = (t_cls == 2) ? TFF_IS_NAVI : TFF_NONE;
-    core.tf_stack[1].timer = 0;
+    if (core.tf_depth >= PvpCombatCore::kMaxTfStack) return false;
+    int32_t plus_pow = safe_iaload(rt, sf_app_Rock_pow, 0);
+    consume_current_dim_chip(rt);
+    int32_t new_idx = core.tf_depth;
+    core.tf_depth = static_cast<int8_t>(core.tf_depth + 1);
+    core.tf_stack[new_idx] = TfSlot{};
+    core.tf_stack[new_idx].owner = static_cast<int8_t>(s_idx);
+    core.tf_stack[new_idx].tip_id = tid;
+    core.tf_stack[new_idx].tip_kind = 0;
+    core.tf_stack[new_idx].stop_time = stop_t + kTfActionExtraTicks;
+    core.tf_stack[new_idx].captured_plus_pow = plus_pow;
+    core.tf_stack[new_idx].flags = (t_cls == 2) ? TFF_IS_NAVI : TFF_NONE;
+    core.tf_stack[new_idx].timer = 0;
     core.tf_cutin_interrupted_side = static_cast<int8_t>(interrupted_owner);
     core.tf_cutin_fx_seq = 0;
     core.tf_state = TF_COUNTER_BANNER;
@@ -2534,8 +2553,9 @@ static bool try_trigger_dim_chip(DojaRuntime& rt, int s_idx, int32_t mask) {
         tf_new.tip_id = tid;
         tf_new.tip_kind = 0;
         tf_new.stop_time = stop_t + kTfActionExtraTicks;
-        tf_new.captured_plus_pow = safe_iaload(rt, sf_app_Rock_pow, 3);
+        tf_new.captured_plus_pow = safe_iaload(rt, sf_app_Rock_pow, 0);
         tf_new.flags = (t_cls == 2) ? TFF_IS_NAVI : TFF_NONE;
+        consume_current_dim_chip(rt);
         save_side(rt, s_idx);
         start_root_time_freeze(s_idx, tf_new);
         int32_t z_elem = rt.field_i32(t_obj, kFld_Tip_zoku);
@@ -2544,8 +2564,15 @@ static bool try_trigger_dim_chip(DojaRuntime& rt, int s_idx, int32_t mask) {
         }
         return true;
     }
-    if (core.tf_state == TF_ROOT_INTRO && core.tf_depth == 1 && core.tf_stack[0].owner != s_idx) {
-        return try_push_counter_dim(rt, s_idx, core.tf_stack[0].owner, mask, /*require_edge=*/true);
+    if (core.tf_depth >= 1 && core.tf_depth < PvpCombatCore::kMaxTfStack) {
+        const TfSlot& top = core.tf_stack[core.tf_depth - 1];
+        bool in_counter_window =
+            top.tip_kind == 0 && top.owner != s_idx &&
+            ((core.tf_state == TF_ROOT_INTRO && top.timer < 15) ||
+             (core.tf_state == TF_COUNTER_BANNER && top.timer >= 14 && top.timer < 29));
+        if (in_counter_window) {
+            return try_push_counter_dim(rt, s_idx, top.owner, mask, /*require_edge=*/true);
+        }
     }
     return false;
 }
@@ -2831,7 +2858,7 @@ static void clear_side_tf_attacks(DojaRuntime& rt, int s_idx) {
 
 static void sync_tf_canvas_statics_from_core(const PvpCombatCore& core, bool post_step = false) {
     if (core.tf_state != TF_IDLE && core.tf_depth >= 1) {
-        const TfSlot& top_slot = core.tf_stack[(core.tf_depth >= 2) ? 1 : 0];
+        const TfSlot& top_slot = core.tf_stack[core.tf_depth - 1];
         int32_t eff_timer = (post_step && top_slot.timer > 0) ? (top_slot.timer - 1) : top_slot.timer;
         if (core.tf_state == TF_ROOT_INTRO && eff_timer < 15) {
             sf_app_CpCanvas_stop_time = std::max<int32_t>(20, top_slot.stop_time - 3);
@@ -2861,13 +2888,17 @@ static void sync_tf_canvas_statics_from_core(const PvpCombatCore& core, bool pos
 static void step_tf_stack_tick(DojaRuntime& rt, int32_t p0_mask, int32_t p1_mask) {
     PvpCombatCore& core = g_pvp_eng.core;
     sync_tf_canvas_statics_from_core(core, false);
-    int top_idx = (core.tf_depth >= 2) ? 1 : 0;
+    int top_idx = core.tf_depth - 1;
     TfSlot& top = core.tf_stack[top_idx];
     int owner = top.owner;
     int opp = 1 - owner;
 
-    // Check Counter-Dimming interruption during Root Intro (before action fires at t < 16)
-    if (core.tf_state == TF_ROOT_INTRO && core.tf_depth == 1 && top.timer < 15 && top.tip_kind == 0) {
+    // Check Counter-Dimming interruption during Root Intro or Counter Banner announcement window
+    bool in_counter_window =
+        core.tf_depth >= 1 && core.tf_depth < PvpCombatCore::kMaxTfStack && top.tip_kind == 0 &&
+        ((core.tf_state == TF_ROOT_INTRO && top.timer < 15) ||
+         (core.tf_state == TF_COUNTER_BANNER && top.timer >= 14 && top.timer < 29));
+    if (in_counter_window) {
         int32_t opp_mask = (opp == 0) ? p0_mask : p1_mask;
         if (try_push_counter_dim(rt, opp, owner, opp_mask, /*require_edge=*/false)) {
             return;
@@ -2906,7 +2937,30 @@ static void step_tf_stack_tick(DojaRuntime& rt, int32_t p0_mask, int32_t p1_mask
             load_side(rt, owner);
             sync_panel_occupancy_and_proxy(rt, owner);
             if (top.tip_kind == 0) {
-                fn_app_Rock_Action___I__V(rt, sf_app_CpCanvas_rock, 1);
+                Ref rock = sf_app_CpCanvas_rock;
+                Ref r_tip_arr = (rock > 0) ? rt.field_i32(rock, kFld_Rock_tip) : 0;
+                Ref t_exec = (top.tip_id > 0 && sf_app_CpCanvas_tip > 0 &&
+                              top.tip_id < rt.array_length(sf_app_CpCanvas_tip))
+                    ? rt.iaload(sf_app_CpCanvas_tip, top.tip_id) : 0;
+                if (rock > 0 && r_tip_arr > 0 && t_exec > 0) {
+                    int32_t sv_tip_no = sf_app_Rock_tip_no;
+                    int32_t sv_next_tip = sf_app_Rock_next_tip;
+                    int32_t sv_col_pow = sf_app_CpCanvas_col_pow;
+                    int32_t sv_pow0 = safe_iaload(rt, sf_app_Rock_pow, 0);
+                    Ref sv_tip0 = rt.iaload(r_tip_arr, 0);
+                    sf_app_Rock_tip_no = 0;
+                    sf_app_Rock_next_tip = 0;
+                    safe_iastore(rt, sf_app_Rock_pow, 0, top.captured_plus_pow);
+                    rt.iaload(r_tip_arr, 0) = t_exec;
+                    fn_app_Rock_Action___I__V(rt, rock, 1);
+                    rt.iaload(r_tip_arr, 0) = sv_tip0;
+                    sf_app_Rock_tip_no = sv_tip_no;
+                    sf_app_Rock_next_tip = sv_next_tip;
+                    sf_app_CpCanvas_col_pow = sv_col_pow;
+                    safe_iastore(rt, sf_app_Rock_pow, 0, sv_pow0);
+                } else {
+                    fn_app_Rock_Action___I__V(rt, rock, 1);
+                }
                 if (sf_app_CpCanvas_rock > 0) {
                     if (sf_app_Rock_waza_flg >= 0) {
                         sf_app_Rock_waza_wait = 0;
@@ -2929,6 +2983,14 @@ static void step_tf_stack_tick(DojaRuntime& rt, int32_t p0_mask, int32_t p1_mask
         ensure_board_orient(rt, owner);
         load_side(rt, owner);
         sync_panel_occupancy_and_proxy(rt, owner);
+        {
+            int32_t owner_mask = (owner == 0) ? p0_mask : p1_mask;
+            SideContext& owner_sc = core.sides[owner];
+            int32_t owner_key2 = owner_mask & (~owner_sc.last_raw_input);
+            owner_sc.last_raw_input = owner_mask;
+            sf_app_CpCanvas_key = ((owner_key2 & kKeySelectBit) != 0) ? kKeySelectBit : owner_key2;
+            sf_app_CpCanvas_key2 = owner_mask;
+        }
         if (sf_app_CpCanvas_ata > 0) {
             int32_t an = std::min<int32_t>(kMaxAttacks, rt.array_length(sf_app_CpCanvas_ata));
             for (int32_t i = 0; i < an; ++i) {
@@ -2986,16 +3048,17 @@ static void step_tf_stack_tick(DojaRuntime& rt, int32_t p0_mask, int32_t p1_mask
     top.timer++;
     int32_t target_dur = (core.tf_state == TF_ROOT_INTRO) ? (15 + top.stop_time) : top.stop_time;
     if (top.timer >= target_dur) {
-        if (core.tf_depth == 2) {
-            // Pop Counter-Dimming chip, clean up its TF-only attacks, and resume Root activator
+        if (core.tf_depth >= 2) {
+            // Pop Counter-Dimming chip, clean up its TF-only attacks, and resume previous activator
             clear_side_tf_attacks(rt, owner);
-            core.tf_depth = 1;
+            core.tf_depth = static_cast<int8_t>(core.tf_depth - 1);
             core.tf_cutin_fx_seq = -1;
             core.tf_state = TF_ROOT_RESUME;
-            if (core.tf_stack[0].executed_root) {
-                core.tf_stack[0].timer = core.tf_stack[0].stop_time; // Finish quickly if already ran
+            TfSlot& resumed = core.tf_stack[core.tf_depth - 1];
+            if (resumed.executed_root) {
+                resumed.timer = resumed.stop_time; // Finish quickly if already ran
             } else {
-                core.tf_stack[0].timer = 0; // Fresh action window once counter-dim ends
+                resumed.timer = 0; // Fresh action window once counter-dim ends
             }
         } else {
             // Exit Time Freeze cleanly and clear all active TF-only attacks (hit_time > 0) on both sides
@@ -3461,7 +3524,7 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
             Slot r_args[5];
             r_args[0].r = sf_app_CpCanvas_g;
             r_args[1].i = 56;
-            r_args[2].i = 50;
+            r_args[2].i = 48;
             r_args[3].i = std::clamp<int32_t>(g_pvp_eng.core.cus_gage, 0, 128);
             r_args[4].i = 6;
             rt.invoke_external("com/nttdocomo/ui/Graphics", "fillRect", "(IIII)V", r_args, 5);
@@ -3490,7 +3553,7 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
     if ((g_pvp_eng.core.tf_state == TF_ROOT_INTRO || g_pvp_eng.core.tf_state == TF_COUNTER_BANNER ||
          g_pvp_eng.core.tf_state == TF_COUNTER_ACTION || g_pvp_eng.core.tf_state == TF_ROOT_RESUME) &&
         g_pvp_eng.core.tf_depth >= 1) {
-        const TfSlot& top = g_pvp_eng.core.tf_stack[(g_pvp_eng.core.tf_depth >= 2) ? 1 : 0];
+        const TfSlot& top = g_pvp_eng.core.tf_stack[g_pvp_eng.core.tf_depth - 1];
         bool show_chip_name =
             (g_pvp_eng.core.tf_state == TF_ROOT_INTRO && top.timer < 15) ||
             (g_pvp_eng.core.tf_state == TF_COUNTER_BANNER && top.timer >= 14 && top.timer < 29);
