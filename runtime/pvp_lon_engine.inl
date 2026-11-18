@@ -342,7 +342,12 @@ struct PvpEngineState : PvpCommonState<PvpCombatCore> {
     } backdrop_cache;
 
     int opp_idx() const { return 1 - local_idx; }
-    bool is_active() const { return phase != Phase::IDLE; }
+    bool is_active() const { return phase >= Phase::HANDSHAKE; }
+    bool is_arena_ready() const {
+        return phase >= Phase::CUSTOM_SCREEN &&
+               core.sides[0].dell_time_ref > 0 &&
+               core.sides[1].dell_time_ref > 0;
+    }
 };
 
 static PvpEngineState g_pvp_eng;
@@ -4316,30 +4321,47 @@ static int32_t pvp_lon_intercept_ene_hit(DojaRuntime& rt, Ref ene_thiz, int32_t 
 
 static bool pvp_lon_intercept_ene_draw(DojaRuntime& rt, Ref ene_thiz, int32_t a0) {
     (void)a0;
-    if (!g_pvp_eng.is_active() || sf_app_CpCanvas_ene <= 0) return false;
-    if (ene_thiz != rt.iaload(sf_app_CpCanvas_ene, 0)) return false;
+    if (!g_pvp_eng.is_arena_ready() || sf_app_CpCanvas_ene <= 0 || sf_app_CpCanvas_rock <= 0) {
+        return false; // Normal single-player execution (including LOBBY_WAIT & pre-arena HANDSHAKE)
+    }
+    if (ene_thiz != rt.iaload(sf_app_CpCanvas_ene, 0)) {
+        return true; // Skip unused enemy slots in PvP arena
+    }
 
-    int loc = g_pvp_eng.local_idx;
     int opp = g_pvp_eng.opp_idx();
     const SideContext& opp_sc = g_pvp_eng.core.sides[opp];
-    if (opp_sc.hp <= 0 || sf_app_CpCanvas_rock <= 0) return true;
+    if (opp_sc.hp <= 0) return true;
 
-    save_side(rt, loc);
-    ensure_board_orient(rt, opp);
+    HostRuntimeState host_st = capture_host_runtime_state(rt);
+    PvpCombatCore saved_core = g_pvp_eng.core;
+    int32_t saved_pal_zoku = g_pvp_eng.last_pal_zoku;
+    std::vector<int64_t> saved_st;
+    generated_save_statics(saved_st);
+    FastCombatSnapshot saved_snap{};
+    saved_snap.base_heap_size = 0;
+    rt.save_combat_snapshot(saved_snap, 1);
+
     load_side(rt, opp);
     set_rock_palette_fast(rt, opp_sc.zoku);
-    int32_t orig_px = sf_app_Rock_pos_x;
-    int32_t orig_dx = sf_app_Rock_dx;
-    sf_app_Rock_pos_x = 5 - orig_px;
-    sf_app_Rock_dx = -orig_dx;
+    if (g_pvp_eng.phase == Phase::CUSTOM_SCREEN) {
+        sf_app_Rock_muteki_cnt = 0;
+        sf_app_Rock_hit_cnt = 0;
+        sf_app_Rock_non_cnt2 = 0;
+    }
+    sf_app_Rock_pos_x = 5 - sf_app_Rock_pos_x;
+    sf_app_Rock_dx = -sf_app_Rock_dx;
     g_pvp_rock_flip_override = 0;
     draw_rock_readonly(rt, sf_app_CpCanvas_rock);
     g_pvp_rock_flip_override = -1;
-    sf_app_Rock_pos_x = orig_px;
-    sf_app_Rock_dx = orig_dx;
-    ensure_board_orient(rt, loc);
-    load_side(rt, loc);
-    sync_panel_occupancy_and_proxy(rt, loc);
+
+    g_pvp_eng.core = std::move(saved_core);
+    g_pvp_eng.last_pal_zoku = saved_pal_zoku;
+    generated_restore_statics(saved_st);
+    rt.restore_combat_snapshot(saved_snap);
+    if (sf_app_CpCanvas_rock > 0) {
+        set_rock_palette_fast(rt, sf_app_Rock_zoku);
+    }
+    restore_host_runtime_state(rt, host_st, true);
     return true;
 }
 
@@ -4347,6 +4369,8 @@ static bool pvp_lon_intercept_ene_draw(DojaRuntime& rt, Ref ene_thiz, int32_t a0
 // Match Lifecycle Helpers (Cleanup, Disconnect Win, BO3 Progression)
 // ============================================================================
 static void cleanup_and_restore_singleplayer(DojaRuntime& rt, bool close_net = true) {
+    g_pvp_rock_flip_override = -1;
+    g_pvp_in_ene_hit_passthrough = false;
     g_pvp_eng.has_pre_custom_snap = false;
     g_pvp_eng.last_pal_zoku = -1;
     g_pvp_eng.backdrop_cache = PvpEngineState::BackdropCache{};
@@ -5628,6 +5652,7 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
             plat::close_socket(m_tcp);
         }
         // Regression check: HANDSHAKE disconnect/timeout before init_pvp_battle_arena must render Phase::RESULT safely
+        // (including Match #2 after Match #1 cleanup_and_restore_singleplayer without manual g_pvp_eng reset)
         {
             rt.reset_interpolator();
             rt.set_suppress_av(true);
@@ -5646,6 +5671,120 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                          " ticks=" + std::to_string(g_pvp_eng.result_ticks));
             }
             cleanup_and_restore_singleplayer(rt, false);
+
+            // Match #1 snapshot -> arena init -> cleanup (shrinks heap back) -> Match #2 HANDSHAKE disconnect
+            rt.restore_full_snapshot(base_heap);
+            generated_restore_statics(base_statics);
+            g_pvp_eng = PvpEngineState{};
+            capture_pre_match_snapshot(rt, g_pvp_eng);
+            reset_bo3_series_state(g_pvp_eng, 0x8887u, false);
+            g_pvp_eng.local_idx = 0;
+            g_pvp_eng.builds[0] = make_build("SelfP0", 1000, 1, 0x3F, 0);
+            g_pvp_eng.builds[1] = make_build("SelfP1", 1000, 1, 0x3F, 0);
+            g_pvp_eng.local_build = g_pvp_eng.builds[0];
+            init_pvp_battle_arena(rt, cp);
+            cleanup_and_restore_singleplayer(rt, false);
+            if (g_pvp_eng.core.sides[0].dell_time_ref != 0 ||
+                g_pvp_eng.core.sides[1].dell_time_ref != 0) {
+                fail_msg("SuiteH-ExitClearsCoreRefs",
+                         "Expected cleanup_and_restore_singleplayer to clear dell_time_ref");
+            }
+            capture_pre_match_snapshot(rt, g_pvp_eng);
+            g_pvp_eng.phase = Phase::HANDSHAKE;
+            g_pvp_eng.local_idx = 0;
+            adjudicate_peer_disconnect_win(rt);
+            bool tick2_ok = pvp_lon_tick_override_impl(rt, cp);
+            if (!tick2_ok || g_pvp_eng.phase != Phase::RESULT || g_pvp_eng.result_ticks != 1) {
+                fail_msg("SuiteH-Match2HandshakeDisconnectResult",
+                         "tick2_ok=" + std::to_string(tick2_ok) +
+                         " phase=" + std::to_string(static_cast<int>(g_pvp_eng.phase)) +
+                         " ticks=" + std::to_string(g_pvp_eng.result_ticks));
+            }
+            cleanup_and_restore_singleplayer(rt, false);
+        }
+        // Regression check: LOBBY_WAIT after creating a room must NOT intercept single-player Ene.Draw / clobber enemy HP or get_arm
+        {
+            rt.reset_interpolator();
+            rt.set_suppress_av(true);
+            rt.restore_full_snapshot(base_heap);
+            generated_restore_statics(base_statics);
+            g_pvp_eng = PvpEngineState{};
+            rt.pvp_session().close_udp();
+
+            LoopbackRelay relay_sp;
+            if (!relay_sp.start()) {
+                fail_msg("SuiteH-LobbySpRelay", "LoopbackRelay::start failed");
+            } else {
+                rt.pvp_session().set_preferred_format(pvp::PVP_FORMAT_SINGLE);
+                if (!rt.pvp_session().create_room(relay_sp.addr(), "H_LOBBY_SP", "HostSP", "lon")) {
+                    fail_msg("SuiteH-LobbySpCreate", "create_room failed");
+                } else {
+                    bool tick_lobby = pvp_lon_tick_override_impl(rt, cp);
+                    if (tick_lobby || g_pvp_eng.phase != Phase::LOBBY_WAIT || rt.pvp_match_active()) {
+                        fail_msg("SuiteH-LobbySpEnterWait",
+                                 "tick=" + std::to_string(tick_lobby) +
+                                 " phase=" + std::to_string(static_cast<int>(g_pvp_eng.phase)) +
+                                 " active=" + std::to_string(rt.pvp_match_active()));
+                    } else {
+                        if (sf_app_CpCanvas_max_hp <= 0) {
+                            fn_app_CpCanvas_init___I__V(rt, cp, 0);
+                        }
+                        safe_iastore(rt, sf_app_CpCanvas_get_arm, 0, 1);
+                        fn_app_CpCanvas_BtSet___I__V(rt, cp, 0);
+                        Ref e0 = safe_iaload(rt, sf_app_CpCanvas_ene, 0);
+                        int32_t orig_hp = (e0 > 0) ? rt.field_i32(e0, kFld_Ene_hp) : 0;
+                        int32_t orig_max_hp = (e0 > 0) ? rt.field_i32(e0, kFld_Ene_max_hp) : 0;
+                        if (e0 <= 0 || orig_hp <= 0 || orig_hp >= 1000) {
+                            fail_msg("SuiteH-LobbySpInitEne",
+                                     "e0=" + std::to_string(e0) +
+                                     " hp=" + std::to_string(orig_hp) +
+                                     " max_hp=" + std::to_string(orig_max_hp));
+                        } else {
+                            rt.set_suppress_av(false);
+                            fn_app_Ene_Draw___I__V(rt, e0, 0);
+                            rt.set_suppress_av(true);
+                            if (rt.field_i32(e0, kFld_Ene_hp) != orig_hp ||
+                                rt.field_i32(e0, kFld_Ene_max_hp) != orig_max_hp ||
+                                safe_iaload(rt, sf_app_CpCanvas_get_arm, 0) != 1) {
+                                fail_msg("SuiteH-LobbySpDrawClobber",
+                                         "hp=" + std::to_string(rt.field_i32(e0, kFld_Ene_hp)) +
+                                         "/" + std::to_string(orig_hp) +
+                                         " max=" + std::to_string(rt.field_i32(e0, kFld_Ene_max_hp)) +
+                                         "/" + std::to_string(orig_max_hp) +
+                                         " get_arm0=" + std::to_string(safe_iaload(rt, sf_app_CpCanvas_get_arm, 0)));
+                            }
+                            (void)fn_app_Ene_Hit___III__Z(rt, e0, 0, 10, 0);
+                            rt.set_suppress_av(false);
+                            fn_app_Ene_Draw___I__V(rt, e0, 0);
+                            rt.set_suppress_av(true);
+                            if (rt.field_i32(e0, kFld_Ene_hp) != orig_hp - 10) {
+                                fail_msg("SuiteH-LobbySpPartialHit",
+                                         "hp=" + std::to_string(rt.field_i32(e0, kFld_Ene_hp)) +
+                                         " expected=" + std::to_string(orig_hp - 10));
+                            }
+                            (void)fn_app_Ene_Hit___III__Z(rt, e0, 0, orig_hp + 50, 0);
+                            rt.set_suppress_av(false);
+                            fn_app_Ene_Draw___I__V(rt, e0, 0);
+                            rt.set_suppress_av(true);
+                            if (rt.field_i32(e0, kFld_Ene_hp) > 0 ||
+                                (rt.field_i32(e0, kFld_Ene_syoumetu_cnt) < 0 &&
+                                 rt.field_i32(e0, kFld_Ene_on) != 0)) {
+                                fail_msg("SuiteH-LobbySpLethalHit",
+                                         "hp=" + std::to_string(rt.field_i32(e0, kFld_Ene_hp)) +
+                                         " syoumetu=" + std::to_string(rt.field_i32(e0, kFld_Ene_syoumetu_cnt)) +
+                                         " on=" + std::to_string(rt.field_i32(e0, kFld_Ene_on)));
+                            }
+                        }
+                    }
+                    rt.pvp_session().close_udp();
+                    bool tick_exit = pvp_lon_tick_override_impl(rt, cp);
+                    if (tick_exit || g_pvp_eng.phase != Phase::IDLE) {
+                        fail_msg("SuiteH-LobbySpExit",
+                                 "tick_exit=" + std::to_string(tick_exit) +
+                                 " phase=" + std::to_string(static_cast<int>(g_pvp_eng.phase)));
+                    }
+                }
+            }
         }
         // Regression check: Town/Event ImgSet2(2) overwrite must be restored by ImgSet2(0) in arena init
         {
@@ -8187,7 +8326,7 @@ static bool pvp_lon_tick_override_impl(DojaRuntime& rt, Ref cp) {
         if (net.active()) {
             net.poll_udp();
         }
-        if (eng.core.sides[0].dell_time_ref > 0 && eng.core.sides[1].dell_time_ref > 0) {
+        if (eng.is_arena_ready()) {
             render_pvp_combat_frame(rt, cp);
         } else {
             rt.fb_fill_rect_alpha(0, 0, 240, 240, 0xFF0A1428u);

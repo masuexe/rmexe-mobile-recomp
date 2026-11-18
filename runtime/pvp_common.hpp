@@ -307,6 +307,7 @@ inline void reset_bo3_series_state(PvpCommonState<CoreT>& eng, uint32_t base_see
 
 template <typename CoreT>
 inline void reset_common_exit_fields(PvpCommonState<CoreT>& eng) {
+    eng.core = CoreT{};
     eng.phase = Phase::IDLE;
     eng.banner_ticks = 0;
     eng.judge_ticks = 0;

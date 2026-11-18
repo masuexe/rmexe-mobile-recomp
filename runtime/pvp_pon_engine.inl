@@ -3984,6 +3984,7 @@ static void start_next_bo3_game(DojaRuntime& rt, Ref cp) {
 
 static void cleanup_and_restore_singleplayer(DojaRuntime& rt, bool close_net = true) {
     g_pvp_rock_flip_override = -1;
+    g_pvp_in_ene_hit_passthrough = false;
     g_pvp_eng.backdrop_cache = PvpEngineState::BackdropCache{};
     cleanup_common_and_restore_singleplayer(rt, g_pvp_eng, close_net);
 }
@@ -10076,6 +10077,11 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                     rt.pvp_session().close_udp();
                 }
                 cleanup_and_restore_singleplayer(rt, true);
+                if (g_pvp_eng.core.sides[0].ata_arr != 0 || g_pvp_eng.core.sides[0].rock_ref != 0 ||
+                    g_pvp_eng.core.sides[1].ata_arr != 0 || g_pvp_eng.core.sides[1].rock_ref != 0) {
+                    fail_msg("SuiteH9-ExitClearsCoreRefs",
+                             "Expected cleanup_and_restore_singleplayer to clear PoN SideContext refs");
+                }
             }
         });
 
