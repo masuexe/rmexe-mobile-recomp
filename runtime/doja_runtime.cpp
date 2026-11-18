@@ -39,9 +39,45 @@ namespace rmexe {
 DojaRuntime* g_runtime = nullptr;
 
 // ============================================================================
-// Portable TrueType/OpenType CJK + English 12px Font Engine (stb_truetype)
+// Portable CJK + English 12px Font Engine (EBLC/EBDT 12x12 Bitmap + stb_truetype)
 // ============================================================================
 namespace {
+
+inline int default_doja_char_width(uint32_t cp) {
+    return (cp < 0x80 || (cp >= 0xFF61 && cp <= 0xFF9F)) ? 6 : 12;
+}
+
+inline bool in_bounds(const std::vector<uint8_t>& buf, size_t off, size_t len) {
+    return off <= buf.size() && len <= buf.size() - off;
+}
+
+inline bool read_u16_be(const std::vector<uint8_t>& buf, size_t off, uint16_t& out) {
+    if (!in_bounds(buf, off, 2)) return false;
+    out = static_cast<uint16_t>((static_cast<uint16_t>(buf[off]) << 8) |
+                                static_cast<uint16_t>(buf[off + 1]));
+    return true;
+}
+
+inline bool read_u32_be(const std::vector<uint8_t>& buf, size_t off, uint32_t& out) {
+    if (!in_bounds(buf, off, 4)) return false;
+    out = (static_cast<uint32_t>(buf[off]) << 24) |
+          (static_cast<uint32_t>(buf[off + 1]) << 16) |
+          (static_cast<uint32_t>(buf[off + 2]) << 8) |
+          static_cast<uint32_t>(buf[off + 3]);
+    return true;
+}
+
+inline int8_t read_i8(const std::vector<uint8_t>& buf, size_t off) {
+    return static_cast<int8_t>(buf[off]);
+}
+
+inline bool has_font_extension(const std::filesystem::path& p) {
+    std::string ext = p.extension().string();
+    for (char& ch : ext) {
+        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+    }
+    return ext == ".ttf" || ext == ".ttc" || ext == ".otf";
+}
 
 std::atomic<bool> g_quit_signal{false};
 
@@ -74,6 +110,7 @@ std::string resolve_runtime_path(const std::string& rel_or_abs, const std::strin
 struct StbFontEngine {
     struct CachedGlyph {
         bool valid = false;
+        bool is_bitmap = false;
         int adv_x = 6;
         int xoff = 0;
         int yoff = 0;
@@ -82,14 +119,333 @@ struct StbFontEngine {
         std::vector<uint8_t> bmp;
     };
 
-    std::vector<uint8_t> font_bytes;
-    stbtt_fontinfo info{};
-    float scale = 1.0f;
+    struct FontFace {
+        std::vector<uint8_t> font_bytes;
+        stbtt_fontinfo info{};
+        float scale = 1.0f;
+        bool has_cjk = false;
+        bool has_eblc_12 = false;
+        uint32_t eblc_off = 0;
+        uint32_t eblc_len = 0;
+        uint32_t ebdt_off = 0;
+        uint32_t ebdt_len = 0;
+        uint32_t subtable_array_off = 0;
+        uint32_t num_subtables = 0;
+    };
+
+    std::vector<FontFace> faces;
+    std::vector<std::string> loaded_keys;
     bool loaded = false;
     bool initialized = false;
     std::unordered_map<uint32_t, CachedGlyph> cache;
 
-    bool try_load_file(const std::string& path, bool require_cjk) {
+    static std::string canonical_path_key(const std::string& path) {
+        std::error_code ec;
+        std::filesystem::path p(path);
+        std::filesystem::path canon = std::filesystem::weakly_canonical(p, ec);
+        std::string key = ec ? p.lexically_normal().string() : canon.string();
+#ifdef _WIN32
+        for (char& ch : key) {
+            if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+        }
+#endif
+        return key;
+    }
+
+    static bool parse_eblc_12(FontFace& face, int sfnt_off) {
+        if (sfnt_off < 0) return false;
+        const auto& buf = face.font_bytes;
+        uint16_t num_tables = 0;
+        if (!read_u16_be(buf, static_cast<size_t>(sfnt_off) + 4, num_tables)) return false;
+        if (num_tables == 0 || num_tables > 256) return false;
+        size_t dir_off = static_cast<size_t>(sfnt_off) + 12;
+        if (!in_bounds(buf, dir_off, static_cast<size_t>(num_tables) * 16)) return false;
+
+        uint32_t eblc_off = 0, eblc_len = 0;
+        uint32_t ebdt_off = 0, ebdt_len = 0;
+        uint32_t bloc_off = 0, bloc_len = 0;
+        uint32_t bdat_off = 0, bdat_len = 0;
+
+        for (uint16_t i = 0; i < num_tables; ++i) {
+            size_t rec = dir_off + static_cast<size_t>(i) * 16;
+            uint32_t toff = 0, tlen = 0;
+            if (!read_u32_be(buf, rec + 8, toff) || !read_u32_be(buf, rec + 12, tlen)) continue;
+            if (!in_bounds(buf, toff, tlen)) continue;
+            if (std::memcmp(&buf[rec], "EBLC", 4) == 0) {
+                eblc_off = toff; eblc_len = tlen;
+            } else if (std::memcmp(&buf[rec], "EBDT", 4) == 0) {
+                ebdt_off = toff; ebdt_len = tlen;
+            } else if (std::memcmp(&buf[rec], "bloc", 4) == 0) {
+                bloc_off = toff; bloc_len = tlen;
+            } else if (std::memcmp(&buf[rec], "bdat", 4) == 0) {
+                bdat_off = toff; bdat_len = tlen;
+            }
+        }
+
+        if (eblc_len == 0 || ebdt_len == 0) {
+            eblc_off = bloc_off; eblc_len = bloc_len;
+            ebdt_off = bdat_off; ebdt_len = bdat_len;
+        }
+        if (eblc_len < 8 || ebdt_len < 4) return false;
+
+        uint32_t num_sizes = 0;
+        if (!read_u32_be(buf, static_cast<size_t>(eblc_off) + 4, num_sizes)) return false;
+        if (num_sizes == 0 || num_sizes > 1024) return false;
+        if (!in_bounds(buf, static_cast<size_t>(eblc_off) + 8, static_cast<size_t>(num_sizes) * 48)) {
+            return false;
+        }
+
+        for (uint32_t s = 0; s < num_sizes; ++s) {
+            size_t bo = static_cast<size_t>(eblc_off) + 8 + static_cast<size_t>(s) * 48;
+            uint8_t ppem_x = buf[bo + 44];
+            uint8_t ppem_y = buf[bo + 45];
+            uint8_t bit_depth = buf[bo + 46];
+            if (ppem_x != 12 || ppem_y != 12 || bit_depth != 1) continue;
+
+            uint32_t sub_arr_rel = 0, num_sub = 0;
+            if (!read_u32_be(buf, bo, sub_arr_rel) || !read_u32_be(buf, bo + 8, num_sub)) continue;
+            if (sub_arr_rel > eblc_len || num_sub == 0 || num_sub > 65536) continue;
+            uint64_t sub_arr_abs = static_cast<uint64_t>(eblc_off) + sub_arr_rel;
+            if (sub_arr_abs > static_cast<uint64_t>(eblc_off) + eblc_len) continue;
+            if (!in_bounds(buf, static_cast<size_t>(sub_arr_abs), static_cast<size_t>(num_sub) * 8)) continue;
+
+            face.has_eblc_12 = true;
+            face.eblc_off = eblc_off;
+            face.eblc_len = eblc_len;
+            face.ebdt_off = ebdt_off;
+            face.ebdt_len = ebdt_len;
+            face.subtable_array_off = static_cast<uint32_t>(sub_arr_abs);
+            face.num_subtables = num_sub;
+            return true;
+        }
+        return false;
+    }
+
+    static bool try_get_eblc_glyph(const FontFace& face, uint32_t cp, CachedGlyph& cg) {
+        if (!face.has_eblc_12 || cp > 0xFFFFu) return false;
+        int gid_i = stbtt_FindGlyphIndex(&face.info, static_cast<int>(cp));
+        if (gid_i <= 0 || gid_i > 0xFFFF) return false;
+        uint16_t gid = static_cast<uint16_t>(gid_i);
+
+        const auto& buf = face.font_bytes;
+        const size_t eblc_end = static_cast<size_t>(face.eblc_off) + face.eblc_len;
+        const size_t ebdt_end = static_cast<size_t>(face.ebdt_off) + face.ebdt_len;
+
+        for (uint32_t st = 0; st < face.num_subtables; ++st) {
+            size_t entry = static_cast<size_t>(face.subtable_array_off) + static_cast<size_t>(st) * 8;
+            uint16_t fg = 0, lg = 0;
+            uint32_t add_off = 0;
+            if (!read_u16_be(buf, entry, fg) || !read_u16_be(buf, entry + 2, lg) ||
+                !read_u32_be(buf, entry + 4, add_off)) {
+                continue;
+            }
+            if (gid < fg || gid > lg) continue;
+
+            uint64_t ist64 = static_cast<uint64_t>(face.subtable_array_off) + add_off;
+            if (ist64 + 8 > eblc_end) continue;
+            size_t ist = static_cast<size_t>(ist64);
+
+            uint16_t idx_fmt = 0, img_fmt = 0;
+            uint32_t img_data_off = 0;
+            if (!read_u16_be(buf, ist, idx_fmt) || !read_u16_be(buf, ist + 2, img_fmt) ||
+                !read_u32_be(buf, ist + 4, img_data_off)) {
+                continue;
+            }
+            if (img_data_off > face.ebdt_len) continue;
+            uint64_t ebdt_base = static_cast<uint64_t>(face.ebdt_off) + img_data_off;
+
+            bool found_glyph = false;
+            uint64_t g_off64 = 0;
+            uint32_t g_len = 0;
+            bool has_const_metrics = false;
+            uint8_t ch = 0, cw = 0, cadv = 0;
+            int8_t cbx = 0, cby = 0;
+
+            if (idx_fmt == 1) {
+                size_t rel = static_cast<size_t>(gid - fg);
+                size_t off_pos = ist + 8 + rel * 4;
+                if (off_pos + 8 > eblc_end) continue;
+                uint32_t o1 = 0, o2 = 0;
+                if (read_u32_be(buf, off_pos, o1) && read_u32_be(buf, off_pos + 4, o2) && o2 > o1) {
+                    g_off64 = ebdt_base + o1;
+                    g_len = o2 - o1;
+                    found_glyph = true;
+                }
+            } else if (idx_fmt == 2) {
+                if (ist + 20 > eblc_end) continue;
+                uint32_t img_sz = 0;
+                if (!read_u32_be(buf, ist + 8, img_sz) || img_sz == 0) continue;
+                ch = buf[ist + 12];
+                cw = buf[ist + 13];
+                cbx = read_i8(buf, ist + 14);
+                cby = read_i8(buf, ist + 15);
+                cadv = buf[ist + 16];
+                has_const_metrics = true;
+                g_off64 = ebdt_base + static_cast<uint64_t>(gid - fg) * img_sz;
+                g_len = img_sz;
+                found_glyph = true;
+            } else if (idx_fmt == 3) {
+                size_t rel = static_cast<size_t>(gid - fg);
+                size_t off_pos = ist + 8 + rel * 2;
+                if (off_pos + 4 > eblc_end) continue;
+                uint16_t o1 = 0, o2 = 0;
+                if (read_u16_be(buf, off_pos, o1) && read_u16_be(buf, off_pos + 2, o2) && o2 > o1) {
+                    g_off64 = ebdt_base + o1;
+                    g_len = static_cast<uint32_t>(o2 - o1);
+                    found_glyph = true;
+                }
+            } else if (idx_fmt == 4) {
+                if (ist + 12 > eblc_end) continue;
+                uint32_t num_g = 0;
+                if (!read_u32_be(buf, ist + 8, num_g) || num_g == 0) continue;
+                if (static_cast<uint64_t>(ist) + 12 + (static_cast<uint64_t>(num_g) + 1) * 4 > eblc_end) continue;
+                uint32_t lo = 0, hi = num_g;
+                while (lo < hi) {
+                    uint32_t mid = lo + (hi - lo) / 2;
+                    uint16_t cgid = 0;
+                    read_u16_be(buf, ist + 12 + static_cast<size_t>(mid) * 4, cgid);
+                    if (cgid < gid) lo = mid + 1;
+                    else hi = mid;
+                }
+                if (lo < num_g) {
+                    size_t pair_off = ist + 12 + static_cast<size_t>(lo) * 4;
+                    uint16_t cgid = 0, o1 = 0, o2 = 0;
+                    if (read_u16_be(buf, pair_off, cgid) && cgid == gid &&
+                        read_u16_be(buf, pair_off + 2, o1) && read_u16_be(buf, pair_off + 6, o2) && o2 > o1) {
+                        g_off64 = ebdt_base + o1;
+                        g_len = static_cast<uint32_t>(o2 - o1);
+                        found_glyph = true;
+                    }
+                }
+            } else if (idx_fmt == 5) {
+                if (ist + 24 > eblc_end) continue;
+                uint32_t img_sz = 0, num_g = 0;
+                if (!read_u32_be(buf, ist + 8, img_sz) || img_sz == 0) continue;
+                if (!read_u32_be(buf, ist + 20, num_g) || num_g == 0) continue;
+                if (static_cast<uint64_t>(ist) + 24 + static_cast<uint64_t>(num_g) * 2 > eblc_end) continue;
+                ch = buf[ist + 12];
+                cw = buf[ist + 13];
+                cbx = read_i8(buf, ist + 14);
+                cby = read_i8(buf, ist + 15);
+                cadv = buf[ist + 16];
+                has_const_metrics = true;
+                uint32_t lo = 0, hi = num_g;
+                while (lo < hi) {
+                    uint32_t mid = lo + (hi - lo) / 2;
+                    uint16_t cgid = 0;
+                    read_u16_be(buf, ist + 24 + static_cast<size_t>(mid) * 2, cgid);
+                    if (cgid < gid) lo = mid + 1;
+                    else hi = mid;
+                }
+                if (lo < num_g) {
+                    uint16_t cgid = 0;
+                    if (read_u16_be(buf, ist + 24 + static_cast<size_t>(lo) * 2, cgid) && cgid == gid) {
+                        g_off64 = ebdt_base + static_cast<uint64_t>(lo) * img_sz;
+                        g_len = img_sz;
+                        found_glyph = true;
+                    }
+                }
+            }
+
+            if (!found_glyph) continue;
+            if (g_off64 > ebdt_end || g_len > ebdt_end - g_off64) continue;
+            size_t g_off = static_cast<size_t>(g_off64);
+
+            uint8_t h = 0, w = 0, adv = 0;
+            int8_t bx = 0, by = 0;
+            size_t bmp_off = g_off;
+            uint32_t hdr_sz = 0;
+            bool byte_aligned = false;
+
+            if (img_fmt == 1 || img_fmt == 2) {
+                if (g_len < 5) return false;
+                h = buf[g_off];
+                w = buf[g_off + 1];
+                bx = read_i8(buf, g_off + 2);
+                by = read_i8(buf, g_off + 3);
+                adv = buf[g_off + 4];
+                hdr_sz = 5;
+                bmp_off = g_off + 5;
+                byte_aligned = (img_fmt == 1);
+            } else if (img_fmt == 5) {
+                if (!has_const_metrics) return false;
+                h = ch; w = cw; bx = cbx; by = cby; adv = cadv;
+                hdr_sz = 0;
+                bmp_off = g_off;
+                byte_aligned = false;
+            } else if (img_fmt == 6 || img_fmt == 7) {
+                if (g_len < 8) return false;
+                h = buf[g_off];
+                w = buf[g_off + 1];
+                bx = read_i8(buf, g_off + 2);
+                by = read_i8(buf, g_off + 3);
+                adv = buf[g_off + 4];
+                hdr_sz = 8;
+                bmp_off = g_off + 8;
+                byte_aligned = (img_fmt == 6);
+            } else {
+                return false;
+            }
+
+            if (w == 0 || h == 0) {
+                cg.valid = true;
+                cg.is_bitmap = true;
+                cg.width = 0;
+                cg.rows = 0;
+                cg.xoff = 0;
+                cg.yoff = 0;
+                cg.adv_x = (adv > 0) ? static_cast<int>(adv) : default_doja_char_width(cp);
+                cg.bmp.clear();
+                return true;
+            }
+            if (w > 32 || h > 32) return false;
+
+            uint32_t bpr = byte_aligned ? ((static_cast<uint32_t>(w) + 7u) / 8u) : 0u;
+            uint32_t need_bytes = byte_aligned
+                ? (bpr * static_cast<uint32_t>(h))
+                : ((static_cast<uint32_t>(w) * static_cast<uint32_t>(h) + 7u) / 8u);
+            if (hdr_sz + need_bytes > g_len || !in_bounds(buf, bmp_off, need_bytes)) return false;
+
+            cg.width = static_cast<int>(w);
+            cg.rows = static_cast<int>(h);
+            cg.xoff = static_cast<int>(bx);
+            cg.yoff = -static_cast<int>(by);
+            cg.adv_x = (adv > 0) ? static_cast<int>(adv) : default_doja_char_width(cp);
+            cg.bmp.assign(static_cast<size_t>(w) * static_cast<size_t>(h), 0);
+
+            for (int ry = 0; ry < cg.rows; ++ry) {
+                for (int rx = 0; rx < cg.width; ++rx) {
+                    uint8_t byte_val = 0;
+                    uint8_t mask = 0;
+                    if (byte_aligned) {
+                        byte_val = buf[bmp_off + static_cast<size_t>(ry) * bpr + static_cast<size_t>(rx >> 3)];
+                        mask = static_cast<uint8_t>(0x80u >> (rx & 7));
+                    } else {
+                        size_t bit_idx = static_cast<size_t>(ry) * static_cast<size_t>(w) + static_cast<size_t>(rx);
+                        byte_val = buf[bmp_off + (bit_idx >> 3)];
+                        mask = static_cast<uint8_t>(0x80u >> (bit_idx & 7));
+                    }
+                    if ((byte_val & mask) != 0) {
+                        cg.bmp[static_cast<size_t>(ry) * static_cast<size_t>(w) + static_cast<size_t>(rx)] = 255;
+                    }
+                }
+            }
+            cg.is_bitmap = true;
+            cg.valid = true;
+            return true;
+        }
+        return false;
+    }
+
+    bool try_load_file(const std::string& path, bool require_cjk, bool require_eblc_only = false) {
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(path, ec)) return false;
+
+        std::string key = canonical_path_key(path);
+        if (std::find(loaded_keys.begin(), loaded_keys.end(), key) != loaded_keys.end()) {
+            return false;
+        }
+
         std::ifstream f(path, std::ios::binary);
         if (!f) return false;
         std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -98,65 +454,112 @@ struct StbFontEngine {
         int offset = stbtt_GetFontOffsetForIndex(buf.data(), 0);
         if (offset < 0) return false;
 
-        stbtt_fontinfo tmp{};
-        if (!stbtt_InitFont(&tmp, buf.data(), offset)) return false;
-        if (require_cjk && stbtt_FindGlyphIndex(&tmp, 0x3042) == 0 && stbtt_FindGlyphIndex(&tmp, 0x4E2D) == 0) {
-            return false;
+        FontFace face{};
+        face.font_bytes = std::move(buf);
+        if (!stbtt_InitFont(&face.info, face.font_bytes.data(), offset)) return false;
+
+        face.has_cjk = (stbtt_FindGlyphIndex(&face.info, 0x3042) != 0 ||
+                        stbtt_FindGlyphIndex(&face.info, 0x4E2D) != 0);
+        if (require_cjk && !face.has_cjk) return false;
+
+        parse_eblc_12(face, offset);
+        if (require_eblc_only && !face.has_eblc_12) return false;
+
+        face.scale = stbtt_ScaleForMappingEmToPixels(&face.info, 12.0f);
+        if (face.scale <= 0.0f) {
+            face.scale = stbtt_ScaleForPixelHeight(&face.info, 13.0f);
         }
 
-        font_bytes = std::move(buf);
-        if (!stbtt_InitFont(&info, font_bytes.data(), offset)) {
-            font_bytes.clear();
-            return false;
-        }
-        scale = stbtt_ScaleForMappingEmToPixels(&info, 12.0f);
-        if (scale <= 0.0f) {
-            scale = stbtt_ScaleForPixelHeight(&info, 13.0f);
-        }
-        cache.clear();
-        loaded = true;
+        loaded_keys.push_back(std::move(key));
+        faces.push_back(std::move(face));
         return true;
     }
 
     void init(const std::string& base_dir) {
         if (initialized) return;
         initialized = true;
+        faces.clear();
+        loaded_keys.clear();
+        cache.clear();
 
-        std::vector<std::string> cjk_candidates;
+        // 1. User-supplied fonts in assets/fonts/ (named priority + directory scan)
+        std::vector<std::string> asset_dirs;
         if (!base_dir.empty()) {
-            cjk_candidates.push_back(base_dir + "assets/fonts/wqy-microhei.ttc");
-            cjk_candidates.push_back(base_dir + "wqy-microhei.ttc");
+            asset_dirs.push_back((std::filesystem::path(base_dir) / "assets" / "fonts").string());
         }
-        cjk_candidates.push_back("assets/fonts/wqy-microhei.ttc");
-        cjk_candidates.push_back("wqy-microhei.ttc");
+        asset_dirs.push_back("assets/fonts");
+
+        const char* priority_names[] = {"msgothic.ttc", "simsun.ttc", "pixel12.ttf", "pixel12.ttc", "unifont.ttf"};
+        for (const std::string& dir : asset_dirs) {
+            for (const char* name : priority_names) {
+                try_load_file((std::filesystem::path(dir) / name).string(), false);
+            }
+        }
+        for (const std::string& dir : asset_dirs) {
+            std::error_code ec;
+            if (!std::filesystem::is_directory(dir, ec)) continue;
+            std::vector<std::string> extra;
+            for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+                if (ec) break;
+                if (entry.is_regular_file(ec) && has_font_extension(entry.path())) {
+                    extra.push_back(entry.path().string());
+                }
+            }
+            std::sort(extra.begin(), extra.end());
+            for (const auto& p : extra) {
+                try_load_file(p, false);
+            }
+        }
+
+        // 2. System 12x12 EBLC/EBDT bitmap fonts (Windows & WSL2)
 #ifdef _WIN32
         const char* win_dir = std::getenv("WINDIR");
         std::string wfonts = (win_dir && *win_dir) ? (std::string(win_dir) + "\\Fonts\\") : "C:\\Windows\\Fonts\\";
-        cjk_candidates.push_back(wfonts + "msgothic.ttc");
-        cjk_candidates.push_back(wfonts + "msyh.ttc");
-        cjk_candidates.push_back(wfonts + "YuGothR.ttc");
-        cjk_candidates.push_back(wfonts + "meiryo.ttc");
+        try_load_file(wfonts + "msgothic.ttc", false, true);
+        try_load_file(wfonts + "simsun.ttc", false, true);
+        try_load_file(wfonts + "mingliu.ttc", false, true);
 #else
-        cjk_candidates.push_back("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc");
-        cjk_candidates.push_back("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
-        cjk_candidates.push_back("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc");
-        cjk_candidates.push_back("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc");
+        try_load_file("/mnt/c/Windows/Fonts/msgothic.ttc", false, true);
+        try_load_file("/mnt/c/Windows/Fonts/simsun.ttc", false, true);
+        try_load_file("/mnt/c/Windows/Fonts/mingliu.ttc", false, true);
 #endif
-        for (const auto& p : cjk_candidates) {
-            if (try_load_file(p, true)) return;
+
+        // 3. Load at most one CJK vector fallback font for missing glyphs / pure Linux hosts
+        std::vector<std::string> cjk_fallbacks;
+        if (!base_dir.empty()) {
+            cjk_fallbacks.push_back((std::filesystem::path(base_dir) / "wqy-microhei.ttc").string());
+        }
+        cjk_fallbacks.push_back("wqy-microhei.ttc");
+#ifdef _WIN32
+        cjk_fallbacks.push_back(wfonts + "msyh.ttc");
+        cjk_fallbacks.push_back(wfonts + "YuGothR.ttc");
+        cjk_fallbacks.push_back(wfonts + "meiryo.ttc");
+#else
+        cjk_fallbacks.push_back("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc");
+        cjk_fallbacks.push_back("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc");
+        cjk_fallbacks.push_back("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
+        cjk_fallbacks.push_back("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc");
+        cjk_fallbacks.push_back("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc");
+#endif
+        for (const auto& p : cjk_fallbacks) {
+            if (try_load_file(p, true)) break;
         }
 
-        const char* fallback_paths[] = {
+        // 4. Last-resort ASCII fallback if no font could be loaded
+        if (faces.empty()) {
+            const char* fallback_paths[] = {
 #ifdef _WIN32
-            "C:\\Windows\\Fonts\\arial.ttf",
+                "C:\\Windows\\Fonts\\arial.ttf",
 #else
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
 #endif
-        };
-        for (const char* p : fallback_paths) {
-            if (try_load_file(p, false)) return;
+            };
+            for (const char* p : fallback_paths) {
+                if (try_load_file(p, false)) break;
+            }
         }
+        loaded = !faces.empty();
     }
 
     const CachedGlyph* get_glyph(uint32_t cp) {
@@ -167,32 +570,47 @@ struct StbFontEngine {
         }
 
         CachedGlyph cg{};
-        int gidx = stbtt_FindGlyphIndex(&info, static_cast<int>(cp));
-        if (gidx == 0 && cp > 0x7F) {
-            cache.emplace(cp, std::move(cg));
-            return nullptr;
+        // Pass 1: Prefer crisp 12x12 (or 6x12) EBLC/EBDT bitmap strikes across loaded faces
+        for (const auto& face : faces) {
+            if (face.has_eblc_12 && try_get_eblc_glyph(face, cp, cg)) {
+                auto [ins_it, _] = cache.emplace(cp, std::move(cg));
+                return &ins_it->second;
+            }
         }
 
-        int adv_raw = 0, lsb_raw = 0;
-        stbtt_GetCodepointHMetrics(&info, static_cast<int>(cp), &adv_raw, &lsb_raw);
-        int adv_px = static_cast<int>(std::lround(adv_raw * scale));
-        cg.adv_x = (adv_px > 0) ? adv_px : ((cp < 0x80) ? 6 : 12);
+        // Pass 2: Vector outline fallback via stb_truetype
+        for (size_t i = 0; i < faces.size(); ++i) {
+            auto& face = faces[i];
+            int gidx = stbtt_FindGlyphIndex(&face.info, static_cast<int>(cp));
+            if (gidx == 0 && !(cp <= 0x7Fu && i + 1 == faces.size())) {
+                continue;
+            }
 
-        int w = 0, h = 0, xoff = 0, yoff = 0;
-        unsigned char* raw_bmp = stbtt_GetCodepointBitmap(&info, scale, scale, static_cast<int>(cp), &w, &h, &xoff, &yoff);
-        if (raw_bmp && w > 0 && h > 0 && w < 64 && h < 64) {
-            cg.width = w;
-            cg.rows = h;
-            cg.xoff = xoff;
-            cg.yoff = yoff;
-            cg.bmp.assign(raw_bmp, raw_bmp + (w * h));
+            int adv_raw = 0, lsb_raw = 0;
+            stbtt_GetCodepointHMetrics(&face.info, static_cast<int>(cp), &adv_raw, &lsb_raw);
+            int adv_px = static_cast<int>(std::lround(adv_raw * face.scale));
+            cg.adv_x = (adv_px > 0) ? adv_px : default_doja_char_width(cp);
+
+            int w = 0, h = 0, xoff = 0, yoff = 0;
+            unsigned char* raw_bmp = stbtt_GetCodepointBitmap(&face.info, face.scale, face.scale, static_cast<int>(cp), &w, &h, &xoff, &yoff);
+            if (raw_bmp && w > 0 && h > 0 && w < 64 && h < 64) {
+                cg.width = w;
+                cg.rows = h;
+                cg.xoff = xoff;
+                cg.yoff = yoff;
+                cg.bmp.assign(raw_bmp, raw_bmp + (w * h));
+            }
+            if (raw_bmp) {
+                stbtt_FreeBitmap(raw_bmp, nullptr);
+            }
+            cg.is_bitmap = false;
+            cg.valid = true;
+            auto [ins_it, _] = cache.emplace(cp, std::move(cg));
+            return &ins_it->second;
         }
-        if (raw_bmp) {
-            stbtt_FreeBitmap(raw_bmp, nullptr);
-        }
-        cg.valid = true;
-        auto [ins_it, _] = cache.emplace(cp, std::move(cg));
-        return &ins_it->second;
+
+        cache.emplace(cp, std::move(cg));
+        return nullptr;
     }
 };
 
@@ -2203,7 +2621,7 @@ struct UiInputManager {
             if (const auto* gl = g_ft.get_glyph(cp)) {
                 w += gl->adv_x;
             } else {
-                w += (cp < 0x80) ? 6 : 12;
+                w += default_doja_char_width(cp);
             }
         }
         return w;
@@ -2228,7 +2646,7 @@ struct UiInputManager {
                             int dx = pen_x + gl->xoff + rx;
                             if (dx < 0 || dx >= bw) continue;
                             uint32_t ga = (static_cast<uint32_t>(gl->bmp[ry * gl->width + rx]) * a_col) / 255;
-                            if (ga > 32) {
+                            if (ga > 24) {
                                 uint32_t dst = buf[dy * bw + dx];
                                 uint32_t dr = (dst >> 16) & 0xFF;
                                 uint32_t dg = (dst >> 8) & 0xFF;
@@ -2243,7 +2661,7 @@ struct UiInputManager {
                 }
                 pen_x += gl->adv_x;
             } else {
-                pen_x += (cp < 0x80) ? 6 : 12;
+                pen_x += default_doja_char_width(cp);
             }
         }
     }
@@ -3335,15 +3753,26 @@ static void blit_text_buf(uint32_t* dst_buf, int dst_w, int dst_h,
                         int dx = pen_x + gl->xoff + rx;
                         if (dx < 0 || dx >= dst_w) continue;
                         uint8_t alpha = gl->bmp[ry * gl->width + rx];
-                        if (alpha > 96) {
-                            dst_buf[dy * dst_w + dx] = 0xFF000000u | (sr << 16) | (sg << 8) | sb;
+                        if (gl->is_bitmap) {
+                            if (alpha >= 128) {
+                                dst_buf[dy * dst_w + dx] = 0xFF000000u | (sr << 16) | (sg << 8) | sb;
+                            }
+                        } else if (alpha > 24) {
+                            uint32_t dst = dst_buf[dy * dst_w + dx];
+                            uint32_t dr = (dst >> 16) & 0xFF;
+                            uint32_t dg = (dst >> 8) & 0xFF;
+                            uint32_t db = dst & 0xFF;
+                            uint32_t nr = (sr * alpha + dr * (255 - alpha)) / 255;
+                            uint32_t ng = (sg * alpha + dg * (255 - alpha)) / 255;
+                            uint32_t nb = (sb * alpha + db * (255 - alpha)) / 255;
+                            dst_buf[dy * dst_w + dx] = 0xFF000000u | (nr << 16) | (ng << 8) | nb;
                         }
                     }
                 }
             }
             pen_x += gl->adv_x;
         } else {
-            int adv = (cp < 0x80) ? 6 : 12;
+            int adv = default_doja_char_width(cp);
             if (cp > 0x20) {
                 for (int gy = 0; gy < 10; ++gy) {
                     int dy = baseline_y - 9 + gy;
@@ -5222,7 +5651,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             if (args[1].r <= 0) return Slot(0);
             auto cps = utf8_to_codepoints(get(args[1].r).str);
             int w = 0;
-            for (uint32_t cp : cps) w += (cp < 0x80) ? 6 : 12;
+            for (uint32_t cp : cps) w += default_doja_char_width(cp);
             return Slot(w);
         }
     }

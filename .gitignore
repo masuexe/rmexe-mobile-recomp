@@ -6,6 +6,7 @@ assets/**/*.rpz
 assets/**/*.sav
 assets/**/*.zip
 assets/fonts/
+assets/translations/
 *.jar
 *.sp
 *.jam
@@ -14,7 +15,10 @@ assets/fonts/
 
 # Build and analysis outputs
 build/
+build-win/
+dist/
 out/
+ref/
 __pycache__/
 *.pyc
 controls.cfg

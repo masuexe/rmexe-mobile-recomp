@@ -144,8 +144,15 @@ Press **`F1`** or **`Esc`** (or **`Start`** on a Gamepad) at any time during gam
 
 ## Architecture & Roadmap
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the complete engineering design, including:
-- **Phase 1**: Static Bytecode & ScratchPad Survey (`tools/survey_doja.py`) — **Completed**
-- **Phase 2**: Ahead-of-Time JVM-to-C++20 Recompiler, SDL2 Native Runtime & Yamaha MA-3/MA-5 Stereo FM Audio (`tools/recomp_jar.py`, `runtime/`, `common/ymu762_fm.hpp`) — **Completed**
-- **Phase 3**: High-Frame-Rate (60 FPS) Display-List Motion Interpolation & `60 FPS / 15 FPS` Toggle — **Completed**
-- **Phase 4**: Real-Time PvP NetBattle Expansion with GGPO Rollback Netcode (`PoN` JP/EN completed in `runtime/pvp_pon_engine.inl`; `LoN` PvP expansion next)
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the complete engineering design.
+
+### Completed Milestones
+- [x] **Phase 1**: Static Bytecode & ScratchPad Survey (`tools/survey_doja.py`)
+- [x] **Phase 2**: Ahead-of-Time JVM-to-C++20 Recompiler, SDL2 Native Runtime & Yamaha MA-3/MA-5 Stereo FM Audio
+- [x] **Phase 3**: 60 FPS Display-List Motion Interpolation & Instant `60 FPS / 15 FPS` Toggle
+- [x] **Phase 4**: Unified Capcom Server & Real-Time PvP NetBattle with GGPO Rollback Netcode (`PoN` & `LoN` JP/EN)
+
+### Upcoming Roadmap (Planned Order)
+1. [ ] **Chinese Localization (简体/繁体中文汉化支持)**: External script extraction toolchain & non-destructive runtime UTF-8 Chinese translation overlay for both *PoN* and *LoN*.
+2. [ ] **Mobile Port (移动端 / Android 移植版)**: Native Android (`SDL2` + NDK) build with customizable on-screen virtual GBA / flip-phone touch controls.
+3. [ ] **60 Hz GBA-Feel Mode (60 FPS 模拟 GBA 原生手感模式)**: 60 Hz sub-tick input response (16.7 ms latency) and GBA-paced combat/movement mechanics beyond visual motion interpolation.
