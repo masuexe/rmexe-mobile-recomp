@@ -88,6 +88,10 @@ int main(int argc, char** argv) {
         } else if (arg == "--fps" && i + 1 < argc) {
             fps = std::max(15, std::atoi(argv[++i]));
             rmexe::set_cli_fps_override(fps);
+        } else if (arg == "--lang" && i + 1 < argc) {
+            rmexe::set_cli_lang_mode(argv[++i]);
+        } else if (arg == "--translation" && i + 1 < argc) {
+            rmexe::set_cli_translation_path(argv[++i]);
         } else if (arg == "--max-frames" && i + 1 < argc) {
             max_frames = std::atoi(argv[++i]);
         } else if (arg == "--dump-ppm" && i + 1 < argc) {
@@ -129,6 +133,8 @@ int main(int argc, char** argv) {
                       << "  --name <nick>         Override player nickname   (up to 12 ASCII chars)\n"
                       << "  --scale <int>         Window scale factor (default: 3 -> 720x780)\n"
                       << "  --fps <int>           Target render FPS (default: 60)\n"
+                      << "  --lang <mode>         Language overlay mode: auto, zh, orig\n"
+                      << "  --translation <path>  Path to Chinese translation JSON file\n"
                       << "  --headless            Run without opening an SDL window\n"
                       << "  --fast-forward        Disable frame sleep for rapid testing\n"
                       << "  --max-frames <N>      Exit after N rendered frames\n"

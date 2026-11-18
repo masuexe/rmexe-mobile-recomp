@@ -310,6 +310,7 @@ private:
 
     void load_sav_overlay();
     void save_sav_overlay();
+    Ref alloc_raw_string(const std::string& utf8);
     std::vector<uint8_t> read_jar_Bytes(const std::string& entry_path);
     void draw_image_internal(HeapObject& gfx, Ref img_ref, int dx, int dy, int sx, int sy, int sw, int sh, int dw, int dh);
     void draw_text_internal(HeapObject& gfx, const std::string& text, int x, int y);

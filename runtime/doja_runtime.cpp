@@ -1,6 +1,7 @@
 #define SDL_MAIN_HANDLED
 #include "doja_runtime.hpp"
 #include "net_config.hpp"
+#include "../common/localization.hpp"
 #include "../common/pvp_protocol.hpp"
 #include "../common/ymu762_fm.hpp"
 
@@ -615,6 +616,7 @@ struct StbFontEngine {
 };
 
 static StbFontEngine g_ft;
+static loc::LocalizationManager g_loc;
 
 // Convert Shift-JIS (CP932) bytes to UTF-8 string
 std::string cp932_to_utf8(const uint8_t* data, size_t len) {
@@ -2270,6 +2272,11 @@ struct UiInputManager {
     bool cli_high_fps_mode = true;
     bool has_cli_pvp_bo3 = false;
     bool cli_pvp_bo3 = false;
+    loc::LangMode lang_mode = loc::LangMode::Auto;
+    bool has_cli_lang_override = false;
+    loc::LangMode cli_lang_mode = loc::LangMode::Auto;
+    std::string cli_translation_path;
+    std::string exe_base_dir;
     std::string cli_server_url;
     std::string cli_player_uid;
     std::string cli_player_name;
@@ -2426,6 +2433,49 @@ struct UiInputManager {
         return "-";
     }
 
+    static std::string format_lang_cfg(loc::LangMode m) {
+        if (m == loc::LangMode::Zh) return "zh";
+        if (m == loc::LangMode::Orig) return "orig";
+        return "auto";
+    }
+
+    static loc::LangMode parse_lang_cfg(const std::string& val) {
+        std::string low;
+        low.reserve(val.size());
+        for (char c : val) {
+            if (c >= 'A' && c <= 'Z') low.push_back(static_cast<char>(c - 'A' + 'a'));
+            else low.push_back(c);
+        }
+        if (low == "zh" || low == "cn" || low == "chinese") return loc::LangMode::Zh;
+        if (low == "orig" || low == "original" || low == "jp" || low == "en") return loc::LangMode::Orig;
+        return loc::LangMode::Auto;
+    }
+
+    void discover_and_load_translation() {
+        std::error_code ec;
+        std::vector<std::string> candidates;
+        if (!cli_translation_path.empty()) {
+            candidates.push_back(resolve_runtime_path(cli_translation_path, exe_base_dir));
+        } else {
+            const char* fname = is_lon_game ? "lon_zh.json" : "pon_zh.json";
+            if (!exe_base_dir.empty()) {
+                candidates.push_back((std::filesystem::path(exe_base_dir) / "assets" / "translations" / fname).string());
+            }
+            candidates.push_back((std::filesystem::path("assets") / "translations" / fname).string());
+        }
+        for (const auto& p : candidates) {
+            if (std::filesystem::is_regular_file(p, ec)) {
+                g_loc.load_json_file(p);
+                g_loc.set_lang_mode(lang_mode);
+                return;
+            }
+        }
+        if (!candidates.empty()) {
+            g_loc.set_configured_path(candidates.back());
+        }
+        g_loc.set_lang_mode(lang_mode);
+    }
+
     void apply_cli_overrides() {
         if (has_cli_net_override) {
             online_mode = cli_online_mode;
@@ -2437,6 +2487,10 @@ struct UiInputManager {
         if (has_cli_pvp_bo3) {
             pvp_bo3_mode = cli_pvp_bo3;
         }
+        if (has_cli_lang_override) {
+            lang_mode = cli_lang_mode;
+        }
+        g_loc.set_lang_mode(lang_mode);
         if (!cli_player_uid.empty()) player_uid = cli_player_uid;
         if (!cli_player_name.empty()) player_name = cli_player_name;
         g_pvp.set_preferred_format(pvp_bo3_mode ? pvp::PVP_FORMAT_TRIPLE : pvp::PVP_FORMAT_SINGLE);
@@ -2479,6 +2533,8 @@ struct UiInputManager {
                 player_name = val;
             } else if (key == "pvp_bo3_mode") {
                 pvp_bo3_mode = (std::atoi(val.c_str()) != 0);
+            } else if (key == "language_mode") {
+                lang_mode = parse_lang_cfg(val);
             } else {
                 for (int i = 0; i < ACT_COUNT; ++i) {
                     std::string pfx = std::string(binds[i].cfg_id) + "_";
@@ -2531,7 +2587,8 @@ struct UiInputManager {
         out << "server_url=" << server_url << "\n";
         out << "player_uid=" << player_uid << "\n";
         out << "player_name=" << player_name << "\n";
-        out << "pvp_bo3_mode=" << (pvp_bo3_mode ? 1 : 0) << "\n\n";
+        out << "pvp_bo3_mode=" << (pvp_bo3_mode ? 1 : 0) << "\n";
+        out << "language_mode=" << format_lang_cfg(lang_mode) << "\n\n";
         for (int i = 0; i < ACT_COUNT; ++i) {
             out << binds[i].cfg_id << "_key1=" << format_key_cfg(binds[i].keys[0]) << "\n";
             out << binds[i].cfg_id << "_key2=" << format_key_cfg(binds[i].keys[1]) << "\n";
@@ -2806,13 +2863,14 @@ struct UiInputManager {
     // 5: 主音量
     // 6: 帧率模式 (60 FPS / 15 FPS)
     // 7: 底部软键栏
-    // 8..19: Keybindings (ACT_COUNT = 12)
-    // 20: 恢复默认按键配置
-    // 21: 返回游戏 (Resume)
-    // 22: 保存进度并退出
-    static constexpr int BIND_START_ROW = 8;
-    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 20
-    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 23
+    // 8: 语言/汉化 (简体中文 / 原版 JP/EN)
+    // 9..20: Keybindings (ACT_COUNT = 12)
+    // 21: 恢复默认按键配置
+    // 22: 返回游戏 (Resume)
+    // 23: 保存进度并退出
+    static constexpr int BIND_START_ROW = 9;
+    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 21
+    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 24
     static constexpr int VISIBLE_ROWS = 9;
 
     bool overlay_open = false;
@@ -3061,6 +3119,28 @@ struct UiInputManager {
         show_toast(high_fps_mode ? "帧率模式: 60 FPS (丝滑插值)" : "帧率模式: 15 FPS (原版帧率)", 90);
     }
 
+    void toggle_language_mode() {
+        bool currently_zh = (lang_mode == loc::LangMode::Zh) ||
+                            (lang_mode == loc::LangMode::Auto && g_loc.is_enabled());
+        if (currently_zh) {
+            lang_mode = loc::LangMode::Orig;
+            g_loc.set_lang_mode(lang_mode);
+            save_config();
+            show_toast("语言模式: 原版 (JP/EN) (静态菜单重启生效)", 120);
+        } else {
+            lang_mode = loc::LangMode::Zh;
+            discover_and_load_translation();
+            g_loc.set_lang_mode(lang_mode);
+            save_config();
+            if (g_loc.translated_count() > 0) {
+                show_toast("汉化补丁: 开启 (已热重载 " + std::to_string(g_loc.translated_count()) + " 条, 静态菜单重启生效)", 140);
+            } else {
+                std::string fname = is_lon_game ? "lon_zh.json" : "pon_zh.json";
+                show_toast("汉化补丁: 未找到有效译文 (assets/translations/" + fname + ")", 140);
+            }
+        }
+    }
+
     void toggle_pvp_format() {
         if (g_pvp.active()) {
             show_toast("对战房间进行中，无法更改赛制", 90);
@@ -3297,6 +3377,8 @@ struct UiInputManager {
                     show_softkey_bar = !show_softkey_bar;
                     apply_softbar_geometry(win, ren, scale);
                     save_config();
+                } else if (overlay_sel_row == 8) {
+                    toggle_language_mode();
                 } else if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
                     overlay_sel_col = (overlay_sel_col + dir + 3) % 3;
                 }
@@ -3334,6 +3416,8 @@ struct UiInputManager {
                     show_softkey_bar = !show_softkey_bar;
                     apply_softbar_geometry(win, ren, scale);
                     save_config();
+                } else if (overlay_sel_row == 8) {
+                    toggle_language_mode();
                 } else if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
                     overlay_waiting_bind = true;
                 } else if (overlay_sel_row == BIND_END_ROW) {
@@ -3360,6 +3444,8 @@ struct UiInputManager {
                     close_overlay();
                 } else if (k == SDLK_F3) {
                     toggle_fps_mode();
+                } else if (k == SDLK_F4) {
+                    toggle_language_mode();
                 } else if (k == SDLK_UP || matches_act(ACT_UP, k)) {
                     overlay_sel_row = (overlay_sel_row - 1 + TOTAL_ROWS) % TOTAL_ROWS;
                 } else if (k == SDLK_DOWN || matches_act(ACT_DOWN, k)) {
@@ -3507,6 +3593,21 @@ struct UiInputManager {
                 draw_ui_text(display_buf, 240, 260, "底部软键栏", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string sstr = show_softkey_bar ? "< 开启 >" : "< 关闭 >";
                 draw_ui_text(display_buf, 240, 260, sstr, 110, ry + 12, show_softkey_bar ? 0xFF88FFAAu : 0xFF98A8C0u);
+            } else if (r == 8) {
+                draw_ui_text(display_buf, 240, 260, "语言/汉化", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                std::string lstr;
+                uint32_t lcol = 0xFF98A8C0u;
+                if (lang_mode == loc::LangMode::Orig) {
+                    lstr = "< 原版语言 (JP/EN) >";
+                    lcol = 0xFF98A8C0u;
+                } else if (g_loc.has_loaded_pack() && g_loc.translated_count() > 0) {
+                    lstr = "< 简体中文 (" + std::to_string(g_loc.translated_count()) + "条) >";
+                    lcol = 0xFF88FFAAu;
+                } else {
+                    lstr = "< 简体中文 (未放字表) >";
+                    lcol = 0xFFFFD874u;
+                }
+                draw_ui_text(display_buf, 240, 260, lstr, 84, ry + 12, lcol);
             } else if (r >= BIND_START_ROW && r < BIND_END_ROW) {
                 int bi = r - BIND_START_ROW;
                 draw_ui_text(display_buf, 240, 260, binds[bi].label_zh, 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
@@ -3566,7 +3667,7 @@ struct UiInputManager {
         } else {
             draw_ui_text(display_buf, 240, 260, "↑↓:换行  ←→:切换/选槽  Enter:确认/改键", 6, 211, 0xFFA4BCE4u);
         }
-        draw_ui_text(display_buf, 240, 260, "↓下滑设置按键 | F3:帧率 F11:全屏 F12:截图", 4, 227, 0xFF849AC0u);
+        draw_ui_text(display_buf, 240, 260, "↓改键 | F3帧率 F4汉化 F11全屏 F12截图", 3, 227, 0xFF849AC0u);
 
         // Text input modal popup (Server URL / Player Nickname)
         if (overlay_text_edit_mode != 0) {
@@ -4222,6 +4323,15 @@ void set_cli_pvp_action(int mode, uint32_t room_id) {
     g_ui.cli_pvp_join_retries = 0;
 }
 
+void set_cli_lang_mode(const std::string& mode) {
+    g_ui.has_cli_lang_override = true;
+    g_ui.cli_lang_mode = UiInputManager::parse_lang_cfg(mode);
+}
+
+void set_cli_translation_path(const std::string& path) {
+    g_ui.cli_translation_path = path;
+}
+
 void set_cli_pvp_bo3(bool v) {
     g_ui.has_cli_pvp_bo3 = true;
     g_ui.cli_pvp_bo3 = v;
@@ -4440,6 +4550,7 @@ void DojaRuntime::set_config_path(const std::string& path) {
 
 bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, const std::string& /*jam_path*/, int scale, const std::string& window_title) {
     std::string base_dir = get_exe_base_dir();
+    g_ui.exe_base_dir = base_dir;
     jar_path_ = resolve_runtime_path(jar_path, base_dir);
     sp_path_ = resolve_runtime_path(sp_path, base_dir);
     sav_path_ = g_ui.custom_sav_path.empty() ? (sp_path_ + ".sav") : g_ui.custom_sav_path;
@@ -4482,6 +4593,7 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
 
     load_sav_overlay();
     g_ui.load_config();
+    g_ui.discover_and_load_translation();
 #ifdef __linux__
     prctl(PR_SET_PDEATHSIG, SIGHUP);
 #endif
@@ -4700,13 +4812,20 @@ Ref DojaRuntime::alloc_multi_int_array3(int32_t dim1, int32_t dim2, int32_t dim3
     return outer;
 }
 
-Ref DojaRuntime::alloc_string(const std::string& utf8) {
+Ref DojaRuntime::alloc_raw_string(const std::string& utf8) {
     HeapObject obj{};
     obj.kind = ObjKind::String;
     obj.str = utf8;
     Ref r = static_cast<Ref>(heap_.size());
     heap_.push_back(std::move(obj));
     return r;
+}
+
+Ref DojaRuntime::alloc_string(const std::string& utf8) {
+    if (g_loc.is_enabled()) {
+        return alloc_raw_string(g_loc.translate_class_string(utf8));
+    }
+    return alloc_raw_string(utf8);
 }
 
 int32_t DojaRuntime::array_length(Ref r) {
@@ -4929,6 +5048,10 @@ void DojaRuntime::poll_events() {
                     g_interp.reset();
                     g_ui.save_config();
                     g_ui.show_toast(g_ui.high_fps_mode ? "帧率模式: 60 FPS (丝滑插值)" : "帧率模式: 15 FPS (原版帧率)");
+                    continue;
+                }
+                if (sym == SDLK_F4) {
+                    g_ui.toggle_language_mode();
                     continue;
                 }
                 if (sym == SDLK_F11 || (sym == SDLK_RETURN && (ev.key.keysym.mod & KMOD_ALT))) {
@@ -5267,7 +5390,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             return Slot(0);
         }
         if (m == "toString") {
-            return Slot(alloc_string(get(args[0].r).aux_i32 ? "true" : "false"));
+            return Slot(alloc_raw_string(get(args[0].r).aux_i32 ? "true" : "false"));
         }
     }
     if (c == "java/io/PrintStream" && m == "println") {
@@ -5281,17 +5404,23 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
     // 2. java.lang.String & java.lang.StringBuffer
     // ------------------------------------------------------------------------
     if (c == "java/lang/String") {
+        auto decode_str_bytes = [&](const uint8_t* ptr, size_t len) -> std::string {
+            if (g_loc.has_loaded_pack()) {
+                return g_loc.decode_bytes_to_utf8(ptr, len, cp932_to_utf8);
+            }
+            return cp932_to_utf8(ptr, len);
+        };
         if (m == "<init>") {
             HeapObject& s_obj = get(args[0].r);
             s_obj.kind = ObjKind::String;
             HeapObject& b_arr = get(args[1].r);
             if (d == "([B)V") {
-                s_obj.str = cp932_to_utf8(b_arr.bytes.data(), b_arr.bytes.size());
+                s_obj.str = decode_str_bytes(b_arr.bytes.data(), b_arr.bytes.size());
             } else if (d == "([BII)V") {
                 int off = std::max(0, args[2].i);
                 int len = std::max(0, args[3].i);
                 if (static_cast<size_t>(off + len) <= b_arr.bytes.size()) {
-                    s_obj.str = cp932_to_utf8(b_arr.bytes.data() + off, static_cast<size_t>(len));
+                    s_obj.str = decode_str_bytes(b_arr.bytes.data() + off, static_cast<size_t>(len));
                 }
             }
             return Slot(0);
@@ -5310,10 +5439,10 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             auto cps = utf8_to_codepoints(s);
             int b = std::max(0, args[1].i);
             int e = std::min(static_cast<int>(cps.size()), args[2].i);
-            return Slot(alloc_string(codepoints_to_utf8(cps, b, e)));
+            return Slot(alloc_raw_string(codepoints_to_utf8(cps, b, e)));
         }
         if (m == "getBytes") {
-            auto bytes = utf8_to_cp932(s);
+            auto bytes = g_loc.is_enabled() ? g_loc.encode_text_to_bytes(s) : utf8_to_cp932(s);
             Ref barr = alloc_byte_array(static_cast<int32_t>(bytes.size()));
             get(barr).bytes = std::move(bytes);
             return Slot(barr);
@@ -5359,7 +5488,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             return Slot(args[0].r);
         }
         if (m == "toString") {
-            return Slot(alloc_string(sb.str));
+            return Slot(alloc_raw_string(sb.str));
         }
     }
 
@@ -5425,6 +5554,13 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             } else if (url.rfind("resource:///", 0) == 0) {
                 st_obj.stream->buffer = read_jar_Bytes(url.substr(12));
             }
+            if (g_loc.is_enabled() && st_obj.stream->buffer.size() >= 4 &&
+                std::memcmp(st_obj.stream->buffer.data(), "PK\x03\x04", 4) != 0) {
+                uint64_t h = loc::fnv1a_64(st_obj.stream->buffer.data(), st_obj.stream->buffer.size());
+                if (const auto* ov = g_loc.find_stream_overlay(h)) {
+                    st_obj.stream->buffer = *ov;
+                }
+            }
             Ref r = static_cast<Ref>(heap_.size());
             heap_.push_back(std::move(st_obj));
             return Slot(r);
@@ -5485,6 +5621,12 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
                     entry,
                     st_obj.stream->buffer
                 );
+            }
+            if (g_loc.is_enabled() && !st_obj.stream->buffer.empty()) {
+                uint64_t h = loc::fnv1a_64(st_obj.stream->buffer.data(), st_obj.stream->buffer.size());
+                if (const auto* ov = g_loc.find_stream_overlay(h)) {
+                    st_obj.stream->buffer = *ov;
+                }
             }
             Ref r = static_cast<Ref>(heap_.size());
             heap_.push_back(std::move(st_obj));
@@ -5588,14 +5730,14 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             return Slot(0);
         }
         if (m == "getCurrentApp") return Slot(current_app_ref_);
-        if (m == "getSourceURL") return Slot(alloc_string("http://localhost/"));
+        if (m == "getSourceURL") return Slot(alloc_raw_string("http://localhost/"));
         if (m == "getArgs") {
             std::string ver = "10000";
             if (sp_header_offset_ + 410624 + 5 <= sp_data_.size()) {
                 ver.assign(reinterpret_cast<const char*>(sp_data_.data() + sp_header_offset_ + 410624), 5);
             }
             Ref arr = alloc_ref_array(1);
-            get(arr).fields_i32[0] = alloc_string(ver);
+            get(arr).fields_i32[0] = alloc_raw_string(ver);
             return Slot(arr);
         }
         static int s_browser_launch_frame = -999;
@@ -6006,7 +6148,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             std::string key = (args[1].r > 0) ? get(args[1].r).str : "";
             std::string val = st.resp.get_header(key);
             if (val.empty()) return Slot(Ref(0));
-            return Slot(alloc_string(val));
+            return Slot(alloc_raw_string(val));
         }
         if (m == "openInputStream") {
             ensure_connected();
@@ -6027,7 +6169,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
 
     if (c == "com/nttdocomo/net/URLEncoder" && m == "encode") {
         if (args[0].r <= 0) return Slot(Ref(0));
-        return Slot(alloc_string(net::url_encode(get(args[0].r).str)));
+        return Slot(alloc_raw_string(net::url_encode(get(args[0].r).str)));
     }
 
     return Slot(0);

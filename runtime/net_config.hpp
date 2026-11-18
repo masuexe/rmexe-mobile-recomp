@@ -19,4 +19,8 @@ void set_cli_fps_override(int fps);
 // Trigger automatic PvP room creation (mode=1) or join (mode=2) once game boots
 void set_cli_pvp_action(int mode, uint32_t room_id);
 
+// Configure localization overlay language ("auto", "zh", "orig") and/or explicit JSON file path
+void set_cli_lang_mode(const std::string& mode);
+void set_cli_translation_path(const std::string& path);
+
 } // namespace rmexe
