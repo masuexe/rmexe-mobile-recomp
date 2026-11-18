@@ -212,6 +212,7 @@ struct TfSavedAction {
     int32_t key_cnt = 0;
     int32_t ani_id = 0;
     int32_t ani_cnt = 0;
+    int32_t joutai = 0;
     int32_t was_hit_in_tf = 0;
 };
 
@@ -1388,6 +1389,9 @@ static void init_pvp_battle_arena(DojaRuntime& rt, Ref cp) {
     ensure_board_orient(rt, g_pvp_eng.local_idx);
     load_side(rt, g_pvp_eng.local_idx);
     sync_panel_occupancy_and_proxy(rt, g_pvp_eng.local_idx);
+
+    // Start Navi / Boss Battle BGM once when entering the PvP arena
+    fn_app_CpCanvas_Audio___II__V(rt, 1, 2);
 }
 
 // ============================================================================
@@ -2104,7 +2108,6 @@ static void enter_round_banner_or_trance(DojaRuntime& rt, Ref cp) {
         // (0, 0): skip TRANCE_CUTSCENE -> ROUND_BANNER (15 ticks)
         g_pvp_eng.phase = Phase::ROUND_BANNER;
         g_pvp_eng.banner_ticks = 0;
-        if (cp > 0) fn_app_CpCanvas_Audio___II__V(rt, 1, 4); // Battle BGM
     } else if (!any_activate && any_revert) {
         // Revert-only: 20 ticks (t = 100..119)
         g_pvp_eng.phase = Phase::TRANCE_CUTSCENE;
@@ -2193,7 +2196,6 @@ static void step_and_render_trance_cutscene(DojaRuntime& rt, Ref cp) {
         g_pvp_eng.phase = Phase::ROUND_BANNER;
         g_pvp_eng.banner_ticks = 0;
         refresh_arena_imgmap_backdrop(rt, cp, false);
-        if (cp > 0) fn_app_CpCanvas_Audio___II__V(rt, 1, 4); // Battle BGM
         rt.reset_interpolator();
     }
 }
@@ -2201,9 +2203,11 @@ static void step_and_render_trance_cutscene(DojaRuntime& rt, Ref cp) {
 // ============================================================================
 // Elemental Traps, Time-Freeze Cut-In Stack, & Chip Detection Helpers
 // ============================================================================
-static bool is_dimming_tip_id(DojaRuntime& rt, int32_t tip_id, int32_t& out_stop_time, int32_t& out_tip_class) {
+static bool is_dimming_tip_id(DojaRuntime& rt, int32_t tip_id, int32_t& out_stop_time,
+                              int32_t& out_tip_class, bool* out_is_navi_summon = nullptr) {
     out_stop_time = 0;
     out_tip_class = 0;
+    if (out_is_navi_summon) *out_is_navi_summon = false;
     int32_t tip_len = get_tip_array_len(rt);
     if (tip_id <= 0 || tip_id >= tip_len || sf_app_CpCanvas_tip <= 0) return false;
     Ref t_obj = rt.iaload(sf_app_CpCanvas_tip, tip_id);
@@ -2214,6 +2218,12 @@ static bool is_dimming_tip_id(DojaRuntime& rt, int32_t tip_id, int32_t& out_stop
         Ref w_obj = rt.iaload(sf_app_CpCanvas_waza, waza_id);
         if (w_obj > 0) {
             out_stop_time = rt.field_i32(w_obj, kFld_Waza_stop_time);
+            if (out_is_navi_summon) {
+                int32_t wkou = rt.field_i32(w_obj, kFld_Waza_waza_kou);
+                int32_t kou2 = (sf_app_CpCanvas_waza_kouka > 0 && wkou >= 0)
+                    ? safe_iaload(rt, sf_app_CpCanvas_waza_kouka, wkou * 3 + 2) : 0;
+                *out_is_navi_summon = ((kou2 & 511) == 90);
+            }
         }
     }
     return out_stop_time > 0;
@@ -2434,6 +2444,7 @@ static void save_tf_interrupted_action(int s_idx) {
     sv.key_cnt = sc.key_cnt;
     sv.ani_id = sc.ani_id;
     sv.ani_cnt = sc.ani_cnt;
+    sv.joutai = sc.joutai;
     sv.was_hit_in_tf = 0;
 }
 
@@ -2451,6 +2462,11 @@ static void restore_tf_interrupted_actions() {
             sc.bas_no = -1;
             sc.key_cnt = 0;
             sc.buster_charge_glow = false;
+            if (sc.ani_id == 6 || sc.joutai == 6) {
+                sc.ani_id = 0;
+                sc.ani_cnt = 0;
+                if (sc.mahi_id < 0) sc.joutai = 0;
+            }
         } else {
             sc.waza_flg = sv.waza_flg;
             sc.waza_wait = sv.waza_wait;
@@ -2459,6 +2475,12 @@ static void restore_tf_interrupted_actions() {
             sc.move_cnt = sv.move_cnt;
             sc.ani_id = sv.ani_id;
             sc.ani_cnt = sv.ani_cnt;
+            if (sc.mahi_id < 0) sc.joutai = sv.joutai;
+        }
+        if (sc.ani_id == 6 || sc.joutai == 6) {
+            sc.ani_id = 0;
+            sc.ani_cnt = 0;
+            if (sc.mahi_id < 0) sc.joutai = 0;
         }
         // Preserve post-TF tmp_muteki_cnt
         sc.muteki_cnt = std::max<int32_t>(sc.muteki_cnt, sc.tmp_muteki_cnt);
@@ -2485,6 +2507,7 @@ static void start_root_time_freeze(int s_idx, const TfSlot& slot) {
         core.tf_root_pre_muteki[i] = core.sides[i].muteki_cnt;
         core.tf_root_pre_hit_cnt[i] = core.sides[i].hit_cnt;
         core.sides[i].tmp_muteki_cnt = core.sides[i].muteki_cnt;
+        core.sides[i].opp_nondim_ticks = 0;
     }
 }
 
@@ -2494,8 +2517,10 @@ static void start_root_time_freeze(int s_idx, const TfSlot& slot) {
 static void record_nondim_hud_popup(DojaRuntime& rt, SideContext& sc, Ref t_obj, int32_t plus_pow) {
     if (t_obj <= 0) return;
     sc.opp_nondim_tip_id = rt.field_i32(t_obj, kFld_Tip_tip_id);
-    sc.opp_nondim_pow = rt.field_i32(t_obj, kFld_Tip_pow);
-    sc.opp_nondim_plus = plus_pow;
+    int32_t syu = rt.field_i32(t_obj, kFld_Tip_syu);
+    int32_t base_pow = rt.field_i32(t_obj, kFld_Tip_pow);
+    sc.opp_nondim_pow = (syu < 3 && base_pow > 0) ? base_pow : -1;
+    sc.opp_nondim_plus = (sc.opp_nondim_pow > 0) ? std::max<int32_t>(0, plus_pow) : 0;
     sc.opp_nondim_ticks = kOppNonDimChipHudTicks;
 }
 
@@ -2518,12 +2543,14 @@ static bool try_push_counter_dim(DojaRuntime& rt, int s_idx, int interrupted_own
     SideContext& sc = core.sides[s_idx];
     int32_t key2 = mask & (~sc.last_raw_input);
     bool b_press = require_edge ? ((key2 & kKeySelectBit) != 0) : ((mask & kKeySelectBit) != 0);
-    if (!b_press || sc.tip_no < 0 || sc.tip_no > 4 || sc.hp <= 0) return false;
+    if (!b_press || sc.tip_no < 0 || sc.tip_no > 4 || sc.hp <= 0 ||
+        sc.mahi_id >= 0) return false;
     int32_t tid = sc.rock_tip_ids[sc.tip_no];
     int32_t stop_t = 0, t_cls = 0;
+    bool is_navi_summon = false;
     ensure_board_orient(rt, s_idx);
     load_side(rt, s_idx);
-    if (!is_dimming_tip_id(rt, tid, stop_t, t_cls)) return false;
+    if (!is_dimming_tip_id(rt, tid, stop_t, t_cls, &is_navi_summon)) return false;
 
     int32_t plus_pow = safe_iaload(rt, sf_app_Rock_pow, 0);
     consume_current_dim_chip(rt);
@@ -2538,7 +2565,7 @@ static bool try_push_counter_dim(DojaRuntime& rt, int s_idx, int interrupted_own
     core.tf_stack[1].tip_kind = 0;
     core.tf_stack[1].stop_time = stop_t + kTfActionExtraTicks;
     core.tf_stack[1].captured_plus_pow = plus_pow;
-    core.tf_stack[1].flags = (t_cls == 2) ? TFF_IS_NAVI : TFF_NONE;
+    core.tf_stack[1].flags = is_navi_summon ? TFF_IS_NAVI : TFF_NONE;
     core.tf_stack[1].timer = 0;
     core.tf_cutin_interrupted_side = static_cast<int8_t>(interrupted_owner);
     core.tf_cutin_fx_seq = 0;
@@ -2553,7 +2580,8 @@ static bool try_trigger_dim_chip(DojaRuntime& rt, int s_idx, int32_t mask) {
     const SideContext& opp = core.sides[1 - s_idx];
     int32_t key2 = mask & (~sc.last_raw_input);
     if ((key2 & kKeySelectBit) == 0 || sc.tip_no < 0 || sc.tip_no > 4 ||
-        sc.waza_flg >= 0 || sc.joutai != 0 || sc.mahi_id >= 0) {
+        sc.tmp_ata >= 0 || sc.waza_flg >= 0 || sc.joutai != 0 || sc.mahi_id >= 0 ||
+        sc.non_cnt > 0 || sc.non_cnt2 > 0) {
         return false;
     }
 
@@ -2566,7 +2594,8 @@ static bool try_trigger_dim_chip(DojaRuntime& rt, int s_idx, int32_t mask) {
     if (tid <= 0) return false;
 
     int32_t stop_t = 0, t_cls = 0;
-    if (!is_dimming_tip_id(rt, tid, stop_t, t_cls)) return false;
+    bool is_navi_summon = false;
+    if (!is_dimming_tip_id(rt, tid, stop_t, t_cls, &is_navi_summon)) return false;
 
     if (core.tf_state == TF_IDLE) {
         TfSlot tf_new;
@@ -2575,7 +2604,7 @@ static bool try_trigger_dim_chip(DojaRuntime& rt, int s_idx, int32_t mask) {
         tf_new.tip_kind = 0;
         tf_new.stop_time = stop_t + kTfActionExtraTicks;
         tf_new.captured_plus_pow = safe_iaload(rt, sf_app_Rock_pow, 0);
-        tf_new.flags = (t_cls == 2) ? TFF_IS_NAVI : TFF_NONE;
+        tf_new.flags = is_navi_summon ? TFF_IS_NAVI : TFF_NONE;
         consume_current_dim_chip(rt);
         save_side(rt, s_idx);
         start_root_time_freeze(s_idx, tf_new);
@@ -2761,8 +2790,18 @@ static void step_side_move_phase(DojaRuntime& rt, int s_idx) {
     bool prev_oki_on[kMaxOkimono] = {};
     snapshot_oki_on(rt, prev_oki_on);
 
+    int32_t pre_move_tip_no = sf_app_Rock_tip_no;
+    Ref pre_move_tip_obj = 0;
+    if (sf_app_Rock_tmp_ata >= 0 && pre_move_tip_no >= 0 && pre_move_tip_no <= 4 && sf_app_CpCanvas_rock > 0) {
+        Ref r_tip_arr = rt.field_i32(sf_app_CpCanvas_rock, kFld_Rock_tip);
+        pre_move_tip_obj = safe_iaload(rt, r_tip_arr, pre_move_tip_no);
+    }
     if (sf_app_CpCanvas_rock > 0) {
         fn_app_Rock_Move_____V(rt, sf_app_CpCanvas_rock);
+    }
+    if (pre_move_tip_obj > 0 && sf_app_Rock_tip_no < pre_move_tip_no) {
+        record_nondim_hud_popup(rt, g_pvp_eng.core.sides[s_idx], pre_move_tip_obj,
+                                safe_iaload(rt, sf_app_Rock_pow, 3));
     }
 
     if (sf_app_CpCanvas_ata > 0) {
@@ -3005,6 +3044,23 @@ static void step_tf_stack_tick(DojaRuntime& rt, int32_t p0_mask, int32_t p1_mask
                     int32_t sv_col_pow = sf_app_CpCanvas_col_pow;
                     int32_t sv_pow0 = safe_iaload(rt, sf_app_Rock_pow, 0);
                     Ref sv_tip0 = rt.iaload(r_tip_arr, 0);
+                    int32_t sv_joutai = sf_app_Rock_joutai;
+                    int32_t sv_non_cnt = sf_app_Rock_non_cnt;
+                    int32_t sv_non_cnt2 = sf_app_Rock_non_cnt2;
+                    int32_t sv_move_flg = sf_app_Rock_move_flg;
+                    int32_t sv_ani_id = sf_app_Rock_ani_id;
+                    int32_t sv_ani_cnt = sf_app_Rock_ani_cnt;
+                    int32_t sv_ani_wait = sf_app_Rock_ani_wait_cnt;
+                    int32_t sv_t_ani = rt.field_i32(rock, kFld_Rock_t_ani_cnt);
+                    const bool preserve_flinch =
+                        (core.tf_state == TF_ROOT_RESUME && sv_joutai != 0 && (top.flags & TFF_IS_NAVI) == 0);
+                    // Clear transient motion/recovery/flinch guards so an already-committed TF chip
+                    // (e.g. AreaGrab/PanelGrab triggered mid-step or after a counter-dim hit) is never
+                    // swallowed by Rock.Action's move_flg/non_cnt/joutai early-returns.
+                    sf_app_Rock_joutai = 0;
+                    sf_app_Rock_non_cnt = 0;
+                    sf_app_Rock_non_cnt2 = 0;
+                    sf_app_Rock_move_flg = 0;
                     sf_app_Rock_tip_no = 0;
                     sf_app_Rock_next_tip = 0;
                     safe_iastore(rt, sf_app_Rock_pow, 0, top.captured_plus_pow);
@@ -3015,15 +3071,41 @@ static void step_tf_stack_tick(DojaRuntime& rt, int32_t p0_mask, int32_t p1_mask
                     sf_app_Rock_next_tip = sv_next_tip;
                     sf_app_CpCanvas_col_pow = sv_col_pow;
                     safe_iastore(rt, sf_app_Rock_pow, 0, sv_pow0);
+                    if (sf_app_CpCanvas_rock > 0) {
+                        if (sf_app_Rock_waza_flg >= 0) {
+                            sf_app_Rock_waza_wait = 0;
+                            sf_app_Rock_ani_wait_cnt = 0;
+                        }
+                        fn_app_Rock_Move_____V(rt, sf_app_CpCanvas_rock);
+                    }
+                    sf_app_Rock_non_cnt = std::max<int32_t>(sf_app_Rock_non_cnt, sv_non_cnt);
+                    sf_app_Rock_non_cnt2 = std::max<int32_t>(sf_app_Rock_non_cnt2, sv_non_cnt2);
+                    sf_app_Rock_move_flg = sv_move_flg;
+                    if (preserve_flinch) {
+                        // Keep the hit-flinch state/pose/animation on non-Navi chips so knockback isn't overwritten.
+                        sf_app_Rock_joutai = sv_joutai;
+                        sf_app_Rock_ani_id = sv_ani_id;
+                        sf_app_Rock_ani_cnt = sv_ani_cnt;
+                        sf_app_Rock_ani_wait_cnt = sv_ani_wait;
+                        rt.field_i32(rock, kFld_Rock_t_ani_cnt) = sv_t_ani;
+                    }
                 } else {
                     fn_app_Rock_Action___I__V(rt, rock, 1);
-                }
-                if (sf_app_CpCanvas_rock > 0) {
-                    if (sf_app_Rock_waza_flg >= 0) {
-                        sf_app_Rock_waza_wait = 0;
-                        sf_app_Rock_ani_wait_cnt = 0;
+                    if (sf_app_CpCanvas_rock > 0) {
+                        if (sf_app_Rock_waza_flg >= 0) {
+                            sf_app_Rock_waza_wait = 0;
+                            sf_app_Rock_ani_wait_cnt = 0;
+                        }
+                        fn_app_Rock_Move_____V(rt, sf_app_CpCanvas_rock);
                     }
-                    fn_app_Rock_Move_____V(rt, sf_app_CpCanvas_rock);
+                }
+                if (core.tf_saved[owner].valid) {
+                    core.tf_saved[owner].waza_flg = -1;
+                    core.tf_saved[owner].waza_wait = 0;
+                    core.tf_saved[owner].tmp_ata = -1;
+                    core.tf_saved[owner].ani_id = 0;
+                    core.tf_saved[owner].ani_cnt = 0;
+                    core.tf_saved[owner].joutai = 0;
                 }
             } else if (top.tip_kind == 2) {
                 execute_elemental_trap_hit(rt, owner, top.tip_id, top.captured_plus_pow);
@@ -3108,6 +3190,34 @@ static void step_tf_stack_tick(DojaRuntime& rt, int32_t p0_mask, int32_t p1_mask
         if (core.tf_depth >= 2) {
             // Pop Counter-Dimming chip, clean up its TF-only attacks, and resume previous activator
             clear_side_tf_attacks(rt, owner);
+            // Promote counter-dim Invis (tmp_muteki_cnt -> muteki_cnt) so it protects against the resumed root attack
+            core.sides[owner].muteki_cnt = std::max<int32_t>(
+                core.sides[owner].muteki_cnt, core.sides[owner].tmp_muteki_cnt);
+            // Restore counter-dimmer's Rock pose immediately (e.g. Navi chip summon) so MegaMan
+            // reappears right after the counter attack finishes rather than waiting for TF exit.
+            if (top.tip_kind == 0) {
+                core.sides[owner].ani_id = 0;
+                core.sides[owner].ani_cnt = 0;
+                if (core.sides[owner].mahi_id < 0) {
+                    core.sides[owner].joutai = 0;
+                }
+                core.sides[owner].waza_flg = -1;
+                core.sides[owner].waza_wait = 0;
+                core.sides[owner].tmp_ata = -1;
+                if (core.tf_saved[owner].valid) {
+                    core.tf_saved[owner].waza_flg = -1;
+                    core.tf_saved[owner].waza_wait = 0;
+                    core.tf_saved[owner].tmp_ata = -1;
+                    core.tf_saved[owner].ani_id = 0;
+                    core.tf_saved[owner].ani_cnt = 0;
+                    core.tf_saved[owner].joutai = 0;
+                    core.tf_saved[owner].was_hit_in_tf = 0;
+                }
+            } else if (core.sides[owner].ani_id == 6 || core.sides[owner].joutai == 6) {
+                core.sides[owner].ani_id = 0;
+                core.sides[owner].ani_cnt = 0;
+                if (core.sides[owner].mahi_id < 0) core.sides[owner].joutai = 0;
+            }
             core.tf_depth = static_cast<int8_t>(core.tf_depth - 1);
             core.tf_cutin_fx_seq = -1;
             core.tf_state = TF_ROOT_RESUME;
@@ -3124,8 +3234,8 @@ static void step_tf_stack_tick(DojaRuntime& rt, int32_t p0_mask, int32_t p1_mask
             sf_app_CpCanvas_stop_cnt = 0;
             sf_app_CpCanvas_stop_time = 0;
             sf_app_CpCanvas_stop_name = 0;
-            reset_combat_tf_state(core);
             restore_tf_interrupted_actions();
+            reset_combat_tf_state(core);
         }
     }
 }
@@ -3229,25 +3339,31 @@ static void step_pvp_combat_tick(DojaRuntime& rt, Ref cp, int32_t p0_mask, int32
                     }
 
                     // Shared BtPanel timers & AreaSteal ownership check + Okimono.Move & Okimono.Draw(1)
-                    ensure_board_orient(rt, 0);
-                    load_side(rt, 0);
-                    sync_panel_occupancy_and_proxy(rt, 0);
-
+                    // Step right-half panels (x = 5..3) in each player's perspective so both halves execute
+                    // BtPanel.JinCh's clean x >= 3 branch (avoiding Capcom's x < 3 on_chara == 0 bug!)
                     if (sf_app_CpCanvas_panel > 0 && rt.array_length(sf_app_CpCanvas_panel) >= 3) {
-                        for (int32_t y = 0; y < 3; ++y) {
-                            Ref row = rt.iaload(sf_app_CpCanvas_panel, y);
-                            if (row <= 0 || rt.array_length(row) < 6) continue;
-                            for (int32_t x = 0; x < 6; ++x) {
-                                Ref p = rt.iaload(row, x);
-                                if (p > 0) fn_app_BtPanel_Move_____V(rt, p);
+                        for (int oi = 0; oi < 2; ++oi) {
+                            int s = (oi == 0) ? first : second;
+                            g_pvp_eng.active_side = s;
+                            ensure_board_orient(rt, s);
+                            load_side(rt, s);
+                            sync_panel_occupancy_and_proxy(rt, s);
+                            for (int32_t x = 5; x >= 3; --x) {
+                                for (int32_t y = 0; y < 3; ++y) {
+                                    Ref row = rt.iaload(sf_app_CpCanvas_panel, y);
+                                    Ref p = (row > 0 && rt.array_length(row) >= 6) ? rt.iaload(row, x) : 0;
+                                    if (p > 0) {
+                                        if (rt.field_i32(p, kFld_BtPanel_aria_cnt) <= 0 &&
+                                            rt.field_i32(p, kFld_BtPanel_jin) != (x / 3)) {
+                                            rt.field_i32(p, kFld_BtPanel_aria_cnt) = 46;
+                                        }
+                                        ScopedRenderMute m(rt, true);
+                                        ScopedTempHeapArena arena(rt);
+                                        fn_app_BtPanel_Move_____V(rt, p);
+                                    }
+                                }
                             }
-                        }
-                        for (int32_t x = 5; x >= 3; --x) {
-                            for (int32_t y = 0; y < 3; ++y) {
-                                Ref row = rt.iaload(sf_app_CpCanvas_panel, y);
-                                Ref p = (row > 0) ? rt.iaload(row, x) : 0;
-                                if (p > 0) fn_app_BtPanel_JinCh_____Z(rt, p);
-                            }
+                            save_side(rt, s);
                         }
                     }
 
@@ -3404,17 +3520,24 @@ static void draw_mirrored_opponent_attacks(DojaRuntime& rt, int opp_idx, int32_t
                 if (on_val < layer_min) continue;
             }
             if (target_row >= 0 && rt.field_i32(a, kFld_Attack_pos_y) != target_row) continue;
-            int32_t px = rt.field_i32(a, kFld_Attack_pos_x);
-            int32_t flp = rt.field_i32(a, kFld_Attack_flp);
-            int32_t kxs = rt.field_i32(a, kFld_Attack_kidou_x_sp);
-            // LoN Attack.Draw already multiplies pos_dx by (1 - 2 * flp): do NOT negate pos_dx!
-            rt.field_i32(a, kFld_Attack_pos_x) = 5 - px;
-            rt.field_i32(a, kFld_Attack_flp) = (flp == 0) ? 1 : 0;
-            rt.field_i32(a, kFld_Attack_kidou_x_sp) = -kxs;
-            draw_attack_readonly(rt, a, on_val);
-            rt.field_i32(a, kFld_Attack_pos_x) = px;
-            rt.field_i32(a, kFld_Attack_flp) = flp;
-            rt.field_i32(a, kFld_Attack_kidou_x_sp) = kxs;
+            Ref p_arr = rt.field_i32(a, kFld_Attack_param);
+            int32_t p8 = (p_arr > 0 && rt.array_length(p_arr) > 8) ? rt.iaload(p_arr, 8) : -1;
+            const bool is_hud_gauge_arrow = (p8 == 108 || p8 == 109);
+            if (is_hud_gauge_arrow) {
+                draw_attack_readonly(rt, a, on_val);
+            } else {
+                int32_t px = rt.field_i32(a, kFld_Attack_pos_x);
+                int32_t flp = rt.field_i32(a, kFld_Attack_flp);
+                int32_t kxs = rt.field_i32(a, kFld_Attack_kidou_x_sp);
+                // LoN Attack.Draw already multiplies pos_dx by (1 - 2 * flp): do NOT negate pos_dx!
+                rt.field_i32(a, kFld_Attack_pos_x) = 5 - px;
+                rt.field_i32(a, kFld_Attack_flp) = (flp == 0) ? 1 : 0;
+                rt.field_i32(a, kFld_Attack_kidou_x_sp) = -kxs;
+                draw_attack_readonly(rt, a, on_val);
+                rt.field_i32(a, kFld_Attack_pos_x) = px;
+                rt.field_i32(a, kFld_Attack_flp) = flp;
+                rt.field_i32(a, kFld_Attack_kidou_x_sp) = kxs;
+            }
         }
     }
     load_side(rt, loc_idx);
@@ -3431,6 +3554,58 @@ static void draw_opponent_soul_badge_and_trap(DojaRuntime& rt, const SideContext
         fn_app_CpCanvas_strDraw___Ljava_lang_String_II__V(rt, s, 210, 95);
     }
     // Opponent Soul/Trance badge and remaining turns are intentionally hidden on the local screen.
+}
+
+static void draw_opponent_nondim_chip_hud(DojaRuntime& rt, const SideContext& opp_sc) {
+    if (sf_app_CpCanvas_tip <= 0 || opp_sc.opp_nondim_tip_id <= 0 ||
+        opp_sc.opp_nondim_tip_id >= rt.array_length(sf_app_CpCanvas_tip)) {
+        return;
+    }
+    Ref tip_obj = rt.iaload(sf_app_CpCanvas_tip, opp_sc.opp_nondim_tip_id);
+    if (tip_obj <= 0) return;
+    Ref name_ref = rt.field_i32(tip_obj, kFld_Tip_name);
+    if (name_ref <= 0) return;
+
+    auto measure_str = [&](Ref sref) -> int32_t {
+        if (sref <= 0 || sf_app_CpCanvas_f <= 0) return 0;
+        Slot w_args[2];
+        w_args[0].r = sf_app_CpCanvas_f;
+        w_args[1].r = sref;
+        return rt.invoke_external("com/nttdocomo/ui/Font", "stringWidth", "(Ljava/lang/String;)I", w_args, 2).i;
+    };
+
+    int32_t name_w = measure_str(name_ref);
+    Ref dmg_ref = 0;
+    int32_t dmg_w = 0;
+    if (opp_sc.opp_nondim_pow > 0) {
+        std::string dmg_str = " " + std::to_string(opp_sc.opp_nondim_pow);
+        if (opp_sc.opp_nondim_plus > 0) {
+            dmg_str += "+" + std::to_string(opp_sc.opp_nondim_plus);
+        }
+        dmg_ref = rt.alloc_string(dmg_str);
+        dmg_w = measure_str(dmg_ref);
+    }
+
+    int32_t total_w = name_w + dmg_w;
+    int32_t raw_tx = 120 + (120 - total_w) / 2;
+    int32_t max_tx = std::max<int32_t>(0, 238 - total_w);
+    int32_t min_tx = std::min<int32_t>(120, max_tx);
+    int32_t tx = std::clamp<int32_t>(raw_tx, min_tx, max_tx);
+    int32_t ty = 76;
+
+    if (sf_app_CpCanvas_g > 0) {
+        Slot c_args[2];
+        c_args[0].r = sf_app_CpCanvas_g;
+        c_args[1].i = static_cast<int32_t>(0xFFFFFFFFu);
+        rt.invoke_external("com/nttdocomo/ui/Graphics", "setColor", "(I)V", c_args, 2);
+        fn_app_CpCanvas_strDraw___Ljava_lang_String_II__V(rt, name_ref, tx, ty);
+
+        if (dmg_ref > 0) {
+            c_args[1].i = static_cast<int32_t>(0xFFFFFF00u);
+            rt.invoke_external("com/nttdocomo/ui/Graphics", "setColor", "(I)V", c_args, 2);
+            fn_app_CpCanvas_strDraw___Ljava_lang_String_II__V(rt, dmg_ref, tx + name_w, ty);
+        }
+    }
 }
 
 static void draw_tf_cutin_fx_sprite(DojaRuntime& rt, int interrupted_ch, int seq_idx) {
@@ -3707,6 +3882,10 @@ static void render_pvp_combat_frame(DojaRuntime& rt, Ref cp) {
         }
     }
     draw_opponent_soul_badge_and_trap(rt, opp_sc, loc_sc);
+    if (g_pvp_eng.phase == Phase::COMBAT && sf_app_CpCanvas_stop_cnt == 0 &&
+        opp_sc.opp_nondim_ticks > 0 && opp_sc.opp_nondim_tip_id > 0) {
+        draw_opponent_nondim_chip_hud(rt, opp_sc);
+    }
 
     // 9. Time-Freeze chip name announcement & Counter Cut-In "!!" banner
     if ((g_pvp_eng.core.tf_state == TF_ROOT_INTRO || g_pvp_eng.core.tf_state == TF_COUNTER_BANNER ||
@@ -3885,6 +4064,10 @@ static void render_custom_screen_backdrop(DojaRuntime& rt, Ref cp) {
         }
     }
     draw_opponent_soul_badge_and_trap(rt, opp_sc, loc_sc);
+    if (g_pvp_eng.phase == Phase::COMBAT && sf_app_CpCanvas_stop_cnt == 0 &&
+        opp_sc.opp_nondim_ticks > 0 && opp_sc.opp_nondim_tip_id > 0) {
+        draw_opponent_nondim_chip_hud(rt, opp_sc);
+    }
     if (sf_app_CpCanvas_g > 0) {
         Slot c_args[2];
         c_args[0].r = sf_app_CpCanvas_g;
@@ -6215,6 +6398,312 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                          " pan=" + std::to_string(ctr_pan_eq));
             }
         }
+
+        // K4: AreaGrab / PanelGrab natural panel-revert symmetry & partial-steal recovery
+        {
+            auto check_steal_revert = [&](const char* label, int actor, int16_t tid,
+                                          int opp_x, int opp_y, int act_x, int act_y,
+                                          bool expect_revert) {
+                setup_basic_arena(1000, 1000, 0xCA900u, 0);
+                g_pvp_eng.core.sides[actor].pos_x = act_x; g_pvp_eng.core.sides[actor].tmp_x = act_x;
+                g_pvp_eng.core.sides[actor].pos_y = act_y; g_pvp_eng.core.sides[actor].tmp_y = act_y;
+                g_pvp_eng.core.sides[1 - actor].pos_x = opp_x; g_pvp_eng.core.sides[1 - actor].tmp_x = opp_x;
+                g_pvp_eng.core.sides[1 - actor].pos_y = opp_y; g_pvp_eng.core.sides[1 - actor].tmp_y = opp_y;
+                queue_tips_fifo(actor, {tid});
+                int steal_t = -1, revert_t = -1;
+                const int target_col = (actor == 0) ? 3 : 2;
+                for (int t = 0; t < 550; ++t) {
+                    int32_t p0m = (actor == 0 && t == 0) ? (1 << 20) : 0;
+                    int32_t p1m = (actor == 1 && t == 0) ? (1 << 20) : 0;
+                    step_pvp_combat_tick(rt, cp, p0m, p1m);
+                    auto pan = capture_panels_canonical();
+                    bool any_stolen = false;
+                    for (int y = 0; y < 3; ++y) {
+                        if (pan[y][target_col].jin == actor) any_stolen = true;
+                    }
+                    if (steal_t < 0 && any_stolen) steal_t = t;
+                    if (steal_t >= 0 && revert_t < 0 && !any_stolen) revert_t = t;
+                }
+                if (steal_t < 0 || (expect_revert && revert_t < 0) || (!expect_revert && revert_t >= 0)) {
+                    fail_msg(std::string("SuiteK-RevertSym-") + label,
+                             "steal_t=" + std::to_string(steal_t) +
+                             " revert_t=" + std::to_string(revert_t) +
+                             " expect_revert=" + std::to_string(expect_revert));
+                }
+            };
+            check_steal_revert("P0_AG_def", 0, static_cast<int16_t>(tid_area_grab), 2, 1, 1, 1, true);
+            check_steal_revert("P1_AG_def", 1, static_cast<int16_t>(tid_area_grab), 2, 1, 1, 1, true);
+            check_steal_revert("P0_PG_def", 0, static_cast<int16_t>(tid_panel_grab), 2, 0, 1, 1, true);
+            check_steal_revert("P1_PG_def", 1, static_cast<int16_t>(tid_panel_grab), 2, 0, 1, 1, true);
+            check_steal_revert("P0_AG_att", 0, static_cast<int16_t>(tid_area_grab), 1, 1, 3, 1, false);
+            check_steal_revert("P1_AG_att", 1, static_cast<int16_t>(tid_area_grab), 1, 1, 3, 1, false);
+        }
+
+        // K5: PanelGrab countered by a damaging Navi dimming chip must still execute on TF_ROOT_RESUME
+        {
+            int32_t tid_navi_dim = -1;
+            for (int32_t tid = 2; tid < tip_len; ++tid) {
+                Ref to = safe_iaload(rt, sf_app_CpCanvas_tip, tid);
+                if (to <= 0) continue;
+                int32_t tcls = rt.field_i32(to, kFld_Tip_tip_class);
+                int32_t pow = rt.field_i32(to, kFld_Tip_pow);
+                int32_t wid = rt.field_i32(to, kFld_Tip_waza_id);
+                int32_t stime = 0;
+                if (wid > 0 && sf_app_CpCanvas_waza > 0 && wid < rt.array_length(sf_app_CpCanvas_waza)) {
+                    Ref w_obj = rt.iaload(sf_app_CpCanvas_waza, wid);
+                    if (w_obj > 0) stime = rt.field_i32(w_obj, kFld_Waza_stop_time);
+                }
+                if (tcls == 2 && stime > 0 && pow >= 100) {
+                    // Verify this Navi chip hits P0 at (1, 1) without breaking panels
+                    setup_basic_arena(1000, 1000, 0xCA940u, 0);
+                    queue_tips_fifo(1, {static_cast<int16_t>(tid)});
+                    for (int t = 0; t < 120; ++t) {
+                        step_pvp_combat_tick(rt, cp, 0, (t == 0) ? (1 << 20) : 0);
+                    }
+                    auto pan = capture_panels_canonical();
+                    if (g_pvp_eng.core.sides[0].hp < 1000 && pan[1][3].jou >= 0 && pan[1][3].jin == 1) {
+                        tid_navi_dim = tid;
+                        break;
+                    }
+                }
+            }
+            if (tid_navi_dim > 0) {
+                setup_basic_arena(1000, 1000, 0xCA950u, 0);
+                queue_tips_fifo(0, {static_cast<int16_t>(tid_panel_grab)});
+                queue_tips_fifo(1, {static_cast<int16_t>(tid_navi_dim)});
+                bool saw_resume = false;
+                bool navi_reappeared_on_resume = true;
+                for (int t = 0; t < 160; ++t) {
+                    step_pvp_combat_tick(rt, cp, (t == 0) ? (1 << 20) : 0, (t == 2) ? (1 << 20) : 0);
+                    if (g_pvp_eng.core.tf_state == TF_ROOT_RESUME) {
+                        saw_resume = true;
+                        if (g_pvp_eng.core.sides[1].ani_id != 0) navi_reappeared_on_resume = false;
+                    }
+                }
+                if (!saw_resume || !navi_reappeared_on_resume) {
+                    fail_msg("SuiteK-NaviCounterReappear",
+                             "P1 did not restore idle pose immediately on TF_ROOT_RESUME");
+                }
+                auto pan = capture_panels_canonical();
+                int stolen_cnt = 0;
+                for (int y = 0; y < 3; ++y)
+                    for (int x = 3; x < 6; ++x)
+                        if (pan[y][x].jin == 0) stolen_cnt++;
+                if (stolen_cnt == 0) {
+                    fail_msg("SuiteK-NaviCounterResume",
+                             "PanelGrab swallowed after Navi counter tid=" + std::to_string(tid_navi_dim));
+                }
+            }
+        }
+
+        // K6: AreaGrab / PanelGrab triggered while mid-step (move_flg != 0) must not be swallowed
+        {
+            const int16_t grab_tids[2] = {static_cast<int16_t>(tid_area_grab), static_cast<int16_t>(tid_panel_grab)};
+            const char* grab_names[2] = {"AreaGrab", "PanelGrab"};
+            for (int g = 0; g < 2; ++g) {
+                for (int actor = 0; actor < 2; ++actor) {
+                    setup_basic_arena(1000, 1000, 0xCA980u + static_cast<uint32_t>(g * 10 + actor), 0);
+                    g_pvp_eng.core.sides[0].pos_x = 1; g_pvp_eng.core.sides[0].tmp_x = 1;
+                    g_pvp_eng.core.sides[0].pos_y = 1; g_pvp_eng.core.sides[0].tmp_y = 1;
+                    g_pvp_eng.core.sides[1].pos_x = 1; g_pvp_eng.core.sides[1].tmp_x = 1;
+                    g_pvp_eng.core.sides[1].pos_y = 1; g_pvp_eng.core.sides[1].tmp_y = 1;
+                    queue_tips_fifo(actor, {grab_tids[g]});
+                    for (int t = 0; t < 80; ++t) {
+                        // t=0: D-pad Up starts grid step (move_flg != 0 on t=1); t=1: press Chip mid-step
+                        int32_t m_act = (t == 0) ? (1 << 17) : ((t == 1) ? kKeySelectBit : 0);
+                        step_pvp_combat_tick(rt, cp, (actor == 0) ? m_act : 0, (actor == 1) ? m_act : 0);
+                    }
+                    auto pan = capture_panels_canonical();
+                    int stolen_cnt = 0;
+                    for (int y = 0; y < 3; ++y) {
+                        for (int x = 0; x < 6; ++x) {
+                            bool opp_half = (actor == 0) ? (x >= 3) : (x < 3);
+                            if (opp_half && pan[y][x].jin == actor) stolen_cnt++;
+                        }
+                    }
+                    if (stolen_cnt == 0) {
+                        fail_msg("SuiteK-MidStepGrab",
+                                 std::string(grab_names[g]) + " swallowed mid-step for actor=" + std::to_string(actor));
+                    }
+                }
+            }
+        }
+
+        // K7: Navi / Giga summon chips (p8 == 90) must hide MegaMan (ani_id=6, joutai=6) cleanly
+        // alone and take turns hiding/reappearing in mutual counter-dimming chains
+        {
+            std::vector<int32_t> summon_tids;
+            int32_t raidman_tid = -1;
+            int32_t rraidman_tid = -1;
+            int32_t giga_summon_tid = -1;
+            {
+                setup_basic_arena(1000, 1000, 0xCA9A0u, 0);
+                Ref tmp_a = rt.alloc_object(kClassId_Attack, kNumI32_Attack, kNumI64_Attack);
+                fn_app_Attack__init____I__V(rt, tmp_a, 29);
+                for (int32_t tid = 2; tid < tip_len; ++tid) {
+                    int32_t st = 0, tc = 0;
+                    bool is_summon = false;
+                    if (!is_dimming_tip_id(rt, tid, st, tc, &is_summon) || !is_summon) continue;
+                    summon_tids.push_back(tid);
+                    Ref to = safe_iaload(rt, sf_app_CpCanvas_tip, tid);
+                    int32_t wid = (to > 0) ? rt.field_i32(to, kFld_Tip_waza_id) : -1;
+                    if (wid > 0) {
+                        fn_app_Attack_Set___IIIII__I(rt, tmp_a, wid, 1, 1, 0, 1);
+                        Ref p_arr = rt.field_i32(tmp_a, kFld_Attack_param);
+                        int32_t child_wid = safe_iaload(rt, p_arr, 11);
+                        if (child_wid > 0) {
+                            fn_app_Attack_Set___IIIII__I(rt, tmp_a, child_wid, 1, 1, 0, 1);
+                            Ref cp_arr = rt.field_i32(tmp_a, kFld_Attack_param);
+                            int32_t child_p8 = safe_iaload(rt, cp_arr, 8);
+                            if (raidman_tid < 0 && child_p8 == 105) {
+                                raidman_tid = tid;
+                            }
+                            if (rraidman_tid < 0 && child_p8 == 163) {
+                                rraidman_tid = tid;
+                            }
+                        }
+                    }
+                    if (giga_summon_tid < 0 && tc == 3) {
+                        giga_summon_tid = tid;
+                    }
+                }
+            }
+            if (summon_tids.empty() || raidman_tid < 0 || rraidman_tid < 0) {
+                fail_msg("SuiteK-DiscoverSummons",
+                         "summons=" + std::to_string(summon_tids.size()) +
+                         " raidman=" + std::to_string(raidman_tid) +
+                         " rraidman=" + std::to_string(rraidman_tid));
+            } else {
+                auto has_active_attack = [&](int s_idx) -> bool {
+                    for (int i = 0; i < kMaxAttacks; ++i) {
+                        if (g_pvp_eng.core.sides[s_idx].ata_data[i][kFld_Attack_on] != 0) return true;
+                    }
+                    return false;
+                };
+
+                // 1) Standalone check across all p8 == 90 summon chips
+                for (size_t idx = 0; idx < summon_tids.size(); ++idx) {
+                    int32_t tid = summon_tids[idx];
+                    setup_basic_arena(1000, 1000, 0xCA9B0u + static_cast<uint32_t>(idx), 0);
+                    g_pvp_eng.core.sides[0].pos_x = 1; g_pvp_eng.core.sides[0].tmp_x = 1;
+                    g_pvp_eng.core.sides[0].pos_y = 1; g_pvp_eng.core.sides[0].tmp_y = 1;
+                    g_pvp_eng.core.sides[1].pos_x = 1; g_pvp_eng.core.sides[1].tmp_x = 1;
+                    g_pvp_eng.core.sides[1].pos_y = 1; g_pvp_eng.core.sides[1].tmp_y = 1;
+                    queue_tips_fifo(0, {static_cast<int16_t>(tid)});
+                    for (int t = 0; t <= 39; ++t) {
+                        step_pvp_combat_tick(rt, cp, (t == 0) ? kKeySelectBit : 0, 0);
+                    }
+                    const SideContext& s0 = g_pvp_eng.core.sides[0];
+                    if (s0.ani_id != 6 || s0.joutai != 6 || !has_active_attack(0)) {
+                        fail_msg("SuiteK-SummonStandaloneHide",
+                                 "tid=" + std::to_string(tid) +
+                                 " ani_id=" + std::to_string(s0.ani_id) +
+                                 " joutai=" + std::to_string(s0.joutai) +
+                                 " active_ata=" + std::to_string(has_active_attack(0)));
+                    }
+                    bool returned_idle = false;
+                    for (int t = 40; t < 250; ++t) {
+                        step_pvp_combat_tick(rt, cp, 0, 0);
+                        if (g_pvp_eng.core.tf_state == TF_IDLE) {
+                            returned_idle = true;
+                            break;
+                        }
+                    }
+                    if (!returned_idle || s0.ani_id != 0 || s0.joutai != 0 || has_active_attack(0)) {
+                        fail_msg("SuiteK-SummonStandaloneRestore",
+                                 "tid=" + std::to_string(tid) +
+                                 " returned=" + std::to_string(returned_idle) +
+                                 " ani_id=" + std::to_string(s0.ani_id) +
+                                 " joutai=" + std::to_string(s0.joutai) +
+                                 " active_ata=" + std::to_string(has_active_attack(0)));
+                    }
+                }
+
+                // 2) Mutual Navi-vs-Navi counter-dimming chains
+                struct MutualSummonPair {
+                    const char* label;
+                    int32_t tid1;
+                    int32_t tid2;
+                };
+                std::vector<MutualSummonPair> pairs;
+                pairs.push_back({"RaidMan_vs_RRaidMan", raidman_tid, rraidman_tid});
+                if (giga_summon_tid > 0) {
+                    pairs.push_back({"Giga_vs_RaidMan", giga_summon_tid, raidman_tid});
+                }
+
+                for (size_t pi = 0; pi < pairs.size(); ++pi) {
+                    for (int att = 0; att < 2; ++att) {
+                        int def = 1 - att;
+                        for (int def_pre_pose = 0; def_pre_pose < 2; ++def_pre_pose) {
+                            setup_basic_arena(1000, 1000,
+                                              0xCA9E0u + static_cast<uint32_t>(pi * 8 + att * 2 + def_pre_pose), 0);
+                            g_pvp_eng.core.sides[0].pos_x = 1; g_pvp_eng.core.sides[0].tmp_x = 1;
+                            g_pvp_eng.core.sides[0].pos_y = 1; g_pvp_eng.core.sides[0].tmp_y = 1;
+                            g_pvp_eng.core.sides[1].pos_x = 1; g_pvp_eng.core.sides[1].tmp_x = 1;
+                            g_pvp_eng.core.sides[1].pos_y = 1; g_pvp_eng.core.sides[1].tmp_y = 1;
+                            if (def_pre_pose != 0) {
+                                g_pvp_eng.core.sides[def].joutai = 1;
+                                g_pvp_eng.core.sides[def].ani_id = 1;
+                            }
+                            queue_tips_fifo(att, {static_cast<int16_t>(pairs[pi].tid1)});
+                            queue_tips_fifo(def, {static_cast<int16_t>(pairs[pi].tid2)});
+
+                            bool saw_counter = false;
+                            bool counter_ok = false;
+                            bool saw_resume_start = false;
+                            bool resume_start_ok = false;
+                            bool saw_resume_hide = false;
+                            bool resume_hide_ok = false;
+                            bool reached_idle = false;
+                            bool idle_ok = false;
+
+                            for (int t = 0; t < 400; ++t) {
+                                int32_t m_att = (t == 0) ? kKeySelectBit : 0;
+                                int32_t m_def = (t == 2) ? kKeySelectBit : 0;
+                                step_pvp_combat_tick(rt, cp, (att == 0) ? m_att : m_def, (att == 1) ? m_att : m_def);
+
+                                const PvpCombatCore& c = g_pvp_eng.core;
+                                if (c.tf_state == TF_COUNTER_ACTION && c.tf_stack[1].timer == 25) {
+                                    saw_counter = true;
+                                    counter_ok = (c.sides[def].ani_id == 6 && c.sides[def].joutai == 6 &&
+                                                  c.sides[att].ani_id != 6 && has_active_attack(def));
+                                } else if (c.tf_state == TF_ROOT_RESUME && c.tf_stack[0].timer == 1) {
+                                    saw_resume_start = true;
+                                    resume_start_ok = (c.sides[def].ani_id == 0 && c.sides[def].joutai == 0 &&
+                                                       !has_active_attack(def) &&
+                                                       c.sides[att].ani_id == 0 && c.sides[att].joutai == 0);
+                                } else if (c.tf_state == TF_ROOT_RESUME && c.tf_stack[0].timer == 25) {
+                                    saw_resume_hide = true;
+                                    resume_hide_ok = (c.sides[att].ani_id == 6 && c.sides[att].joutai == 6 &&
+                                                      c.sides[def].ani_id != 6 && has_active_attack(att));
+                                } else if (t > 2 && c.tf_state == TF_IDLE) {
+                                    reached_idle = true;
+                                    idle_ok = (c.sides[0].ani_id != 6 && c.sides[0].joutai != 6 &&
+                                               c.sides[1].ani_id != 6 && c.sides[1].joutai != 6 &&
+                                               !has_active_attack(0) && !has_active_attack(1));
+                                    break;
+                                }
+                            }
+
+                            if (!saw_counter || !counter_ok || !saw_resume_start || !resume_start_ok ||
+                                !saw_resume_hide || !resume_hide_ok || !reached_idle || !idle_ok) {
+                                fail_msg("SuiteK-MutualSummonChain",
+                                         std::string(pairs[pi].label) + " att=" + std::to_string(att) +
+                                         " pose=" + std::to_string(def_pre_pose) +
+                                         " saw_c=" + std::to_string(saw_counter) +
+                                         " ok_c=" + std::to_string(counter_ok) +
+                                         " saw_rs=" + std::to_string(saw_resume_start) +
+                                         " ok_rs=" + std::to_string(resume_start_ok) +
+                                         " saw_rh=" + std::to_string(saw_resume_hide) +
+                                         " ok_rh=" + std::to_string(resume_hide_ok) +
+                                         " idle=" + std::to_string(reached_idle) +
+                                         " ok_i=" + std::to_string(idle_ok));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     });
     std::printf("[PvP SELF-TEST] Suite K complete (failures=%d)\n", failures);
 
@@ -7070,6 +7559,31 @@ static int run_pvp_headless_self_test(DojaRuntime& rt, Ref cp) {
                 fail_msg("SuiteQ-PostInvisDamage",
                          "actor=" + std::to_string(actor) + " did not take damage after Invis expired, hp=" +
                          std::to_string(g_pvp_eng.core.sides[actor].hp));
+            }
+        }
+
+        // Q2: Counter-dimming Invis in response to a dimming attack chip must block all damage
+        if (tid_dimming_attack > 0) {
+            for (int att = 0; att < 2; ++att) {
+                int def = 1 - att;
+                setup_basic_arena(500, 500, 0x110200u + att, 0);
+                g_pvp_eng.core.sides[0].pos_x = 1; g_pvp_eng.core.sides[0].tmp_x = 1;
+                g_pvp_eng.core.sides[0].pos_y = 1; g_pvp_eng.core.sides[0].tmp_y = 1;
+                g_pvp_eng.core.sides[1].pos_x = 1; g_pvp_eng.core.sides[1].tmp_x = 1;
+                g_pvp_eng.core.sides[1].pos_y = 1; g_pvp_eng.core.sides[1].tmp_y = 1;
+                queue_tips_fifo(att, {static_cast<int16_t>(tid_dimming_attack)});
+                queue_tips_fifo(def, {static_cast<int16_t>(invis_tid)});
+                for (int t = 0; t < 160; ++t) {
+                    int32_t m_att = (t == 0) ? kKeySelectBit : 0;
+                    int32_t m_def = (t == 2) ? kKeySelectBit : 0;
+                    step_pvp_combat_tick(rt, cp, (att == 0) ? m_att : m_def, (att == 1) ? m_att : m_def);
+                }
+                if (g_pvp_eng.core.sides[def].hp != 500) {
+                    fail_msg("SuiteQ-CounterInvisBlocksDimAttack",
+                             "att=" + std::to_string(att) + " def=" + std::to_string(def) +
+                             " dim_tid=" + std::to_string(tid_dimming_attack) +
+                             " def_hp=" + std::to_string(g_pvp_eng.core.sides[def].hp));
+                }
             }
         }
     });
