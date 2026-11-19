@@ -23,4 +23,8 @@ void set_cli_pvp_action(int mode, uint32_t room_id);
 void set_cli_lang_mode(const std::string& mode);
 void set_cli_translation_path(const std::string& path);
 
+// Configure font rendering mode (-1 = unset, 0 = pixel, 1 = hd) and optional font file overrides
+void set_cli_font_mode(int mode);
+void set_cli_font_paths(const std::string& pixel_font, const std::string& hd_font);
+
 } // namespace rmexe

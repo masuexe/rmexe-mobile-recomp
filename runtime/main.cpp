@@ -46,6 +46,8 @@ int main(int argc, char** argv) {
     bool headless = false;
     bool fast_forward = false;
     bool explicit_server = false;
+    std::string cli_pixel_font;
+    std::string cli_hd_font;
 
     rmexe::DojaRuntime rt;
 
@@ -92,6 +94,23 @@ int main(int argc, char** argv) {
             rmexe::set_cli_lang_mode(argv[++i]);
         } else if (arg == "--translation" && i + 1 < argc) {
             rmexe::set_cli_translation_path(argv[++i]);
+        } else if (arg == "--font-mode" && i + 1 < argc) {
+            std::string fm = argv[++i];
+            for (char& ch : fm) {
+                if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+            }
+            if (fm == "pixel" || fm == "12px" || fm == "0" || fm == "pix") {
+                rmexe::set_cli_font_mode(0);
+            } else if (fm == "hd" || fm == "smooth" || fm == "1") {
+                rmexe::set_cli_font_mode(1);
+            }
+        } else if (arg == "--font" && i + 1 < argc) {
+            cli_pixel_font = argv[++i];
+            cli_hd_font = cli_pixel_font;
+        } else if (arg == "--pixel-font" && i + 1 < argc) {
+            cli_pixel_font = argv[++i];
+        } else if (arg == "--hd-font" && i + 1 < argc) {
+            cli_hd_font = argv[++i];
         } else if (arg == "--max-frames" && i + 1 < argc) {
             max_frames = std::atoi(argv[++i]);
         } else if (arg == "--dump-ppm" && i + 1 < argc) {
@@ -135,6 +154,10 @@ int main(int argc, char** argv) {
                       << "  --fps <int>           Target render FPS (default: 60)\n"
                       << "  --lang <mode>         Language overlay mode: auto, zh, orig\n"
                       << "  --translation <path>  Path to Chinese translation JSON file\n"
+                      << "  --font-mode <mode>    Font rendering mode: hd (default), pixel\n"
+                      << "  --font <path>         Override font file for both pixel and HD modes\n"
+                      << "  --pixel-font <path>   Override 12px pixel font file (.ttf/.ttc/.otf)\n"
+                      << "  --hd-font <path>      Override HD smooth font file (.ttf/.ttc/.otf)\n"
                       << "  --headless            Run without opening an SDL window\n"
                       << "  --fast-forward        Disable frame sleep for rapid testing\n"
                       << "  --max-frames <N>      Exit after N rendered frames\n"
@@ -144,13 +167,17 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!cli_pixel_font.empty() || !cli_hd_font.empty()) {
+        rmexe::set_cli_font_paths(cli_pixel_font, cli_hd_font);
+    }
+    rt.set_headless(headless);
     rt.set_render_fps(fps);
     rt.set_fast_forward(fast_forward);
     if (max_frames > 0) {
         rt.set_max_frames(max_frames, dump_ppm_path);
     }
 
-    if (!rt.init(jar_path, sp_path, "", headless ? 0 : scale, DEFAULT_WINDOW_TITLE)) {
+    if (!rt.init(jar_path, sp_path, "", scale, DEFAULT_WINDOW_TITLE)) {
         return 1;
     }
 

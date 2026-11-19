@@ -77,6 +77,8 @@ struct ImageData {
     std::vector<uint8_t> indices;     // For PalettedImage (8-bit indexed)
     std::vector<uint32_t> argb;       // For mutable offscreen Image (240x240)
     std::vector<uint8_t> raw_gif;     // Original GIF bytes for lazy/palette re-decode
+    std::vector<uint32_t> pix_text;   // Lazy-allocated premultiplied text layer (width * height)
+    std::vector<uint32_t> hd_text;    // Lazy-allocated HD premultiplied text layer ((width*hd_scale) * (height*hd_scale))
 };
 
 struct PaletteData {
@@ -118,6 +120,8 @@ struct FullHeapSnapshot {
     std::vector<HeapObject> heap;
     std::vector<std::pair<Ref, PaletteData>> palettes;
     std::vector<std::pair<Ref, std::vector<uint32_t>>> offscreen_argb;
+    std::vector<std::pair<Ref, std::vector<uint32_t>>> offscreen_pix_text;
+    std::vector<std::pair<Ref, std::vector<uint32_t>>> offscreen_hd_text;
     std::vector<std::pair<Ref, Ref>> paletted_image_refs;
 };
 
@@ -207,6 +211,11 @@ public:
     }
     void set_fast_forward(bool ff) { fast_forward_ = ff; }
     bool fast_forward() const { return fast_forward_; }
+    void set_headless(bool h) { headless_ = h; }
+    bool is_headless() const { return headless_; }
+    bool should_bake_1x_text_into_gfx() const {
+        return pvp_self_test_ || (headless_ && dump_ppm_path_.empty());
+    }
     void set_config_path(const std::string& path);
     void inject_key_at_frame(int frame, int doja_key) {
         injected_keys_.push_back({frame, frame, doja_key});
@@ -283,12 +292,16 @@ private:
     std::vector<uint8_t> sp_data_;
     size_t sp_header_offset_ = 0;
 
-    // 240x240 screen framebuffer (ARGB8888)
+    // 240x240 screen framebuffer (ARGB8888) and dual premultiplied text overlays
     uint32_t framebuffer_[240 * 240] = {0};
+    uint32_t fb_pix_text_[240 * 240] = {0};
+    std::vector<uint32_t> fb_hd_text_;
     bool graphics_locked_ = false;
     int32_t keypad_state_ = 0;
     int target_render_fps_ = 60;
     int window_scale_ = 3;
+    int hd_scale_ = 3;
+    bool headless_ = false;
     bool running_ = true;
     int frame_count_ = 0;
     int max_frames_ = 0;
@@ -307,6 +320,7 @@ private:
     void* sdl_window_ = nullptr;
     void* sdl_renderer_ = nullptr;
     void* sdl_texture_ = nullptr;
+    void* sdl_texture_hd_ = nullptr;
 
     void load_sav_overlay();
     void save_sav_overlay();

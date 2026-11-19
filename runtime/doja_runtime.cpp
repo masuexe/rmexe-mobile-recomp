@@ -80,6 +80,132 @@ inline bool has_font_extension(const std::filesystem::path& p) {
     return ext == ".ttf" || ext == ".ttc" || ext == ".otf";
 }
 
+inline std::string to_lower_ascii(std::string s) {
+    for (char& ch : s) {
+        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+    }
+    return s;
+}
+
+inline bool looks_like_pixel_font_path(const std::string& path) {
+    std::string fn = to_lower_ascii(std::filesystem::path(path).filename().string());
+    return fn.find("pixel") != std::string::npos ||
+           fn.find("zpix") != std::string::npos ||
+           fn.find("cubic") != std::string::npos ||
+           fn.find("bitmap") != std::string::npos ||
+           fn.find("unifont") != std::string::npos ||
+           fn.find("misaki") != std::string::npos ||
+           fn.find("galmuri") != std::string::npos ||
+           fn.find("dotgothic") != std::string::npos ||
+           fn.find("boutique") != std::string::npos ||
+           fn == "msgothic.ttc" || fn == "simsun.ttc" || fn == "mingliu.ttc";
+}
+
+// Premultiplied ARGB8888 Porter-Duff OVER compositing helpers for decoupled text overlays
+inline void blend_pm_over(uint32_t& dst_pm, uint8_t sr, uint8_t sg, uint8_t sb, uint32_t sa) {
+    if (sa == 0) return;
+    uint32_t spr = (static_cast<uint32_t>(sr) * sa + 127u) / 255u;
+    uint32_t spg = (static_cast<uint32_t>(sg) * sa + 127u) / 255u;
+    uint32_t spb = (static_cast<uint32_t>(sb) * sa + 127u) / 255u;
+    if (sa >= 255u || dst_pm == 0u) {
+        dst_pm = (sa << 24) | (spr << 16) | (spg << 8) | spb;
+        return;
+    }
+    uint32_t inv_a = 255u - sa;
+    uint32_t da = (dst_pm >> 24) & 0xFFu;
+    uint32_t dpr = (dst_pm >> 16) & 0xFFu;
+    uint32_t dpg = (dst_pm >> 8) & 0xFFu;
+    uint32_t dpb = dst_pm & 0xFFu;
+    uint32_t oa = std::min<uint32_t>(255u, sa + (da * inv_a + 127u) / 255u);
+    uint32_t opr = std::min<uint32_t>(255u, spr + (dpr * inv_a + 127u) / 255u);
+    uint32_t opg = std::min<uint32_t>(255u, spg + (dpg * inv_a + 127u) / 255u);
+    uint32_t opb = std::min<uint32_t>(255u, spb + (dpb * inv_a + 127u) / 255u);
+    dst_pm = (oa << 24) | (opr << 16) | (opg << 8) | opb;
+}
+
+inline void blend_pm_pixel_over(uint32_t& dst_pm, uint32_t src_pm) {
+    uint32_t sa = (src_pm >> 24) & 0xFFu;
+    if (sa == 0) return;
+    if (sa >= 255u || dst_pm == 0u) {
+        dst_pm = src_pm;
+        return;
+    }
+    uint32_t inv_a = 255u - sa;
+    uint32_t spr = (src_pm >> 16) & 0xFFu;
+    uint32_t spg = (src_pm >> 8) & 0xFFu;
+    uint32_t spb = src_pm & 0xFFu;
+    uint32_t da = (dst_pm >> 24) & 0xFFu;
+    uint32_t dpr = (dst_pm >> 16) & 0xFFu;
+    uint32_t dpg = (dst_pm >> 8) & 0xFFu;
+    uint32_t dpb = dst_pm & 0xFFu;
+    uint32_t oa = std::min<uint32_t>(255u, sa + (da * inv_a + 127u) / 255u);
+    uint32_t opr = std::min<uint32_t>(255u, spr + (dpr * inv_a + 127u) / 255u);
+    uint32_t opg = std::min<uint32_t>(255u, spg + (dpg * inv_a + 127u) / 255u);
+    uint32_t opb = std::min<uint32_t>(255u, spb + (dpb * inv_a + 127u) / 255u);
+    dst_pm = (oa << 24) | (opr << 16) | (opg << 8) | opb;
+}
+
+inline uint32_t composite_pm_over_opaque(uint32_t bg_rgb, uint32_t pm) {
+    uint32_t sa = (pm >> 24) & 0xFFu;
+    if (sa == 0) return bg_rgb | 0xFF000000u;
+    if (sa >= 255u) return pm | 0xFF000000u;
+    uint32_t inv_a = 255u - sa;
+    uint32_t spr = (pm >> 16) & 0xFFu;
+    uint32_t spg = (pm >> 8) & 0xFFu;
+    uint32_t spb = pm & 0xFFu;
+    uint32_t dr = (bg_rgb >> 16) & 0xFFu;
+    uint32_t dg = (bg_rgb >> 8) & 0xFFu;
+    uint32_t db = bg_rgb & 0xFFu;
+    uint32_t nr = std::min<uint32_t>(255u, spr + (dr * inv_a + 127u) / 255u);
+    uint32_t ng = std::min<uint32_t>(255u, spg + (dg * inv_a + 127u) / 255u);
+    uint32_t nb = std::min<uint32_t>(255u, spb + (db * inv_a + 127u) / 255u);
+    return 0xFF000000u | (nr << 16) | (ng << 8) | nb;
+}
+
+inline void attenuate_pm(uint32_t& dst_pm, uint32_t cover_alpha) {
+    if (dst_pm == 0 || cover_alpha == 0) return;
+    if (cover_alpha >= 255u) {
+        dst_pm = 0;
+        return;
+    }
+    uint32_t keep = 255u - cover_alpha;
+    uint32_t da = ((dst_pm >> 24) & 0xFFu) * keep / 255u;
+    uint32_t dpr = ((dst_pm >> 16) & 0xFFu) * keep / 255u;
+    uint32_t dpg = ((dst_pm >> 8) & 0xFFu) * keep / 255u;
+    uint32_t dpb = (dst_pm & 0xFFu) * keep / 255u;
+    dst_pm = (da << 24) | (dpr << 16) | (dpg << 8) | dpb;
+}
+
+inline void clear_hd_block(uint32_t* hd_buf, int logic_w, int logic_h, int hd_scale, int x, int y) {
+    if (!hd_buf || x < 0 || y < 0 || x >= logic_w || y >= logic_h) return;
+    int hw = logic_w * hd_scale;
+    int hy0 = y * hd_scale;
+    int hx0 = x * hd_scale;
+    for (int sy = 0; sy < hd_scale; ++sy) {
+        uint32_t* row = hd_buf + (hy0 + sy) * hw + hx0;
+        for (int sx = 0; sx < hd_scale; ++sx) {
+            row[sx] = 0;
+        }
+    }
+}
+
+inline void attenuate_hd_block(uint32_t* hd_buf, int logic_w, int logic_h, int hd_scale, int x, int y, uint32_t cover_alpha) {
+    if (!hd_buf || x < 0 || y < 0 || x >= logic_w || y >= logic_h || cover_alpha == 0) return;
+    if (cover_alpha >= 255u) {
+        clear_hd_block(hd_buf, logic_w, logic_h, hd_scale, x, y);
+        return;
+    }
+    int hw = logic_w * hd_scale;
+    int hy0 = y * hd_scale;
+    int hx0 = x * hd_scale;
+    for (int sy = 0; sy < hd_scale; ++sy) {
+        uint32_t* row = hd_buf + (hy0 + sy) * hw + hx0;
+        for (int sx = 0; sx < hd_scale; ++sx) {
+            attenuate_pm(row[sx], cover_alpha);
+        }
+    }
+}
+
 std::atomic<bool> g_quit_signal{false};
 
 void on_termination_signal(int sig) {
@@ -121,24 +247,33 @@ struct StbFontEngine {
     };
 
     struct FontFace {
-        std::vector<uint8_t> font_bytes;
+        std::shared_ptr<const std::vector<uint8_t>> font_bytes;
         stbtt_fontinfo info{};
         float scale = 1.0f;
+        float pixel_scale = 1.0f;
         bool has_cjk = false;
         bool has_eblc_12 = false;
+        bool is_pixel_outline = false;
         uint32_t eblc_off = 0;
         uint32_t eblc_len = 0;
         uint32_t ebdt_off = 0;
         uint32_t ebdt_len = 0;
         uint32_t subtable_array_off = 0;
         uint32_t num_subtables = 0;
+        std::unordered_map<int, int> hd_y_adjust_by_scale;
     };
 
-    std::vector<FontFace> faces;
-    std::vector<std::string> loaded_keys;
+    std::string cli_pixel_font_path;
+    std::string cli_hd_font_path;
+    std::unordered_map<std::string, std::shared_ptr<const std::vector<uint8_t>>> file_bytes_cache;
+    std::vector<FontFace> pixel_faces;
+    std::vector<FontFace> hd_faces;
+    std::vector<std::string> pixel_loaded_keys;
+    std::vector<std::string> hd_loaded_keys;
     bool loaded = false;
     bool initialized = false;
-    std::unordered_map<uint32_t, CachedGlyph> cache;
+    std::unordered_map<uint32_t, CachedGlyph> pixel_cache;
+    std::unordered_map<uint64_t, CachedGlyph> hd_cache;
 
     static std::string canonical_path_key(const std::string& path) {
         std::error_code ec;
@@ -154,8 +289,8 @@ struct StbFontEngine {
     }
 
     static bool parse_eblc_12(FontFace& face, int sfnt_off) {
-        if (sfnt_off < 0) return false;
-        const auto& buf = face.font_bytes;
+        if (sfnt_off < 0 || !face.font_bytes) return false;
+        const auto& buf = *face.font_bytes;
         uint16_t num_tables = 0;
         if (!read_u16_be(buf, static_cast<size_t>(sfnt_off) + 4, num_tables)) return false;
         if (num_tables == 0 || num_tables > 256) return false;
@@ -223,12 +358,12 @@ struct StbFontEngine {
     }
 
     static bool try_get_eblc_glyph(const FontFace& face, uint32_t cp, CachedGlyph& cg) {
-        if (!face.has_eblc_12 || cp > 0xFFFFu) return false;
+        if (!face.has_eblc_12 || !face.font_bytes || cp > 0xFFFFu) return false;
         int gid_i = stbtt_FindGlyphIndex(&face.info, static_cast<int>(cp));
         if (gid_i <= 0 || gid_i > 0xFFFF) return false;
         uint16_t gid = static_cast<uint16_t>(gid_i);
 
-        const auto& buf = face.font_bytes;
+        const auto& buf = *face.font_bytes;
         const size_t eblc_end = static_cast<size_t>(face.eblc_off) + face.eblc_len;
         const size_t ebdt_end = static_cast<size_t>(face.ebdt_off) + face.ebdt_len;
 
@@ -438,26 +573,49 @@ struct StbFontEngine {
         return false;
     }
 
-    bool try_load_file(const std::string& path, bool require_cjk, bool require_eblc_only = false) {
+    bool try_load_face_into(std::vector<FontFace>& target_faces,
+                            std::vector<std::string>& target_keys,
+                            const std::string& path,
+                            bool require_cjk,
+                            bool require_eblc_only = false,
+                            bool force_pixel_outline = false,
+                            bool prefer_sc_ttc = false) {
         std::error_code ec;
         if (!std::filesystem::is_regular_file(path, ec)) return false;
 
         std::string key = canonical_path_key(path);
-        if (std::find(loaded_keys.begin(), loaded_keys.end(), key) != loaded_keys.end()) {
+        if (std::find(target_keys.begin(), target_keys.end(), key) != target_keys.end()) {
             return false;
         }
 
-        std::ifstream f(path, std::ios::binary);
-        if (!f) return false;
-        std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        if (buf.size() < 64) return false;
+        std::shared_ptr<const std::vector<uint8_t>> bytes_ptr;
+        auto cache_it = file_bytes_cache.find(key);
+        if (cache_it != file_bytes_cache.end()) {
+            bytes_ptr = cache_it->second;
+        } else {
+            std::ifstream f(path, std::ios::binary);
+            if (!f) return false;
+            auto vec = std::make_shared<std::vector<uint8_t>>(
+                (std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()
+            );
+            if (vec->size() < 64) return false;
+            bytes_ptr = vec;
+            file_bytes_cache.emplace(key, bytes_ptr);
+        }
 
-        int offset = stbtt_GetFontOffsetForIndex(buf.data(), 0);
+        int ttc_idx = 0;
+        if (prefer_sc_ttc && to_lower_ascii(path).find("notosanscjk") != std::string::npos) {
+            if (stbtt_GetFontOffsetForIndex(bytes_ptr->data(), 2) >= 0) {
+                ttc_idx = 2; // NotoSansCJK TTC index 2 is SC
+            }
+        }
+        int offset = stbtt_GetFontOffsetForIndex(bytes_ptr->data(), ttc_idx);
+        if (offset < 0) offset = stbtt_GetFontOffsetForIndex(bytes_ptr->data(), 0);
         if (offset < 0) return false;
 
         FontFace face{};
-        face.font_bytes = std::move(buf);
-        if (!stbtt_InitFont(&face.info, face.font_bytes.data(), offset)) return false;
+        face.font_bytes = bytes_ptr;
+        if (!stbtt_InitFont(&face.info, face.font_bytes->data(), offset)) return false;
 
         face.has_cjk = (stbtt_FindGlyphIndex(&face.info, 0x3042) != 0 ||
                         stbtt_FindGlyphIndex(&face.info, 0x4E2D) != 0);
@@ -470,32 +628,36 @@ struct StbFontEngine {
         if (face.scale <= 0.0f) {
             face.scale = stbtt_ScaleForPixelHeight(&face.info, 13.0f);
         }
+        face.pixel_scale = stbtt_ScaleForMappingEmToPixels(&face.info, 12.0f);
+        if (face.pixel_scale <= 0.0f) {
+            face.pixel_scale = face.scale;
+        }
+        if (!face.has_eblc_12 && (force_pixel_outline || looks_like_pixel_font_path(path))) {
+            face.is_pixel_outline = true;
+        }
 
-        loaded_keys.push_back(std::move(key));
-        faces.push_back(std::move(face));
+        target_keys.push_back(std::move(key));
+        target_faces.push_back(std::move(face));
         return true;
     }
 
     void init(const std::string& base_dir) {
         if (initialized) return;
         initialized = true;
-        faces.clear();
-        loaded_keys.clear();
-        cache.clear();
+        pixel_faces.clear();
+        hd_faces.clear();
+        pixel_loaded_keys.clear();
+        hd_loaded_keys.clear();
+        pixel_cache.clear();
+        hd_cache.clear();
 
-        // 1. User-supplied fonts in assets/fonts/ (named priority + directory scan)
         std::vector<std::string> asset_dirs;
         if (!base_dir.empty()) {
             asset_dirs.push_back((std::filesystem::path(base_dir) / "assets" / "fonts").string());
         }
         asset_dirs.push_back("assets/fonts");
 
-        const char* priority_names[] = {"msgothic.ttc", "simsun.ttc", "pixel12.ttf", "pixel12.ttc", "unifont.ttf"};
-        for (const std::string& dir : asset_dirs) {
-            for (const char* name : priority_names) {
-                try_load_file((std::filesystem::path(dir) / name).string(), false);
-            }
-        }
+        std::vector<std::string> scanned_assets;
         for (const std::string& dir : asset_dirs) {
             std::error_code ec;
             if (!std::filesystem::is_directory(dir, ec)) continue;
@@ -507,26 +669,51 @@ struct StbFontEngine {
                 }
             }
             std::sort(extra.begin(), extra.end());
-            for (const auto& p : extra) {
-                try_load_file(p, false);
-            }
+            scanned_assets.insert(scanned_assets.end(), extra.begin(), extra.end());
         }
 
-        // 2. System 12x12 EBLC/EBDT bitmap fonts (Windows & WSL2)
 #ifdef _WIN32
         const char* win_dir = std::getenv("WINDIR");
         std::string wfonts = (win_dir && *win_dir) ? (std::string(win_dir) + "\\Fonts\\") : "C:\\Windows\\Fonts\\";
-        try_load_file(wfonts + "msgothic.ttc", false, true);
-        try_load_file(wfonts + "simsun.ttc", false, true);
-        try_load_file(wfonts + "mingliu.ttc", false, true);
-#else
-        try_load_file("/mnt/c/Windows/Fonts/msgothic.ttc", false, true);
-        try_load_file("/mnt/c/Windows/Fonts/simsun.ttc", false, true);
-        try_load_file("/mnt/c/Windows/Fonts/mingliu.ttc", false, true);
 #endif
 
-        // 3. Load at most one CJK vector fallback font for missing glyphs / pure Linux hosts
+        // ---- Chain 1: 12px Pixel Font Faces ----
+        if (!cli_pixel_font_path.empty()) {
+            std::string p = resolve_runtime_path(cli_pixel_font_path, base_dir);
+            try_load_face_into(pixel_faces, pixel_loaded_keys, p, false, false, true);
+        }
+
+        const char* pixel_priority_names[] = {
+            "pixel12.ttf", "pixel12.ttc", "fusion-pixel.ttf", "zpix.ttf",
+            "msgothic.ttc", "simsun.ttc", "unifont.ttf"
+        };
+        for (const std::string& dir : asset_dirs) {
+            for (const char* name : pixel_priority_names) {
+                try_load_face_into(pixel_faces, pixel_loaded_keys, (std::filesystem::path(dir) / name).string(), false);
+            }
+        }
+        for (const std::string& p : scanned_assets) {
+            if (looks_like_pixel_font_path(p)) {
+                try_load_face_into(pixel_faces, pixel_loaded_keys, p, false);
+            }
+        }
+
+        // System 12x12 EBLC/EBDT bitmap fonts (Windows & WSL2)
+#ifdef _WIN32
+        try_load_face_into(pixel_faces, pixel_loaded_keys, wfonts + "msgothic.ttc", false, true);
+        try_load_face_into(pixel_faces, pixel_loaded_keys, wfonts + "simsun.ttc", false, true);
+        try_load_face_into(pixel_faces, pixel_loaded_keys, wfonts + "mingliu.ttc", false, true);
+#else
+        try_load_face_into(pixel_faces, pixel_loaded_keys, "/mnt/c/Windows/Fonts/msgothic.ttc", false, true);
+        try_load_face_into(pixel_faces, pixel_loaded_keys, "/mnt/c/Windows/Fonts/simsun.ttc", false, true);
+        try_load_face_into(pixel_faces, pixel_loaded_keys, "/mnt/c/Windows/Fonts/mingliu.ttc", false, true);
+#endif
+
+        // Pixel vector fallback (only 1 CJK fallback so missing glyphs stay readable)
         std::vector<std::string> cjk_fallbacks;
+        for (const std::string& dir : asset_dirs) {
+            cjk_fallbacks.push_back((std::filesystem::path(dir) / "wqy-microhei.ttc").string());
+        }
         if (!base_dir.empty()) {
             cjk_fallbacks.push_back((std::filesystem::path(base_dir) / "wqy-microhei.ttc").string());
         }
@@ -543,11 +730,9 @@ struct StbFontEngine {
         cjk_fallbacks.push_back("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc");
 #endif
         for (const auto& p : cjk_fallbacks) {
-            if (try_load_file(p, true)) break;
+            if (try_load_face_into(pixel_faces, pixel_loaded_keys, p, true)) break;
         }
-
-        // 4. Last-resort ASCII fallback if no font could be loaded
-        if (faces.empty()) {
+        if (pixel_faces.empty()) {
             const char* fallback_paths[] = {
 #ifdef _WIN32
                 "C:\\Windows\\Fonts\\arial.ttf",
@@ -557,33 +742,125 @@ struct StbFontEngine {
 #endif
             };
             for (const char* p : fallback_paths) {
-                if (try_load_file(p, false)) break;
+                if (try_load_face_into(pixel_faces, pixel_loaded_keys, p, false)) break;
             }
         }
-        loaded = !faces.empty();
+
+        // ---- Chain 2: HD Smooth Vector Font Faces ----
+        if (!cli_hd_font_path.empty()) {
+            std::string p = resolve_runtime_path(cli_hd_font_path, base_dir);
+            try_load_face_into(hd_faces, hd_loaded_keys, p, false, false, false, true);
+        }
+
+        const char* hd_priority_names[] = {
+            "hd_zh.ttf", "hd_zh.otf", "hd_zh.ttc",
+            "NotoSansSC-Medium.ttf", "NotoSansSC_500Medium.ttf", "NotoSansSC-Regular.ttf",
+            "sarasa-ui-sc-regular.ttf", "ChillDuanSans_Medium.otf", "wqy-microhei.ttc"
+        };
+        for (const std::string& dir : asset_dirs) {
+            for (const char* name : hd_priority_names) {
+                try_load_face_into(hd_faces, hd_loaded_keys, (std::filesystem::path(dir) / name).string(), false, false, false, true);
+            }
+        }
+        for (const std::string& p : scanned_assets) {
+            if (!looks_like_pixel_font_path(p)) {
+                try_load_face_into(hd_faces, hd_loaded_keys, p, false, false, false, true);
+            }
+        }
+
+        std::vector<std::string> hd_sys_fallbacks;
+#ifdef _WIN32
+        hd_sys_fallbacks.push_back(wfonts + "msyh.ttc");
+        hd_sys_fallbacks.push_back(wfonts + "NotoSansSC-VF.ttf");
+        hd_sys_fallbacks.push_back(wfonts + "Deng.ttf");
+        hd_sys_fallbacks.push_back(wfonts + "YuGothM.ttc");
+        hd_sys_fallbacks.push_back(wfonts + "meiryo.ttc");
+#else
+        hd_sys_fallbacks.push_back("/mnt/c/Windows/Fonts/msyh.ttc");
+        hd_sys_fallbacks.push_back("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
+        hd_sys_fallbacks.push_back("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc");
+        hd_sys_fallbacks.push_back("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc");
+        hd_sys_fallbacks.push_back("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc");
+        hd_sys_fallbacks.push_back("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc");
+#endif
+        for (const auto& p : hd_sys_fallbacks) {
+            if (try_load_face_into(hd_faces, hd_loaded_keys, p, true, false, false, true)) break;
+        }
+        if (hd_faces.empty()) {
+            const char* fallback_paths[] = {
+#ifdef _WIN32
+                "C:\\Windows\\Fonts\\arial.ttf",
+#else
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+#endif
+            };
+            for (const char* p : fallback_paths) {
+                if (try_load_face_into(hd_faces, hd_loaded_keys, p, false)) break;
+            }
+        }
+
+        loaded = !pixel_faces.empty() || !hd_faces.empty();
     }
 
     const CachedGlyph* get_glyph(uint32_t cp) {
-        if (!loaded) return nullptr;
-        auto it = cache.find(cp);
-        if (it != cache.end()) {
+        if (pixel_faces.empty()) return nullptr;
+        auto it = pixel_cache.find(cp);
+        if (it != pixel_cache.end()) {
             return it->second.valid ? &it->second : nullptr;
         }
 
         CachedGlyph cg{};
-        // Pass 1: Prefer crisp 12x12 (or 6x12) EBLC/EBDT bitmap strikes across loaded faces
-        for (const auto& face : faces) {
-            if (face.has_eblc_12 && try_get_eblc_glyph(face, cp, cg)) {
-                auto [ins_it, _] = cache.emplace(cp, std::move(cg));
+        // Pass 1: Respect priority order across EBLC/EBDT strikes and dedicated pixel-outline fonts
+        for (const auto& face : pixel_faces) {
+            if (face.has_eblc_12) {
+                if (try_get_eblc_glyph(face, cp, cg)) {
+                    auto [ins_it, _] = pixel_cache.emplace(cp, std::move(cg));
+                    return &ins_it->second;
+                }
+            } else if (face.is_pixel_outline) {
+                int gidx = stbtt_FindGlyphIndex(&face.info, static_cast<int>(cp));
+                if (gidx == 0) continue;
+
+                int adv_raw = 0, lsb_raw = 0;
+                stbtt_GetCodepointHMetrics(&face.info, static_cast<int>(cp), &adv_raw, &lsb_raw);
+                int adv_px = static_cast<int>(std::lround(adv_raw * face.pixel_scale));
+
+                int w = 0, h = 0, xoff = 0, yoff = 0;
+                unsigned char* raw_bmp = stbtt_GetCodepointBitmap(&face.info, face.pixel_scale, face.pixel_scale, static_cast<int>(cp), &w, &h, &xoff, &yoff);
+                if (raw_bmp && w > 0 && h > 0 && w < 64 && h < 64) {
+                    cg.width = w;
+                    cg.rows = h;
+                    cg.xoff = xoff;
+                    if (h <= 12) {
+                        if (yoff < -10) yoff = -10;
+                        else if (yoff + h > 2) yoff = 2 - h;
+                    }
+                    cg.yoff = yoff;
+                    cg.bmp.resize(static_cast<size_t>(w * h));
+                    for (int k = 0; k < w * h; ++k) {
+                        cg.bmp[k] = (raw_bmp[k] >= 112) ? 255 : 0;
+                    }
+                } else {
+                    cg.xoff = 0;
+                    cg.yoff = 0;
+                }
+                if (raw_bmp) stbtt_FreeBitmap(raw_bmp, nullptr);
+
+                int def_w = default_doja_char_width(cp);
+                cg.adv_x = (cp < 0x80u && cg.width + std::max(0, cg.xoff) > def_w && adv_px > def_w) ? adv_px : def_w;
+                cg.is_bitmap = true;
+                cg.valid = true;
+                auto [ins_it, _] = pixel_cache.emplace(cp, std::move(cg));
                 return &ins_it->second;
             }
         }
 
         // Pass 2: Vector outline fallback via stb_truetype
-        for (size_t i = 0; i < faces.size(); ++i) {
-            auto& face = faces[i];
+        for (size_t i = 0; i < pixel_faces.size(); ++i) {
+            const auto& face = pixel_faces[i];
             int gidx = stbtt_FindGlyphIndex(&face.info, static_cast<int>(cp));
-            if (gidx == 0 && !(cp <= 0x7Fu && i + 1 == faces.size())) {
+            if (gidx == 0 && !(cp <= 0x7Fu && i + 1 == pixel_faces.size())) {
                 continue;
             }
 
@@ -606,11 +883,82 @@ struct StbFontEngine {
             }
             cg.is_bitmap = false;
             cg.valid = true;
-            auto [ins_it, _] = cache.emplace(cp, std::move(cg));
+            auto [ins_it, _] = pixel_cache.emplace(cp, std::move(cg));
             return &ins_it->second;
         }
 
-        cache.emplace(cp, std::move(cg));
+        pixel_cache.emplace(cp, std::move(cg));
+        return nullptr;
+    }
+
+    const CachedGlyph* get_hd_glyph(uint32_t cp, int hd_scale) {
+        if (hd_faces.empty()) return nullptr;
+        hd_scale = std::clamp(hd_scale, 2, 4);
+        uint64_t key = (static_cast<uint64_t>(hd_scale) << 32) | static_cast<uint64_t>(cp);
+        auto it = hd_cache.find(key);
+        if (it != hd_cache.end()) {
+            return it->second.valid ? &it->second : nullptr;
+        }
+
+        CachedGlyph cg{};
+        for (size_t i = 0; i < hd_faces.size(); ++i) {
+            auto& face = hd_faces[i];
+            int gidx = stbtt_FindGlyphIndex(&face.info, static_cast<int>(cp));
+            if (gidx == 0 && !(cp <= 0x7Fu && i + 1 == hd_faces.size())) {
+                continue;
+            }
+
+            float px_em = 11.0f * static_cast<float>(hd_scale);
+            float scale_y = stbtt_ScaleForMappingEmToPixels(&face.info, px_em);
+            if (scale_y <= 0.0f) {
+                scale_y = stbtt_ScaleForPixelHeight(&face.info, 11.5f * static_cast<float>(hd_scale));
+            }
+
+            int hd_y_adjust = 0;
+            auto yit = face.hd_y_adjust_by_scale.find(hd_scale);
+            if (yit != face.hd_y_adjust_by_scale.end()) {
+                hd_y_adjust = yit->second;
+            } else {
+                int bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+                int ref_cp = 0x56FD; // '国'
+                if (stbtt_FindGlyphIndex(&face.info, ref_cp) == 0) {
+                    ref_cp = (stbtt_FindGlyphIndex(&face.info, 0x4E2D) != 0) ? 0x4E2D : 'H';
+                }
+                stbtt_GetCodepointBitmapBox(&face.info, ref_cp, scale_y, scale_y, &bx0, &by0, &bx1, &by1);
+                hd_y_adjust = static_cast<int>(std::lround(-4.5f * static_cast<float>(hd_scale) - 0.5f * static_cast<float>(by0 + by1)));
+                face.hd_y_adjust_by_scale[hd_scale] = hd_y_adjust;
+            }
+
+            int cell_w = default_doja_char_width(cp) * hd_scale;
+            int adv_raw = 0, lsb_raw = 0;
+            stbtt_GetCodepointHMetrics(&face.info, static_cast<int>(cp), &adv_raw, &lsb_raw);
+            int raw_adv = static_cast<int>(std::lround(adv_raw * scale_y));
+            float scale_x = scale_y;
+            if (raw_adv > cell_w && raw_adv > 0) {
+                scale_x = scale_y * (static_cast<float>(cell_w) / static_cast<float>(raw_adv));
+            }
+
+            int w = 0, h = 0, xoff = 0, yoff = 0;
+            unsigned char* raw_bmp = stbtt_GetCodepointBitmap(&face.info, scale_x, scale_y, static_cast<int>(cp), &w, &h, &xoff, &yoff);
+            int eff_adv = std::min(cell_w, static_cast<int>(std::lround(adv_raw * scale_x)));
+            cg.xoff = xoff + (cell_w - eff_adv) / 2;
+            cg.yoff = yoff + hd_y_adjust;
+            cg.adv_x = cell_w;
+            cg.is_bitmap = false;
+            cg.valid = true;
+            if (raw_bmp && w > 0 && h > 0 && w < 256 && h < 256) {
+                cg.width = w;
+                cg.rows = h;
+                cg.bmp.assign(raw_bmp, raw_bmp + (w * h));
+            }
+            if (raw_bmp) {
+                stbtt_FreeBitmap(raw_bmp, nullptr);
+            }
+            auto [ins_it, _] = hd_cache.emplace(key, std::move(cg));
+            return &ins_it->second;
+        }
+
+        hd_cache.emplace(key, std::move(cg));
         return nullptr;
     }
 };
@@ -2248,6 +2596,7 @@ struct UiInputManager {
     std::string config_path = "controls.cfg";
     bool show_softkey_bar = true;
     bool high_fps_mode = true; // true = 60 FPS smooth interpolation, false = 15 FPS original flip-phone rate
+    bool hd_font_mode = true;  // true = native window-resolution HD smooth font (default), false = 12px pixel font
     bool is_fullscreen = false;
     std::string soft_label_left;
     std::string soft_label_right;
@@ -2270,6 +2619,8 @@ struct UiInputManager {
     bool cli_online_mode = false;
     bool has_cli_fps_override = false;
     bool cli_high_fps_mode = true;
+    bool has_cli_font_mode = false;
+    bool cli_hd_font_mode = true;
     bool has_cli_pvp_bo3 = false;
     bool cli_pvp_bo3 = false;
     loc::LangMode lang_mode = loc::LangMode::Auto;
@@ -2294,6 +2645,8 @@ struct UiInputManager {
     ActionBinding binds[ACT_COUNT];
     std::vector<SDL_GameController*> controllers;
     uint32_t display_buf[240 * 260] = {0};
+    int hd_scale = 3;
+    std::vector<uint32_t> display_buf_hd;
 
     UiInputManager() {
         reset_defaults();
@@ -2484,6 +2837,9 @@ struct UiInputManager {
         if (has_cli_fps_override) {
             high_fps_mode = cli_high_fps_mode;
         }
+        if (has_cli_font_mode) {
+            hd_font_mode = cli_hd_font_mode;
+        }
         if (has_cli_pvp_bo3) {
             pvp_bo3_mode = cli_pvp_bo3;
         }
@@ -2523,6 +2879,8 @@ struct UiInputManager {
                 show_softkey_bar = (std::atoi(val.c_str()) != 0);
             } else if (key == "high_fps_mode") {
                 high_fps_mode = (std::atoi(val.c_str()) != 0);
+            } else if (key == "hd_font_mode") {
+                hd_font_mode = (std::atoi(val.c_str()) != 0);
             } else if (key == "online_mode") {
                 online_mode = (std::atoi(val.c_str()) != 0);
             } else if (key == "server_url" && !val.empty()) {
@@ -2582,6 +2940,7 @@ struct UiInputManager {
         out << "master_volume=" << master_vol << "\n";
         out << "muted=" << (is_muted ? 1 : 0) << "\n";
         out << "high_fps_mode=" << (high_fps_mode ? 1 : 0) << "\n";
+        out << "hd_font_mode=" << (hd_font_mode ? 1 : 0) << "\n";
         out << "show_softkey_bar=" << (show_softkey_bar ? 1 : 0) << "\n";
         out << "online_mode=" << (online_mode ? 1 : 0) << "\n";
         out << "server_url=" << server_url << "\n";
@@ -2671,11 +3030,13 @@ struct UiInputManager {
         fill_rect_alpha(buf, bw, bh, rx + rw - 1, ry, 1, rh, argb);
     }
 
-    static int measure_ui_text(const std::string& utf8) {
+    int measure_ui_text(const std::string& utf8) const {
         auto cps = utf8_to_codepoints(utf8);
         int w = 0;
         for (uint32_t cp : cps) {
-            if (const auto* gl = g_ft.get_glyph(cp)) {
+            if (hd_font_mode) {
+                w += default_doja_char_width(cp);
+            } else if (const auto* gl = g_ft.get_glyph(cp)) {
                 w += gl->adv_x;
             } else {
                 w += default_doja_char_width(cp);
@@ -2684,17 +3045,23 @@ struct UiInputManager {
         return w;
     }
 
-    static void draw_ui_text_raw(uint32_t* buf, int bw, int bh, const std::string& utf8, int x, int baseline_y, uint32_t color) {
+    static void render_glyphs_to_buf(uint32_t* buf, int bw, int bh,
+                                     const std::string& utf8, int pen_x, int baseline_y,
+                                     uint32_t color, bool is_pm, int hd_scale) {
+        if (!buf || bw <= 0 || bh <= 0) return;
         auto cps = utf8_to_codepoints(utf8);
-        uint32_t a_col = (color >> 24) & 0xFF;
-        if (a_col == 0) a_col = 255;
-        uint8_t sr = (color >> 16) & 0xFF;
-        uint8_t sg = (color >> 8) & 0xFF;
-        uint8_t sb = color & 0xFF;
-        int pen_x = x;
+        uint32_t a_col = (color >> 24) & 0xFFu;
+        if (a_col == 0) a_col = 255u;
+        uint8_t sr = static_cast<uint8_t>((color >> 16) & 0xFFu);
+        uint8_t sg = static_cast<uint8_t>((color >> 8) & 0xFFu);
+        uint8_t sb = static_cast<uint8_t>(color & 0xFFu);
+        int box_scale = std::max(1, hd_scale);
 
         for (uint32_t cp : cps) {
-            if (const auto* gl = g_ft.get_glyph(cp)) {
+            const StbFontEngine::CachedGlyph* gl = (hd_scale >= 2)
+                ? g_ft.get_hd_glyph(cp, hd_scale)
+                : g_ft.get_glyph(cp);
+            if (gl) {
                 if (!gl->bmp.empty() && gl->rows > 0 && gl->width > 0) {
                     for (int ry = 0; ry < gl->rows; ++ry) {
                         int dy = baseline_y + gl->yoff + ry;
@@ -2702,88 +3069,229 @@ struct UiInputManager {
                         for (int rx = 0; rx < gl->width; ++rx) {
                             int dx = pen_x + gl->xoff + rx;
                             if (dx < 0 || dx >= bw) continue;
-                            uint32_t ga = (static_cast<uint32_t>(gl->bmp[ry * gl->width + rx]) * a_col) / 255;
-                            if (ga > 24) {
-                                uint32_t dst = buf[dy * bw + dx];
-                                uint32_t dr = (dst >> 16) & 0xFF;
-                                uint32_t dg = (dst >> 8) & 0xFF;
-                                uint32_t db = dst & 0xFF;
-                                uint32_t nr = (sr * ga + dr * (255 - ga)) / 255;
-                                uint32_t ng = (sg * ga + dg * (255 - ga)) / 255;
-                                uint32_t nb = (sb * ga + db * (255 - ga)) / 255;
-                                buf[dy * bw + dx] = 0xFF000000u | (nr << 16) | (ng << 8) | nb;
+                            uint8_t raw_a = gl->bmp[static_cast<size_t>(ry) * static_cast<size_t>(gl->width) + static_cast<size_t>(rx)];
+                            if (gl->is_bitmap) {
+                                if (raw_a < 128) continue;
+                                raw_a = 255;
+                            }
+                            uint32_t ga = (static_cast<uint32_t>(raw_a) * a_col) / 255u;
+                            if (is_pm) {
+                                if (ga == 0) continue;
+                                blend_pm_over(buf[dy * bw + dx], sr, sg, sb, ga);
+                            } else {
+                                bool draw = gl->is_bitmap || (hd_scale >= 2 ? (ga > 0u) : (ga > 24u));
+                                if (!draw) continue;
+                                if (ga >= 255u) {
+                                    buf[dy * bw + dx] = 0xFF000000u | (static_cast<uint32_t>(sr) << 16) |
+                                                        (static_cast<uint32_t>(sg) << 8) | static_cast<uint32_t>(sb);
+                                } else {
+                                    uint32_t dst = buf[dy * bw + dx];
+                                    uint32_t dr = (dst >> 16) & 0xFFu;
+                                    uint32_t dg = (dst >> 8) & 0xFFu;
+                                    uint32_t db = dst & 0xFFu;
+                                    uint32_t nr = (static_cast<uint32_t>(sr) * ga + dr * (255u - ga)) / 255u;
+                                    uint32_t ng = (static_cast<uint32_t>(sg) * ga + dg * (255u - ga)) / 255u;
+                                    uint32_t nb = (static_cast<uint32_t>(sb) * ga + db * (255u - ga)) / 255u;
+                                    buf[dy * bw + dx] = 0xFF000000u | (nr << 16) | (ng << 8) | nb;
+                                }
                             }
                         }
                     }
                 }
                 pen_x += gl->adv_x;
             } else {
-                pen_x += default_doja_char_width(cp);
+                int adv = default_doja_char_width(cp);
+                if (cp > 0x20u) {
+                    for (int gy = 0; gy < 10; ++gy) {
+                        int dy0 = baseline_y + (-9 + gy) * box_scale;
+                        for (int gx = 0; gx < adv - 1; ++gx) {
+                            if (((cp >> ((gx + gy) % 7)) & 1u) == 0u) continue;
+                            int dx0 = pen_x + gx * box_scale;
+                            for (int sy = 0; sy < box_scale; ++sy) {
+                                int dy = dy0 + sy;
+                                if (dy < 0 || dy >= bh) continue;
+                                for (int sx = 0; sx < box_scale; ++sx) {
+                                    int dx = dx0 + sx;
+                                    if (dx < 0 || dx >= bw) continue;
+                                    if (is_pm) {
+                                        blend_pm_over(buf[dy * bw + dx], sr, sg, sb, a_col);
+                                    } else {
+                                        buf[dy * bw + dx] = 0xFF000000u | (static_cast<uint32_t>(sr) << 16) |
+                                                            (static_cast<uint32_t>(sg) << 8) | static_cast<uint32_t>(sb);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                pen_x += adv * box_scale;
             }
         }
     }
 
     static void draw_ui_text(uint32_t* buf, int bw, int bh, const std::string& utf8, int x, int baseline_y, uint32_t color, bool shadow = true) {
         if (shadow) {
-            uint32_t sa = ((color >> 24) & 0xFF);
-            if (sa == 0) sa = 255;
-            draw_ui_text_raw(buf, bw, bh, utf8, x + 1, baseline_y + 1, (sa << 24) | 0x060810u);
+            uint32_t sa = ((color >> 24) & 0xFFu);
+            if (sa == 0) sa = 255u;
+            render_glyphs_to_buf(buf, bw, bh, utf8, x + 1, baseline_y + 1, (sa << 24) | 0x060810u, false, 0);
         }
-        draw_ui_text_raw(buf, bw, bh, utf8, x, baseline_y, color);
+        render_glyphs_to_buf(buf, bw, bh, utf8, x, baseline_y, color, false, 0);
+    }
+
+    static void draw_ui_text_hd(uint32_t* buf, int bw, int bh, int s, const std::string& utf8, int x_hd, int baseline_y_hd, uint32_t color, bool shadow = true) {
+        if (shadow) {
+            uint32_t sa = ((color >> 24) & 0xFFu);
+            if (sa == 0) sa = 255u;
+            uint32_t sh_a = (sa * 190u) / 255u;
+            int sh_off = std::max(1, (s * 2 + 1) / 3);
+            render_glyphs_to_buf(buf, bw, bh, utf8, x_hd + sh_off, baseline_y_hd + sh_off, (sh_a << 24) | 0x060810u, false, s);
+        }
+        render_glyphs_to_buf(buf, bw, bh, utf8, x_hd, baseline_y_hd, color, false, s);
+    }
+
+    static void draw_ui_text_pm(uint32_t* pix_buf, uint32_t* hd_buf, int logic_w, int logic_h, int s,
+                                const std::string& utf8, int x, int baseline_y, uint32_t color, bool shadow = true) {
+        uint32_t sa = ((color >> 24) & 0xFFu);
+        if (sa == 0) sa = 255u;
+        if (pix_buf) {
+            if (shadow) {
+                render_glyphs_to_buf(pix_buf, logic_w, logic_h, utf8, x + 1, baseline_y + 1, (sa << 24) | 0x060810u, true, 0);
+            }
+            render_glyphs_to_buf(pix_buf, logic_w, logic_h, utf8, x, baseline_y, color, true, 0);
+        }
+        if (hd_buf) {
+            int hw = logic_w * s;
+            int hh = logic_h * s;
+            if (shadow) {
+                uint32_t sh_a = (sa * 190u) / 255u;
+                int sh_off = std::max(1, (s * 2 + 1) / 3);
+                render_glyphs_to_buf(hd_buf, hw, hh, utf8, x * s + sh_off, baseline_y * s + sh_off, (sh_a << 24) | 0x060810u, true, s);
+            }
+            render_glyphs_to_buf(hd_buf, hw, hh, utf8, x * s, baseline_y * s, color, true, s);
+        }
+    }
+
+    int active_ui_scale() const { return hd_font_mode ? std::clamp(hd_scale, 2, 4) : 1; }
+    uint32_t* active_ui_buf() { return hd_font_mode ? display_buf_hd.data() : display_buf; }
+    int active_ui_w() const { return 240 * active_ui_scale(); }
+    int active_ui_h() const { return 260 * active_ui_scale(); }
+
+    void ui_fill_rect(int rx, int ry, int rw, int rh, uint32_t argb) {
+        int s = active_ui_scale();
+        fill_rect_alpha(active_ui_buf(), active_ui_w(), active_ui_h(), rx * s, ry * s, rw * s, rh * s, argb);
+    }
+
+    void ui_draw_border(int rx, int ry, int rw, int rh, uint32_t argb) {
+        int s = active_ui_scale();
+        uint32_t* buf = active_ui_buf();
+        int bw = active_ui_w(), bh = active_ui_h();
+        int x = rx * s, y = ry * s, w = rw * s, h = rh * s;
+        int t = (s >= 3) ? 2 : 1;
+        if (w <= 0 || h <= 0) return;
+        fill_rect_alpha(buf, bw, bh, x, y, w, t, argb);
+        fill_rect_alpha(buf, bw, bh, x, y + h - t, w, t, argb);
+        if (h > 2 * t) {
+            fill_rect_alpha(buf, bw, bh, x, y + t, t, h - 2 * t, argb);
+            fill_rect_alpha(buf, bw, bh, x + w - t, y + t, t, h - 2 * t, argb);
+        }
+    }
+
+    void ui_draw_text(const std::string& utf8, int x, int baseline_y, uint32_t color, bool shadow = true) {
+        if (hd_font_mode) {
+            int s = active_ui_scale();
+            draw_ui_text_hd(active_ui_buf(), active_ui_w(), active_ui_h(), s, utf8, x * s, baseline_y * s, color, shadow);
+        } else {
+            draw_ui_text(active_ui_buf(), active_ui_w(), active_ui_h(), utf8, x, baseline_y, color, shadow);
+        }
     }
 
     void render_softkey_bar(int32_t keypad_state) {
         // Metallic flip-phone bottom bar y = 240..259
-        fill_rect_alpha(display_buf, 240, 260, 0, 240, 240, 1, 0xFF445684u);
+        ui_fill_rect(0, 240, 240, 1, 0xFF445684u);
         for (int y = 241; y < 260; ++y) {
             uint32_t r = 26 - (y - 241) * 10 / 19;
             uint32_t g = 32 - (y - 241) * 12 / 19;
             uint32_t b = 50 - (y - 241) * 18 / 19;
-            fill_rect_alpha(display_buf, 240, 260, 0, y, 240, 1, 0xFF000000u | (r << 16) | (g << 8) | b);
+            ui_fill_rect(0, y, 240, 1, 0xFF000000u | (r << 16) | (g << 8) | b);
         }
 
         // Left Softkey (SOFT_KEY_1 -> DoJa 0x15)
         bool s1_held = (keypad_state & (1 << 0x15)) != 0;
         std::string k1 = primary_soft_key_label(ACT_SOFT1);
         std::string left_txt = soft_label_left.empty() ? ("[" + k1 + "] ---") : ("[" + k1 + "] " + soft_label_left);
-        fill_rect_alpha(display_buf, 240, 260, 2, 242, 80, 16, s1_held ? 0xFF2B5EA8u : 0xFF202942u);
-        draw_rect_border(display_buf, 240, 260, 2, 242, 80, 16, s1_held ? 0xFF74B2FFu : 0xFF394970u);
-        draw_ui_text(display_buf, 240, 260, left_txt, 5, 254, soft_label_left.empty() ? 0xFF7080A0u : 0xFFF0F6FFu);
+        ui_fill_rect(2, 242, 80, 16, s1_held ? 0xFF2B5EA8u : 0xFF202942u);
+        ui_draw_border(2, 242, 80, 16, s1_held ? 0xFF74B2FFu : 0xFF394970u);
+        ui_draw_text(left_txt, 5, 254, soft_label_left.empty() ? 0xFF7080A0u : 0xFFF0F6FFu);
 
         // Right Softkey (SOFT_KEY_2 -> DoJa 0x16)
         bool s2_held = (keypad_state & (1 << 0x16)) != 0;
         std::string k2 = primary_soft_key_label(ACT_SOFT2);
         std::string right_txt = soft_label_right.empty() ? ("--- [" + k2 + "]") : (soft_label_right + " [" + k2 + "]");
-        fill_rect_alpha(display_buf, 240, 260, 158, 242, 80, 16, s2_held ? 0xFF2B5EA8u : 0xFF202942u);
-        draw_rect_border(display_buf, 240, 260, 158, 242, 80, 16, s2_held ? 0xFF74B2FFu : 0xFF394970u);
+        ui_fill_rect(158, 242, 80, 16, s2_held ? 0xFF2B5EA8u : 0xFF202942u);
+        ui_draw_border(158, 242, 80, 16, s2_held ? 0xFF74B2FFu : 0xFF394970u);
         int rw = measure_ui_text(right_txt);
-        draw_ui_text(display_buf, 240, 260, right_txt, std::max(161, 235 - rw), 254, soft_label_right.empty() ? 0xFF7080A0u : 0xFFF0F6FFu);
+        ui_draw_text(right_txt, std::max(161, 235 - rw), 254, soft_label_right.empty() ? 0xFF7080A0u : 0xFFF0F6FFu);
 
         // Center Status / F1 Hint
         if (is_turbo_held() && !g_pvp.active()) {
             std::string c_txt = ">> 倍速";
             int cw = measure_ui_text(c_txt);
-            draw_ui_text(display_buf, 240, 260, c_txt, 120 - cw / 2, 254, 0xFFFFD448u);
+            ui_draw_text(c_txt, 120 - cw / 2, 254, 0xFFFFD448u);
         } else if (g_pvp.active()) {
             std::string c_txt = "#" + std::to_string(g_pvp.room_id());
             if (g_pvp.match_started() && g_pvp.rtt_ms() > 0) {
                 c_txt += " " + std::to_string(g_pvp.rtt_ms()) + "ms";
             }
             int cw = measure_ui_text(c_txt);
-            draw_ui_text(display_buf, 240, 260, c_txt, 120 - cw / 2, 254, g_pvp.match_started() ? 0xFF68FF9Au : 0xFF74C4FFu);
+            ui_draw_text(c_txt, 120 - cw / 2, 254, g_pvp.match_started() ? 0xFF68FF9Au : 0xFF74C4FFu);
         } else if (online_mode) {
             std::string c_txt = "在线:F1";
             int cw = measure_ui_text(c_txt);
-            draw_ui_text(display_buf, 240, 260, c_txt, 120 - cw / 2, 254, 0xFF74D8FFu);
+            ui_draw_text(c_txt, 120 - cw / 2, 254, 0xFF74D8FFu);
         } else {
             std::string c_txt = "F1:设置";
             int cw = measure_ui_text(c_txt);
-            draw_ui_text(display_buf, 240, 260, c_txt, 120 - cw / 2, 254, 0xFF8A9CC2u);
+            ui_draw_text(c_txt, 120 - cw / 2, 254, 0xFF8A9CC2u);
         }
     }
 
-    void compose_display_buffer(const uint32_t* game_fb, int32_t keypad_state, bool tick_toast = true) {
-        std::memcpy(display_buf, game_fb, 240 * 240 * sizeof(uint32_t));
+    void compose_display_buffer(const uint32_t* game_fb,
+                                const uint32_t* game_pix_text,
+                                const uint32_t* game_hd_text,
+                                int cur_hd_scale,
+                                int32_t keypad_state,
+                                bool tick_toast = true) {
+        hd_scale = std::clamp(cur_hd_scale, 2, 4);
+        if (hd_font_mode) {
+            int s = hd_scale;
+            int hw = 240 * s;
+            int hh = 260 * s;
+            size_t need = static_cast<size_t>(hw) * static_cast<size_t>(hh);
+            if (display_buf_hd.size() != need) {
+                display_buf_hd.assign(need, 0xFF000000u);
+            }
+            for (int y = 0; y < 240; ++y) {
+                const uint32_t* fb_row = game_fb + static_cast<size_t>(y) * 240;
+                for (int sy = 0; sy < s; ++sy) {
+                    int hy = y * s + sy;
+                    uint32_t* dst_row = display_buf_hd.data() + static_cast<size_t>(hy) * hw;
+                    const uint32_t* hdt_row = game_hd_text ? (game_hd_text + static_cast<size_t>(hy) * hw) : nullptr;
+                    for (int x = 0; x < 240; ++x) {
+                        uint32_t bg = fb_row[x];
+                        int hx0 = x * s;
+                        for (int sx = 0; sx < s; ++sx) {
+                            uint32_t pm = hdt_row ? hdt_row[hx0 + sx] : 0u;
+                            dst_row[hx0 + sx] = (pm != 0u) ? composite_pm_over_opaque(bg, pm) : (bg | 0xFF000000u);
+                        }
+                    }
+                }
+            }
+        } else {
+            for (int i = 0; i < 240 * 240; ++i) {
+                uint32_t pm = game_pix_text ? game_pix_text[i] : 0u;
+                display_buf[i] = (pm != 0u) ? composite_pm_over_opaque(game_fb[i], pm) : (game_fb[i] | 0xFF000000u);
+            }
+        }
         if (show_softkey_bar) {
             render_softkey_bar(keypad_state);
         }
@@ -2795,17 +3303,49 @@ struct UiInputManager {
             int tw = measure_ui_text(toast_text);
             int bw = std::min(232, tw + 14);
             int bx = (240 - bw) / 2;
-            fill_rect_alpha(display_buf, 240, 260, bx, 4, bw, 17, ((alpha * 220 / 255) << 24) | 0x10182Cu);
-            draw_rect_border(display_buf, 240, 260, bx, 4, bw, 17, (alpha << 24) | 0x5898E8u);
-            draw_ui_text(display_buf, 240, 260, toast_text, bx + (bw - tw) / 2, 16, (alpha << 24) | 0xFFFFFFu);
+            ui_fill_rect(bx, 4, bw, 17, ((alpha * 220 / 255) << 24) | 0x10182Cu);
+            ui_draw_border(bx, 4, bw, 17, (alpha << 24) | 0x5898E8u);
+            ui_draw_text(toast_text, bx + (bw - tw) / 2, 16, (alpha << 24) | 0xFFFFFFu);
             if (tick_toast) --toast_frames;
+        }
+    }
+
+    void present_sdl_frame(SDL_Renderer* ren, SDL_Texture* tex_pix, SDL_Texture* tex_hd) const {
+        if (!ren) return;
+        int logical_h = show_softkey_bar ? 260 : 240;
+        if (hd_font_mode && tex_hd && !display_buf_hd.empty()) {
+            int s = std::clamp(hd_scale, 2, 4);
+            int bw = 240 * s;
+            int bh = logical_h * s;
+            int cur_lw = 0, cur_lh = 0;
+            SDL_RenderGetLogicalSize(ren, &cur_lw, &cur_lh);
+            if (cur_lw != bw || cur_lh != bh) {
+                SDL_RenderSetLogicalSize(ren, bw, bh);
+            }
+            SDL_Rect src_rect{0, 0, bw, bh};
+            SDL_UpdateTexture(tex_hd, nullptr, display_buf_hd.data(), bw * static_cast<int>(sizeof(uint32_t)));
+            SDL_RenderClear(ren);
+            SDL_RenderCopy(ren, tex_hd, &src_rect, nullptr);
+            SDL_RenderPresent(ren);
+        } else if (tex_pix) {
+            int cur_lw = 0, cur_lh = 0;
+            SDL_RenderGetLogicalSize(ren, &cur_lw, &cur_lh);
+            if (cur_lw != 240 || cur_lh != logical_h) {
+                SDL_RenderSetLogicalSize(ren, 240, logical_h);
+            }
+            SDL_Rect src_rect{0, 0, 240, logical_h};
+            SDL_UpdateTexture(tex_pix, nullptr, display_buf, 240 * static_cast<int>(sizeof(uint32_t)));
+            SDL_RenderClear(ren);
+            SDL_RenderCopy(ren, tex_pix, &src_rect, nullptr);
+            SDL_RenderPresent(ren);
         }
     }
 
     void apply_softbar_geometry(SDL_Window* win, SDL_Renderer* ren, int scale) {
         if (!ren) return;
         int logical_h = show_softkey_bar ? 260 : 240;
-        SDL_RenderSetLogicalSize(ren, 240, logical_h);
+        int s = hd_font_mode ? std::clamp(hd_scale, 2, 4) : 1;
+        SDL_RenderSetLogicalSize(ren, 240 * s, logical_h * s);
         if (win && !is_fullscreen && scale > 0) {
             SDL_SetWindowSize(win, 240 * scale, logical_h * scale);
         }
@@ -2818,10 +3358,34 @@ struct UiInputManager {
         show_toast(is_fullscreen ? "全屏模式: 开启" : "全屏模式: 关闭");
     }
 
-    void save_screenshot_bmp(const uint32_t* game_fb) {
+    void save_screenshot_bmp(const uint32_t* game_fb, const uint32_t* game_pix_text, const uint32_t* game_hd_text, int cur_hd_scale) {
+        int s = std::clamp(cur_hd_scale, 2, 4);
+        int sw = hd_font_mode ? (240 * s) : 240;
+        int sh = sw;
+        std::vector<uint32_t> comp(static_cast<size_t>(sw) * static_cast<size_t>(sh));
+        if (hd_font_mode) {
+            for (int y = 0; y < 240; ++y) {
+                for (int sy = 0; sy < s; ++sy) {
+                    int hy = y * s + sy;
+                    for (int x = 0; x < 240; ++x) {
+                        uint32_t bg = game_fb[y * 240 + x];
+                        for (int sx = 0; sx < s; ++sx) {
+                            int hx = x * s + sx;
+                            uint32_t pm = game_hd_text ? game_hd_text[hy * sw + hx] : 0u;
+                            comp[static_cast<size_t>(hy) * sw + hx] = (pm != 0u) ? composite_pm_over_opaque(bg, pm) : (bg | 0xFF000000u);
+                        }
+                    }
+                }
+            }
+        } else {
+            for (int i = 0; i < 240 * 240; ++i) {
+                uint32_t pm = game_pix_text ? game_pix_text[i] : 0u;
+                comp[i] = (pm != 0u) ? composite_pm_over_opaque(game_fb[i], pm) : (game_fb[i] | 0xFF000000u);
+            }
+        }
         SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormatFrom(
-            const_cast<uint32_t*>(game_fb),
-            240, 240, 32, 240 * static_cast<int>(sizeof(uint32_t)),
+            comp.data(),
+            sw, sh, 32, sw * static_cast<int>(sizeof(uint32_t)),
             SDL_PIXELFORMAT_ARGB8888
         );
         if (!surf) return;
@@ -2862,15 +3426,16 @@ struct UiInputManager {
     // 4: 通信模式 (Online Server / Local Offline)
     // 5: 主音量
     // 6: 帧率模式 (60 FPS / 15 FPS)
-    // 7: 底部软键栏
-    // 8: 语言/汉化 (简体中文 / 原版 JP/EN)
-    // 9..20: Keybindings (ACT_COUNT = 12)
-    // 21: 恢复默认按键配置
-    // 22: 返回游戏 (Resume)
-    // 23: 保存进度并退出
-    static constexpr int BIND_START_ROW = 9;
-    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 21
-    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 24
+    // 7: 字体模式 (高清平滑 HD / 原版像素 12px)
+    // 8: 底部软键栏
+    // 9: 语言/汉化 (简体中文 / 原版 JP/EN)
+    // 10..21: Keybindings (ACT_COUNT = 12)
+    // 22: 恢复默认按键配置
+    // 23: 返回游戏 (Resume)
+    // 24: 保存进度并退出
+    static constexpr int BIND_START_ROW = 10;
+    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 22
+    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 25
     static constexpr int VISIBLE_ROWS = 9;
 
     bool overlay_open = false;
@@ -3117,6 +3682,12 @@ struct UiInputManager {
         high_fps_mode = !high_fps_mode;
         save_config();
         show_toast(high_fps_mode ? "帧率模式: 60 FPS (丝滑插值)" : "帧率模式: 15 FPS (原版帧率)", 90);
+    }
+
+    void toggle_font_mode() {
+        hd_font_mode = !hd_font_mode;
+        save_config();
+        show_toast(hd_font_mode ? "字体模式: 高清平滑 (HD)" : "字体模式: 原版像素 (12px)", 90);
     }
 
     void toggle_language_mode() {
@@ -3374,10 +3945,12 @@ struct UiInputManager {
                 } else if (overlay_sel_row == 6) {
                     toggle_fps_mode();
                 } else if (overlay_sel_row == 7) {
+                    toggle_font_mode();
+                } else if (overlay_sel_row == 8) {
                     show_softkey_bar = !show_softkey_bar;
                     apply_softbar_geometry(win, ren, scale);
                     save_config();
-                } else if (overlay_sel_row == 8) {
+                } else if (overlay_sel_row == 9) {
                     toggle_language_mode();
                 } else if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
                     overlay_sel_col = (overlay_sel_col + dir + 3) % 3;
@@ -3413,10 +3986,12 @@ struct UiInputManager {
                 } else if (overlay_sel_row == 6) {
                     toggle_fps_mode();
                 } else if (overlay_sel_row == 7) {
+                    toggle_font_mode();
+                } else if (overlay_sel_row == 8) {
                     show_softkey_bar = !show_softkey_bar;
                     apply_softbar_geometry(win, ren, scale);
                     save_config();
-                } else if (overlay_sel_row == 8) {
+                } else if (overlay_sel_row == 9) {
                     toggle_language_mode();
                 } else if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
                     overlay_waiting_bind = true;
@@ -3446,6 +4021,8 @@ struct UiInputManager {
                     toggle_fps_mode();
                 } else if (k == SDLK_F4) {
                     toggle_language_mode();
+                } else if (k == SDLK_F5) {
+                    toggle_font_mode();
                 } else if (k == SDLK_UP || matches_act(ACT_UP, k)) {
                     overlay_sel_row = (overlay_sel_row - 1 + TOTAL_ROWS) % TOTAL_ROWS;
                 } else if (k == SDLK_DOWN || matches_act(ACT_DOWN, k)) {
@@ -3491,27 +4068,27 @@ struct UiInputManager {
 
     void render_overlay_onto_display_buf() {
         bool live_pvp = g_pvp.active();
-        fill_rect_alpha(display_buf, 240, 260, 0, 0, 240, 240, live_pvp ? 0xB8080C18u : 0xDC080C18u);
+        ui_fill_rect(0, 0, 240, 240, live_pvp ? 0xB8080C18u : 0xDC080C18u);
 
         // Title bar
-        fill_rect_alpha(display_buf, 240, 260, 4, 4, 232, 18, live_pvp ? 0xFF14362Au : 0xFF1A284Au);
-        draw_rect_border(display_buf, 240, 260, 4, 4, 232, 18, live_pvp ? 0xFF4CC88Au : 0xFF4F78C8u);
+        ui_fill_rect(4, 4, 232, 18, live_pvp ? 0xFF14362Au : 0xFF1A284Au);
+        ui_draw_border(4, 4, 232, 18, live_pvp ? 0xFF4CC88Au : 0xFF4F78C8u);
         std::string title = live_pvp
             ? (g_pvp.match_started() ? "联机菜单 — 对战后台运行中 (F1关闭)" : "联机菜单 — 房间等待中 (F1关闭)")
             : "联机对战与模拟器设置 (F1 / Esc)";
-        draw_ui_text(display_buf, 240, 260, title, 120 - measure_ui_text(title) / 2, 17, 0xFFFFFFFFu);
+        ui_draw_text(title, 120 - measure_ui_text(title) / 2, 17, 0xFFFFFFFFu);
 
         // Dynamic section header
         if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
-            draw_ui_text(display_buf, 240, 260, "动作",  8,   34, 0xFF8EB0E8u);
-            draw_ui_text(display_buf, 240, 260, "键位1", 80,  34, 0xFF8EB0E8u);
-            draw_ui_text(display_buf, 240, 260, "键位2", 136, 34, 0xFF8EB0E8u);
-            draw_ui_text(display_buf, 240, 260, "手柄",  192, 34, 0xFF8EB0E8u);
+            ui_draw_text("动作",  8,   34, 0xFF8EB0E8u);
+            ui_draw_text("键位1", 80,  34, 0xFF8EB0E8u);
+            ui_draw_text("键位2", 136, 34, 0xFF8EB0E8u);
+            ui_draw_text("手柄",  192, 34, 0xFF8EB0E8u);
         } else {
-            draw_ui_text(display_buf, 240, 260, "功能选项", 8, 34, 0xFF8EB0E8u);
-            draw_ui_text(display_buf, 240, 260, "当前设置 (Enter确认 / ←→切换)", 74, 34, 0xFF8EB0E8u);
+            ui_draw_text("功能选项", 8, 34, 0xFF8EB0E8u);
+            ui_draw_text("当前设置 (Enter / ←→)", 84, 34, 0xFF8EB0E8u);
         }
-        fill_rect_alpha(display_buf, 240, 260, 6, 37, 228, 1, 0xFF324672u);
+        ui_fill_rect(6, 37, 228, 1, 0xFF324672u);
 
         // Rows viewport (y = 40 .. 193, 9 rows * 17px)
         for (int vi = 0; vi < VISIBLE_ROWS; ++vi) {
@@ -3520,12 +4097,12 @@ struct UiInputManager {
             int ry = 40 + vi * 17;
             bool is_sel = (r == overlay_sel_row);
             if (is_sel) {
-                fill_rect_alpha(display_buf, 240, 260, 5, ry, 226, 16, 0xFF223A6Au);
-                draw_rect_border(display_buf, 240, 260, 5, ry, 226, 16, 0xFF5A8AE0u);
+                ui_fill_rect(5, ry, 226, 16, 0xFF223A6Au);
+                ui_draw_border(5, ry, 226, 16, 0xFF5A8AE0u);
             }
 
             if (r == 0) {
-                draw_ui_text(display_buf, 240, 260, "联机对战", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFFFE484u);
+                ui_draw_text("联机对战", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFFFE484u);
                 std::string pstr;
                 uint32_t pcol = 0xFFFFD874u;
                 if (g_pvp.active()) {
@@ -3545,9 +4122,9 @@ struct UiInputManager {
                 } else {
                     pstr = "< 快速加入配对 >";
                 }
-                draw_ui_text(display_buf, 240, 260, pstr, 84, ry + 12, pcol);
+                ui_draw_text(pstr, 84, ry + 12, pcol);
             } else if (r == 1) {
-                draw_ui_text(display_buf, 240, 260, "对战赛制", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                ui_draw_text("对战赛制", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string fstr;
                 uint32_t fcol = 0xFF88FFAAu;
                 if (g_pvp.active()) {
@@ -3559,21 +4136,21 @@ struct UiInputManager {
                     fcol = pvp_bo3_mode ? 0xFFFFD874u : 0xFF88FFAAu;
                 }
                 int fx = std::max(64, std::min(84, 228 - measure_ui_text(fstr)));
-                draw_ui_text(display_buf, 240, 260, fstr, fx, ry + 12, fcol);
+                ui_draw_text(fstr, fx, ry + 12, fcol);
             } else if (r == 2) {
-                draw_ui_text(display_buf, 240, 260, "服务器地址", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                ui_draw_text("服务器地址", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string disp_srv = server_url;
                 if (disp_srv.size() > 21) disp_srv = disp_srv.substr(0, 20) + "..";
                 std::string ustr = "[" + disp_srv + "]";
-                draw_ui_text(display_buf, 240, 260, ustr, 76, ry + 12, is_sel ? 0xFF88EEFFu : 0xFF74D8FFu);
+                ui_draw_text(ustr, 76, ry + 12, is_sel ? 0xFF88EEFFu : 0xFF74D8FFu);
             } else if (r == 3) {
-                draw_ui_text(display_buf, 240, 260, "玩家昵称", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                ui_draw_text("玩家昵称", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string nstr = "[" + player_name + "]";
-                draw_ui_text(display_buf, 240, 260, nstr, 84, ry + 12, is_sel ? 0xFFFFEC88u : 0xFF88FFAAu);
+                ui_draw_text(nstr, 84, ry + 12, is_sel ? 0xFFFFEC88u : 0xFF88FFAAu);
             } else if (r == 4) {
-                draw_ui_text(display_buf, 240, 260, "通信模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                ui_draw_text("通信模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string nstr = online_mode ? "< 在线服务器 >" : "< 本地离线模拟 >";
-                draw_ui_text(display_buf, 240, 260, nstr, 86, ry + 12, online_mode ? 0xFF74D8FFu : 0xFF98A8C0u);
+                ui_draw_text(nstr, 86, ry + 12, online_mode ? 0xFF74D8FFu : 0xFF98A8C0u);
             } else if (r == 5) {
                 int vol = 100;
                 bool muted = false;
@@ -3582,19 +4159,23 @@ struct UiInputManager {
                     vol = g_audio.master_volume;
                     muted = g_audio.muted;
                 }
-                draw_ui_text(display_buf, 240, 260, "主音量", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                ui_draw_text("主音量", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string vstr = muted ? ("< 静音 (" + std::to_string(vol) + "%) >") : ("< " + std::to_string(vol) + "% >");
-                draw_ui_text(display_buf, 240, 260, vstr, 102, ry + 12, muted ? 0xFFFF8888u : 0xFF88FFAAu);
+                ui_draw_text(vstr, 102, ry + 12, muted ? 0xFFFF8888u : 0xFF88FFAAu);
             } else if (r == 6) {
-                draw_ui_text(display_buf, 240, 260, "帧率模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                ui_draw_text("帧率模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string fstr = high_fps_mode ? "< 60 FPS 丝滑插值 >" : "< 15 FPS 原版帧率 >";
-                draw_ui_text(display_buf, 240, 260, fstr, 84, ry + 12, high_fps_mode ? 0xFF88FFAAu : 0xFFFFD874u);
+                ui_draw_text(fstr, 84, ry + 12, high_fps_mode ? 0xFF88FFAAu : 0xFFFFD874u);
             } else if (r == 7) {
-                draw_ui_text(display_buf, 240, 260, "底部软键栏", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
-                std::string sstr = show_softkey_bar ? "< 开启 >" : "< 关闭 >";
-                draw_ui_text(display_buf, 240, 260, sstr, 110, ry + 12, show_softkey_bar ? 0xFF88FFAAu : 0xFF98A8C0u);
+                ui_draw_text("字体模式", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                std::string fmstr = hd_font_mode ? "< 高清平滑 (HD) >" : "< 原版像素 (12px) >";
+                ui_draw_text(fmstr, 84, ry + 12, hd_font_mode ? 0xFF74D8FFu : 0xFFFFD874u);
             } else if (r == 8) {
-                draw_ui_text(display_buf, 240, 260, "语言/汉化", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                ui_draw_text("底部软键栏", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                std::string sstr = show_softkey_bar ? "< 开启 >" : "< 关闭 >";
+                ui_draw_text(sstr, 110, ry + 12, show_softkey_bar ? 0xFF88FFAAu : 0xFF98A8C0u);
+            } else if (r == 9) {
+                ui_draw_text("语言/汉化", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string lstr;
                 uint32_t lcol = 0xFF98A8C0u;
                 if (lang_mode == loc::LangMode::Orig) {
@@ -3607,10 +4188,10 @@ struct UiInputManager {
                     lstr = "< 简体中文 (未放字表) >";
                     lcol = 0xFFFFD874u;
                 }
-                draw_ui_text(display_buf, 240, 260, lstr, 84, ry + 12, lcol);
+                ui_draw_text(lstr, 84, ry + 12, lcol);
             } else if (r >= BIND_START_ROW && r < BIND_END_ROW) {
                 int bi = r - BIND_START_ROW;
-                draw_ui_text(display_buf, 240, 260, binds[bi].label_zh, 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                ui_draw_text(binds[bi].label_zh, 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string cols[3] = {
                     short_key_name(binds[bi].keys[0]),
                     short_key_name(binds[bi].keys[1]),
@@ -3621,95 +4202,97 @@ struct UiInputManager {
                 for (int c = 0; c < 3; ++c) {
                     bool cell_sel = is_sel && (overlay_sel_col == c);
                     if (cell_sel) {
-                        fill_rect_alpha(display_buf, 240, 260, cx[c], ry + 1, cw[c], 14, 0xFF345898u);
-                        draw_rect_border(display_buf, 240, 260, cx[c], ry + 1, cw[c], 14, 0xFFFFD24Cu);
+                        ui_fill_rect(cx[c], ry + 1, cw[c], 14, 0xFF345898u);
+                        ui_draw_border(cx[c], ry + 1, cw[c], 14, 0xFFFFD24Cu);
                     }
                     int tw = measure_ui_text(cols[c]);
                     uint32_t tcol = (cols[c] == "---") ? 0xFF687898u : (cell_sel ? 0xFFFFEC88u : 0xFFE8F0FFu);
-                    draw_ui_text(display_buf, 240, 260, cols[c], cx[c] + (cw[c] - tw) / 2, ry + 12, tcol);
+                    ui_draw_text(cols[c], cx[c] + (cw[c] - tw) / 2, ry + 12, tcol);
                 }
             } else if (r == BIND_END_ROW) {
                 std::string lbl = "[ 恢复默认按键配置 ]";
-                draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFFD866u : 0xFFC8D8F8u);
+                ui_draw_text(lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFFD866u : 0xFFC8D8F8u);
             } else if (r == BIND_END_ROW + 1) {
                 std::string lbl = "[ 返回游戏 (Resume) ]";
-                draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFF88FFAAu : 0xFFC8D8F8u);
+                ui_draw_text(lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFF88FFAAu : 0xFFC8D8F8u);
             } else if (r == BIND_END_ROW + 2) {
                 std::string lbl = "[ 保存进度并退出 ]";
-                draw_ui_text(display_buf, 240, 260, lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFF8888u : 0xFFE8B8B8u);
+                ui_draw_text(lbl, 120 - measure_ui_text(lbl) / 2, ry + 12, is_sel ? 0xFFFF8888u : 0xFFE8B8B8u);
             }
         }
 
         // Scrollbar track on right edge
-        fill_rect_alpha(display_buf, 240, 260, 233, 40, 3, VISIBLE_ROWS * 17, 0xFF182238u);
+        ui_fill_rect(233, 40, 3, VISIBLE_ROWS * 17, 0xFF182238u);
         int sb_h = std::max(14, (VISIBLE_ROWS * 17 * VISIBLE_ROWS) / TOTAL_ROWS);
         int sb_y = 40 + ((VISIBLE_ROWS * 17 - sb_h) * overlay_scroll_top) / std::max(1, TOTAL_ROWS - VISIBLE_ROWS);
-        fill_rect_alpha(display_buf, 240, 260, 233, sb_y, 3, sb_h, 0xFF6894E0u);
+        ui_fill_rect(233, sb_y, 3, sb_h, 0xFF6894E0u);
 
         // Footer instructions
-        fill_rect_alpha(display_buf, 240, 260, 6, 196, 228, 1, 0xFF324672u);
+        ui_fill_rect(6, 196, 228, 1, 0xFF324672u);
         if (overlay_sel_row == 1) {
             if (live_pvp) {
-                draw_ui_text(display_buf, 240, 260, "当前房间赛制已锁定 (退出房间后可修改)", 6, 211, 0xFF88FFAAu);
+                ui_draw_text("当前房间赛制已锁定 (退出房间后可修改)", 6, 211, 0xFF88FFAAu);
             } else {
-                draw_ui_text(display_buf, 240, 260, "←→/Enter:建房赛制 一回战 / 三回战(BO3·加入时随房主)", 6, 211, 0xFFFFD874u);
+                ui_draw_text("←→/Enter:切换 一回战 / 三回战(BO3)", 12, 211, 0xFFFFD874u);
             }
         } else if (overlay_sel_row == 2) {
-            draw_ui_text(display_buf, 240, 260, "Enter:手动输入/粘贴地址  ←→:预设切换", 6, 211, 0xFF88EEFFu);
+            ui_draw_text("Enter:手动输入/粘贴地址  ←→:预设切换", 6, 211, 0xFF88EEFFu);
         } else if (overlay_sel_row == 3) {
-            draw_ui_text(display_buf, 240, 260, "Enter:输入/粘贴昵称 (自动保存)", 14, 211, 0xFFFFEC88u);
+            ui_draw_text("Enter:输入/粘贴昵称 (自动保存)", 14, 211, 0xFFFFEC88u);
         } else if (overlay_sel_row == 0) {
             if (live_pvp) {
-                draw_ui_text(display_buf, 240, 260, "Enter:立即退出房间   F1/Esc:继续对战", 10, 211, 0xFF88FFAAu);
+                ui_draw_text("Enter:立即退出房间   F1/Esc:继续对战", 10, 211, 0xFF88FFAAu);
             } else {
-                draw_ui_text(display_buf, 240, 260, "←→:选建房/快速加入/房间号  Enter:出发!", 6, 211, 0xFFFFE484u);
+                ui_draw_text("←→:建房/快速配对/选房  Enter:出发!", 12, 211, 0xFFFFE484u);
             }
         } else {
-            draw_ui_text(display_buf, 240, 260, "↑↓:换行  ←→:切换/选槽  Enter:确认/改键", 6, 211, 0xFFA4BCE4u);
+            ui_draw_text("↑↓:选择  ←→:切换  Enter:确认/改键", 9, 211, 0xFFA4BCE4u);
         }
-        draw_ui_text(display_buf, 240, 260, "↓改键 | F3帧率 F4汉化 F11全屏 F12截图", 3, 227, 0xFF849AC0u);
+        ui_draw_text("↓改键 | F3帧 F4汉 F5字 F11全屏 F12截图", 3, 227, 0xFF849AC0u);
 
         // Text input modal popup (Server URL / Player Nickname)
         if (overlay_text_edit_mode != 0) {
-            fill_rect_alpha(display_buf, 240, 260, 8, 62, 224, 106, 0xF60C162Cu);
-            draw_rect_border(display_buf, 240, 260, 8, 62, 224, 106, 0xFF68B8FFu);
+            ui_fill_rect(8, 62, 224, 106, 0xF60C162Cu);
+            ui_draw_border(8, 62, 224, 106, 0xFF68B8FFu);
             std::string hdr = (overlay_text_edit_mode == 1)
                 ? "输入服务器地址 (IP:端口)"
                 : "输入联机玩家昵称";
-            draw_ui_text(display_buf, 240, 260, hdr, 120 - measure_ui_text(hdr) / 2, 82, 0xFFFFE070u);
+            ui_draw_text(hdr, 120 - measure_ui_text(hdr) / 2, 82, 0xFFFFE070u);
 
-            fill_rect_alpha(display_buf, 240, 260, 16, 94, 208, 24, 0xFF060B18u);
-            draw_rect_border(display_buf, 240, 260, 16, 94, 208, 24, 0xFF88D8FFu);
+            ui_fill_rect(16, 94, 208, 24, 0xFF060B18u);
+            ui_draw_border(16, 94, 208, 24, 0xFF88D8FFu);
             std::string cursor_txt = overlay_text_edit_buf + "_";
             while (measure_ui_text(cursor_txt) > 198 && cursor_txt.size() > 2) {
                 cursor_txt.erase(0, 1);
             }
-            draw_ui_text(display_buf, 240, 260, cursor_txt, 22, 111, 0xFFFFFFFFu);
+            ui_draw_text(cursor_txt, 22, 111, 0xFFFFFFFFu);
 
             std::string h1 = "支持直接打字或 Ctrl+V 粘贴剪贴板";
-            std::string h2 = "Enter:保存确认   Backspace:退格   Esc:取消";
-            draw_ui_text(display_buf, 240, 260, h1, 120 - measure_ui_text(h1) / 2, 136, 0xFF88CCFFu);
-            draw_ui_text(display_buf, 240, 260, h2, 120 - measure_ui_text(h2) / 2, 155, 0xFFA0B8E0u);
+            std::string h2 = "Enter:保存  Bksp:退格  Esc:取消";
+            ui_draw_text(h1, 120 - measure_ui_text(h1) / 2, 136, 0xFF88CCFFu);
+            ui_draw_text(h2, 120 - measure_ui_text(h2) / 2, 155, 0xFFA0B8E0u);
         }
 
         // Waiting for key modal popup
         if (overlay_waiting_bind && overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
             int bi = overlay_sel_row - BIND_START_ROW;
-            fill_rect_alpha(display_buf, 240, 260, 12, 72, 216, 86, 0xF4101830u);
-            draw_rect_border(display_buf, 240, 260, 12, 72, 216, 86, 0xFFFFD24Cu);
+            ui_fill_rect(12, 72, 216, 86, 0xF4101830u);
+            ui_draw_border(12, 72, 216, 86, 0xFFFFD24Cu);
             std::string p1 = std::string("正在设置: ") + binds[bi].label_zh;
             std::string p2 = "请按下键盘按键或手柄按钮...";
             std::string p3 = "Esc:取消   Backspace:清空槽位";
-            draw_ui_text(display_buf, 240, 260, p1, 120 - measure_ui_text(p1) / 2, 95,  0xFFFFE070u);
-            draw_ui_text(display_buf, 240, 260, p2, 120 - measure_ui_text(p2) / 2, 118, 0xFFFFFFFFu);
-            draw_ui_text(display_buf, 240, 260, p3, 120 - measure_ui_text(p3) / 2, 142, 0xFFA0B8E0u);
+            ui_draw_text(p1, 120 - measure_ui_text(p1) / 2, 95,  0xFFFFE070u);
+            ui_draw_text(p2, 120 - measure_ui_text(p2) / 2, 118, 0xFFFFFFFFu);
+            ui_draw_text(p3, 120 - measure_ui_text(p3) / 2, 142, 0xFFA0B8E0u);
         }
     }
 
     // Blocking pause modal used ONLY in single-player (!g_pvp.active()).
     // Returns true if user chose "Save & Quit".
-    bool run_pause_config_modal(SDL_Window* win, SDL_Renderer* ren, SDL_Texture* tex, const uint32_t* game_fb, int scale) {
-        if (!win || !ren || !tex) return false;
+    bool run_pause_config_modal(SDL_Window* win, SDL_Renderer* ren, SDL_Texture* tex_pix, SDL_Texture* tex_hd,
+                                const uint32_t* game_fb, const uint32_t* game_pix_text, const uint32_t* game_hd_text,
+                                int cur_hd_scale, int scale) {
+        if (!win || !ren || (!tex_pix && !tex_hd)) return false;
         auto pause_t0 = std::chrono::steady_clock::now();
         if (g_audio.dev_id != 0) SDL_PauseAudioDevice(g_audio.dev_id, 1);
 
@@ -3740,13 +4323,8 @@ struct UiInputManager {
             }
             if (!overlay_open) break;
 
-            compose_display_buffer(game_fb, 0, true);
-            int logical_h = show_softkey_bar ? 260 : 240;
-            SDL_Rect src_rect{0, 0, 240, logical_h};
-            SDL_UpdateTexture(tex, nullptr, display_buf, 240 * static_cast<int>(sizeof(uint32_t)));
-            SDL_RenderClear(ren);
-            SDL_RenderCopy(ren, tex, &src_rect, nullptr);
-            SDL_RenderPresent(ren);
+            compose_display_buffer(game_fb, game_pix_text, game_hd_text, cur_hd_scale, 0, true);
+            present_sdl_frame(ren, tex_pix, tex_hd);
             SDL_Delay(16);
         }
 
@@ -3763,35 +4341,76 @@ static UiInputManager g_ui;
 // ============================================================================
 // 60 FPS Display-List Sub-Frame Motion Interpolator (with 60/15 FPS Switch)
 // ============================================================================
-static void blit_rect_buf(uint32_t* dst_buf, int dst_w, int dst_h, bool fill,
-                          int rx, int ry, int rw, int rh, uint32_t col) {
-    if (rw <= 0 || rh <= 0) return;
-    if (fill) {
-        int y0 = std::max(0, ry), y1 = std::min(dst_h, ry + rh);
-        int x0 = std::max(0, rx), x1 = std::min(dst_w, rx + rw);
-        for (int y = y0; y < y1; ++y) {
-            for (int x = x0; x < x1; ++x) {
-                dst_buf[y * dst_w + x] = col;
-            }
-        }
-    } else {
-        int x0 = std::max(0, rx), x1 = std::min(dst_w - 1, rx + rw);
-        for (int x = x0; x <= x1; ++x) {
-            if (ry >= 0 && ry < dst_h) dst_buf[ry * dst_w + x] = col;
-            if (ry + rh >= 0 && ry + rh < dst_h) dst_buf[(ry + rh) * dst_w + x] = col;
-        }
-        int y0 = std::max(0, ry), y1 = std::min(dst_h - 1, ry + rh);
-        for (int y = y0; y <= y1; ++y) {
-            if (rx >= 0 && rx < dst_w) dst_buf[y * dst_w + rx] = col;
-            if (rx + rw >= 0 && rx + rw < dst_w) dst_buf[y * dst_w + (rx + rw)] = col;
+struct SurfaceTarget {
+    uint32_t* gfx = nullptr;
+    uint32_t* pix_text = nullptr;
+    uint32_t* hd_text = nullptr;
+    int w = 0;
+    int h = 0;
+    int hd_scale = 3;
+};
+
+static void attenuate_text_rect(uint32_t* pix_buf, uint32_t* hd_buf, int w, int h, int hd_scale,
+                                int rx, int ry, int rw, int rh, uint32_t cover_alpha) {
+    if (rw <= 0 || rh <= 0 || cover_alpha == 0u) return;
+    int y0 = std::max(0, ry), y1 = std::min(h, ry + rh);
+    int x0 = std::max(0, rx), x1 = std::min(w, rx + rw);
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            if (pix_buf) attenuate_pm(pix_buf[y * w + x], cover_alpha);
+            if (hd_buf) attenuate_hd_block(hd_buf, w, h, hd_scale, x, y, cover_alpha);
         }
     }
 }
 
-static void blit_image_buf(DojaRuntime& rt, uint32_t* dst_buf, int dst_w, int dst_h,
-                           Ref img_ref, int base_dx, int base_dy,
-                           int sx, int sy, int sw, int sh, int dw, int dh, int flip_mode) {
-    if (img_ref <= 0 || dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
+static void attenuate_text_border(uint32_t* pix_buf, uint32_t* hd_buf, int w, int h, int hd_scale,
+                                  int rx, int ry, int rw, int rh, uint32_t cover_alpha) {
+    if (rw <= 0 || rh <= 0 || cover_alpha == 0u) return;
+    attenuate_text_rect(pix_buf, hd_buf, w, h, hd_scale, rx, ry, rw, 1, cover_alpha);
+    if (rh > 1) attenuate_text_rect(pix_buf, hd_buf, w, h, hd_scale, rx, ry + rh - 1, rw, 1, cover_alpha);
+    if (rh > 2) {
+        attenuate_text_rect(pix_buf, hd_buf, w, h, hd_scale, rx, ry + 1, 1, rh - 2, cover_alpha);
+        if (rw > 1) attenuate_text_rect(pix_buf, hd_buf, w, h, hd_scale, rx + rw - 1, ry + 1, 1, rh - 2, cover_alpha);
+    }
+}
+
+static void blit_rect_surface(const SurfaceTarget& dst, bool fill,
+                              int rx, int ry, int rw, int rh, uint32_t col) {
+    if (!dst.gfx || rw <= 0 || rh <= 0) return;
+    auto clear_px = [&](int x, int y) {
+        if (x < 0 || x >= dst.w || y < 0 || y >= dst.h) return;
+        dst.gfx[y * dst.w + x] = col;
+        if (dst.pix_text) dst.pix_text[y * dst.w + x] = 0u;
+        if (dst.hd_text) clear_hd_block(dst.hd_text, dst.w, dst.h, dst.hd_scale, x, y);
+    };
+    if (fill) {
+        int y0 = std::max(0, ry), y1 = std::min(dst.h, ry + rh);
+        int x0 = std::max(0, rx), x1 = std::min(dst.w, rx + rw);
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                dst.gfx[y * dst.w + x] = col;
+                if (dst.pix_text) dst.pix_text[y * dst.w + x] = 0u;
+                if (dst.hd_text) clear_hd_block(dst.hd_text, dst.w, dst.h, dst.hd_scale, x, y);
+            }
+        }
+    } else {
+        int x0 = std::max(0, rx), x1 = std::min(dst.w - 1, rx + rw);
+        for (int x = x0; x <= x1; ++x) {
+            clear_px(x, ry);
+            clear_px(x, ry + rh);
+        }
+        int y0 = std::max(0, ry), y1 = std::min(dst.h - 1, ry + rh);
+        for (int y = y0; y <= y1; ++y) {
+            clear_px(rx, y);
+            clear_px(rx + rw, y);
+        }
+    }
+}
+
+static void blit_image_surface(DojaRuntime& rt, const SurfaceTarget& dst,
+                               Ref img_ref, int base_dx, int base_dy,
+                               int sx, int sy, int sw, int sh, int dw, int dh, int flip_mode) {
+    if (!dst.gfx || img_ref <= 0 || dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
     HeapObject& img_obj = rt.get(img_ref);
     if (!img_obj.img) return;
     ImageData& img = *img_obj.img;
@@ -3803,10 +4422,15 @@ static void blit_image_buf(DojaRuntime& rt, uint32_t* dst_buf, int dst_w, int ds
 
     bool flip_h = (flip_mode == 1 || flip_mode == 3);
     bool flip_v = (flip_mode == 2 || flip_mode == 3);
+    int S = dst.hd_scale;
+    bool src_has_pix = !img.is_paletted &&
+                       img.pix_text.size() == static_cast<size_t>(img.width) * static_cast<size_t>(img.height);
+    bool src_has_hd = !img.is_paletted && S >= 2 &&
+                      img.hd_text.size() == static_cast<size_t>(img.width * S) * static_cast<size_t>(img.height * S);
 
     for (int py = 0; py < dh; ++py) {
         int out_y = base_dy + py;
-        if (out_y < 0 || out_y >= dst_h) continue;
+        if (out_y < 0 || out_y >= dst.h) continue;
         int rel_sy = (py * sh) / dh;
         if (flip_v) rel_sy = sh - 1 - rel_sy;
         int src_y = sy + rel_sy;
@@ -3814,80 +4438,93 @@ static void blit_image_buf(DojaRuntime& rt, uint32_t* dst_buf, int dst_w, int ds
 
         for (int px = 0; px < dw; ++px) {
             int out_x = base_dx + px;
-            if (out_x < 0 || out_x >= dst_w) continue;
+            if (out_x < 0 || out_x >= dst.w) continue;
             int rel_sx = (px * sw) / dw;
             if (flip_h) rel_sx = sw - 1 - rel_sx;
             int src_x = sx + rel_sx;
             if (src_x < 0 || src_x >= img.width) continue;
 
+            bool is_trans = false;
+            uint32_t opaque_col = 0xFF000000u;
             if (img.is_paletted) {
-                uint8_t idx = img.indices[src_y * img.width + src_x];
-                if (img.transparent_enabled && idx == img.transparent_index) continue;
-                uint32_t col = pal ? pal->entries[idx] : 0xFFFF00FFu;
-                dst_buf[out_y * dst_w + out_x] = col | 0xFF000000u;
-            } else {
-                uint32_t col = img.argb[src_y * img.width + src_x];
-                if ((col >> 24) == 0) continue;
-                if (img.transparent_enabled && ((col & 0xFFFFFFu) == (img.transparent_color & 0xFFFFFFu))) {
-                    continue;
+                uint8_t idx = img.indices[static_cast<size_t>(src_y) * img.width + src_x];
+                if (img.transparent_enabled && idx == img.transparent_index) {
+                    is_trans = true;
+                } else {
+                    uint32_t col = pal ? pal->entries[idx] : 0xFFFF00FFu;
+                    opaque_col = col | 0xFF000000u;
                 }
-                dst_buf[out_y * dst_w + out_x] = col | 0xFF000000u;
+            } else {
+                uint32_t col = img.argb[static_cast<size_t>(src_y) * img.width + src_x];
+                if ((col >> 24) == 0 ||
+                    (img.transparent_enabled && ((col & 0xFFFFFFu) == (img.transparent_color & 0xFFFFFFu)))) {
+                    is_trans = true;
+                } else {
+                    opaque_col = col | 0xFF000000u;
+                }
+            }
+
+            if (!is_trans) {
+                dst.gfx[static_cast<size_t>(out_y) * dst.w + out_x] = opaque_col;
+                if (dst.pix_text) {
+                    dst.pix_text[static_cast<size_t>(out_y) * dst.w + out_x] =
+                        src_has_pix ? img.pix_text[static_cast<size_t>(src_y) * img.width + src_x] : 0u;
+                }
+            } else if (src_has_pix && dst.pix_text) {
+                uint32_t spm = img.pix_text[static_cast<size_t>(src_y) * img.width + src_x];
+                if (spm != 0u) {
+                    blend_pm_pixel_over(dst.pix_text[static_cast<size_t>(out_y) * dst.w + out_x], spm);
+                }
+            }
+
+            if (dst.hd_text) {
+                if (!src_has_hd) {
+                    if (!is_trans) {
+                        clear_hd_block(dst.hd_text, dst.w, dst.h, S, out_x, out_y);
+                    }
+                } else {
+                    int dst_hw = dst.w * S;
+                    int src_hw = img.width * S;
+                    int src_hh = img.height * S;
+                    for (int sy_sub = 0; sy_sub < S; ++sy_sub) {
+                        int dst_hy = out_y * S + sy_sub;
+                        int rel_hy = ((py * S + sy_sub) * sh) / dh;
+                        if (flip_v) rel_hy = sh * S - 1 - rel_hy;
+                        int src_hy = sy * S + rel_hy;
+                        if (src_hy < 0 || src_hy >= src_hh) continue;
+                        for (int sx_sub = 0; sx_sub < S; ++sx_sub) {
+                            int dst_hx = out_x * S + sx_sub;
+                            int rel_hx = ((px * S + sx_sub) * sw) / dw;
+                            if (flip_h) rel_hx = sw * S - 1 - rel_hx;
+                            int src_hx = sx * S + rel_hx;
+                            if (src_hx < 0 || src_hx >= src_hw) continue;
+                            uint32_t spm = img.hd_text[static_cast<size_t>(src_hy) * src_hw + src_hx];
+                            if (!is_trans) {
+                                dst.hd_text[static_cast<size_t>(dst_hy) * dst_hw + dst_hx] = spm;
+                            } else if (spm != 0u) {
+                                blend_pm_pixel_over(dst.hd_text[static_cast<size_t>(dst_hy) * dst_hw + dst_hx], spm);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
 
-static void blit_text_buf(uint32_t* dst_buf, int dst_w, int dst_h,
-                          const std::string& text, int pen_x, int baseline_y, uint32_t color) {
-    auto cps = utf8_to_codepoints(text);
-    uint8_t sr = (color >> 16) & 0xFF;
-    uint8_t sg = (color >> 8) & 0xFF;
-    uint8_t sb = color & 0xFF;
-
-    for (uint32_t cp : cps) {
-        if (const auto* gl = g_ft.get_glyph(cp)) {
-            if (!gl->bmp.empty() && gl->rows > 0 && gl->width > 0) {
-                for (int ry = 0; ry < gl->rows; ++ry) {
-                    int dy = baseline_y + gl->yoff + ry;
-                    if (dy < 0 || dy >= dst_h) continue;
-                    for (int rx = 0; rx < gl->width; ++rx) {
-                        int dx = pen_x + gl->xoff + rx;
-                        if (dx < 0 || dx >= dst_w) continue;
-                        uint8_t alpha = gl->bmp[ry * gl->width + rx];
-                        if (gl->is_bitmap) {
-                            if (alpha >= 128) {
-                                dst_buf[dy * dst_w + dx] = 0xFF000000u | (sr << 16) | (sg << 8) | sb;
-                            }
-                        } else if (alpha > 24) {
-                            uint32_t dst = dst_buf[dy * dst_w + dx];
-                            uint32_t dr = (dst >> 16) & 0xFF;
-                            uint32_t dg = (dst >> 8) & 0xFF;
-                            uint32_t db = dst & 0xFF;
-                            uint32_t nr = (sr * alpha + dr * (255 - alpha)) / 255;
-                            uint32_t ng = (sg * alpha + dg * (255 - alpha)) / 255;
-                            uint32_t nb = (sb * alpha + db * (255 - alpha)) / 255;
-                            dst_buf[dy * dst_w + dx] = 0xFF000000u | (nr << 16) | (ng << 8) | nb;
-                        }
-                    }
-                }
-            }
-            pen_x += gl->adv_x;
-        } else {
-            int adv = default_doja_char_width(cp);
-            if (cp > 0x20) {
-                for (int gy = 0; gy < 10; ++gy) {
-                    int dy = baseline_y - 9 + gy;
-                    if (dy < 0 || dy >= dst_h) continue;
-                    for (int gx = 0; gx < adv - 1; ++gx) {
-                        int dx = pen_x + gx;
-                        if (dx < 0 || dx >= dst_w) continue;
-                        bool on = ((cp >> ((gx + gy) % 7)) & 1) != 0;
-                        if (on) dst_buf[dy * dst_w + dx] = color;
-                    }
-                }
-            }
-            pen_x += adv;
-        }
+static void blit_text_surface(const SurfaceTarget& dst,
+                              const std::string& text, int pen_x, int baseline_y, uint32_t color,
+                              bool also_draw_1x_to_gfx) {
+    if (dst.pix_text) {
+        UiInputManager::render_glyphs_to_buf(dst.pix_text, dst.w, dst.h, text, pen_x, baseline_y, color, true, 0);
+    }
+    if (dst.hd_text && dst.hd_scale >= 2) {
+        int S = dst.hd_scale;
+        UiInputManager::render_glyphs_to_buf(dst.hd_text, dst.w * S, dst.h * S, text,
+                                             pen_x * S, baseline_y * S, color, true, S);
+    }
+    if (also_draw_1x_to_gfx && dst.gfx) {
+        UiInputManager::render_glyphs_to_buf(dst.gfx, dst.w, dst.h, text, pen_x, baseline_y, color, false, 0);
     }
 }
 
@@ -3920,7 +4557,12 @@ struct FrameInterpolator {
 
     std::unordered_map<Ref, uint32_t> img_gen;
     uint32_t lock_base_fb[240 * 240] = {0};
+    uint32_t lock_base_pix_text[240 * 240] = {0};
+    std::vector<uint32_t> lock_base_hd_text;
     uint32_t interp_fb[240 * 240] = {0};
+    uint32_t interp_pix_text[240 * 240] = {0};
+    std::vector<uint32_t> interp_hd_text;
+    int hd_scale = 3;
 
     std::vector<DrawCmd> prev_cmds;
     std::vector<DrawCmd> curr_cmds;
@@ -3957,8 +4599,31 @@ struct FrameInterpolator {
         return (it != img_gen.end()) ? it->second : 0u;
     }
 
-    void on_screen_lock(const uint32_t* current_fb) {
-        std::memcpy(lock_base_fb, current_fb, 240 * 240 * sizeof(uint32_t));
+    void ensure_hd_buffers(int s) {
+        hd_scale = std::clamp(s, 2, 4);
+        size_t need = static_cast<size_t>(240 * hd_scale) * static_cast<size_t>(240 * hd_scale);
+        if (lock_base_hd_text.size() != need) lock_base_hd_text.assign(need, 0u);
+        if (interp_hd_text.size() != need) interp_hd_text.assign(need, 0u);
+    }
+
+    void copy_lock_base(const uint32_t* fb, const uint32_t* pix_text, const uint32_t* hd_text, int s) {
+        ensure_hd_buffers(s);
+        std::memcpy(lock_base_fb, fb, 240 * 240 * sizeof(uint32_t));
+        if (pix_text) {
+            std::memcpy(lock_base_pix_text, pix_text, 240 * 240 * sizeof(uint32_t));
+        } else {
+            std::fill(std::begin(lock_base_pix_text), std::end(lock_base_pix_text), 0u);
+        }
+        if (hd_text) {
+            std::memcpy(lock_base_hd_text.data(), hd_text, lock_base_hd_text.size() * sizeof(uint32_t));
+        } else {
+            std::fill(lock_base_hd_text.begin(), lock_base_hd_text.end(), 0u);
+        }
+    }
+
+    void on_screen_lock(const uint32_t* current_fb, const uint32_t* current_pix_text,
+                        const uint32_t* current_hd_text, int s) {
+        copy_lock_base(current_fb, current_pix_text, current_hd_text, s);
         building_cmds.clear();
         building_coverage = 0;
         capturing = true;
@@ -4027,7 +4692,8 @@ struct FrameInterpolator {
         building_cmds.push_back(std::move(c));
     }
 
-    void on_screen_unlock(const uint32_t* final_fb, bool enable_interp) {
+    void on_screen_unlock(const uint32_t* final_fb, const uint32_t* final_pix_text,
+                          const uint32_t* final_hd_text, int s, bool enable_interp) {
         capturing = false;
         prev_cmds = std::move(curr_cmds);
         curr_cmds = std::move(building_cmds);
@@ -4041,19 +4707,19 @@ struct FrameInterpolator {
         subframes_presented = 4;
 
         if (!enable_interp || prev_cmds.empty() || curr_cmds.empty()) {
-            std::memcpy(lock_base_fb, final_fb, 240 * 240 * sizeof(uint32_t));
+            copy_lock_base(final_fb, final_pix_text, final_hd_text, s);
             return;
         }
         // Only interpolate full-viewport scenes (Overworld, Battle, Menus, Title) so tiny
         // incremental wipe patches never leave trails on uncleared backgrounds
         if (cov < 240 * 160) {
-            std::memcpy(lock_base_fb, final_fb, 240 * 240 * sizeof(uint32_t));
+            copy_lock_base(final_fb, final_pix_text, final_hd_text, s);
             return;
         }
         int n_prev = static_cast<int>(prev_cmds.size());
         int n_curr = static_cast<int>(curr_cmds.size());
         if (std::abs(n_curr - n_prev) > std::max(16, (n_curr * 3) / 5)) {
-            std::memcpy(lock_base_fb, final_fb, 240 * 240 * sizeof(uint32_t));
+            copy_lock_base(final_fb, final_pix_text, final_hd_text, s);
             return;
         }
 
@@ -4221,7 +4887,13 @@ struct FrameInterpolator {
     }
 
     void rasterize_subframe(DojaRuntime& rt, float alpha) {
+        ensure_hd_buffers(hd_scale);
         std::memcpy(interp_fb, lock_base_fb, 240 * 240 * sizeof(uint32_t));
+        std::memcpy(interp_pix_text, lock_base_pix_text, 240 * 240 * sizeof(uint32_t));
+        std::memcpy(interp_hd_text.data(), lock_base_hd_text.data(), interp_hd_text.size() * sizeof(uint32_t));
+        SurfaceTarget dst{interp_fb, interp_pix_text, interp_hd_text.data(), 240, 240, hd_scale};
+        bool draw_1x_to_gfx = rt.should_bake_1x_text_into_gfx();
+
         for (const DrawCmd& c : curr_cmds) {
             int dx = c.dx;
             int dy = c.dy;
@@ -4232,26 +4904,36 @@ struct FrameInterpolator {
             }
             switch (c.kind) {
                 case CmdKind::FillRect:
-                    blit_rect_buf(interp_fb, 240, 240, true, dx, dy, c.dw, c.dh, c.color);
+                    blit_rect_surface(dst, true, dx, dy, c.dw, c.dh, c.color);
                     break;
                 case CmdKind::DrawRect:
-                    blit_rect_buf(interp_fb, 240, 240, false, dx, dy, c.dw, c.dh, c.color);
+                    blit_rect_surface(dst, false, dx, dy, c.dw, c.dh, c.color);
                     break;
                 case CmdKind::Image:
-                    blit_image_buf(rt, interp_fb, 240, 240, c.img_ref, dx, dy,
-                                   c.sx, c.sy, c.sw, c.sh, c.dw, c.dh, c.flip_mode);
+                    blit_image_surface(rt, dst, c.img_ref, dx, dy,
+                                       c.sx, c.sy, c.sw, c.sh, c.dw, c.dh, c.flip_mode);
                     break;
                 case CmdKind::Text:
-                    blit_text_buf(interp_fb, 240, 240, c.text, dx, dy, c.color);
+                    blit_text_surface(dst, c.text, dx, dy, c.color, draw_1x_to_gfx);
                     break;
-                case CmdKind::OP_FB_FILL_RECT_ALPHA:
+                case CmdKind::OP_FB_FILL_RECT_ALPHA: {
                     UiInputManager::fill_rect_alpha(interp_fb, 240, 240, dx, dy, c.dw, c.dh, c.color);
+                    uint32_t ca = (c.color >> 24) & 0xFFu;
+                    attenuate_text_rect(interp_pix_text, interp_hd_text.data(), 240, 240, hd_scale, dx, dy, c.dw, c.dh, ca);
                     break;
-                case CmdKind::OP_FB_DRAW_BORDER:
+                }
+                case CmdKind::OP_FB_DRAW_BORDER: {
                     UiInputManager::draw_rect_border(interp_fb, 240, 240, dx, dy, c.dw, c.dh, c.color);
+                    uint32_t ca = (c.color >> 24) & 0xFFu;
+                    attenuate_text_border(interp_pix_text, interp_hd_text.data(), 240, 240, hd_scale, dx, dy, c.dw, c.dh, ca);
                     break;
+                }
                 case CmdKind::OP_FB_TEXT:
-                    UiInputManager::draw_ui_text(interp_fb, 240, 240, c.text, dx, dy, c.color, c.shadow);
+                    UiInputManager::draw_ui_text_pm(interp_pix_text, interp_hd_text.data(), 240, 240, hd_scale,
+                                                    c.text, dx, dy, c.color, c.shadow);
+                    if (draw_1x_to_gfx) {
+                        UiInputManager::draw_ui_text(interp_fb, 240, 240, c.text, dx, dy, c.color, c.shadow);
+                    }
                     break;
             }
         }
@@ -4332,6 +5014,18 @@ void set_cli_translation_path(const std::string& path) {
     g_ui.cli_translation_path = path;
 }
 
+void set_cli_font_mode(int mode) {
+    if (mode == 0 || mode == 1) {
+        g_ui.has_cli_font_mode = true;
+        g_ui.cli_hd_font_mode = (mode != 0);
+    }
+}
+
+void set_cli_font_paths(const std::string& pixel_font, const std::string& hd_font) {
+    if (!pixel_font.empty()) g_ft.cli_pixel_font_path = pixel_font;
+    if (!hd_font.empty()) g_ft.cli_hd_font_path = hd_font;
+}
+
 void set_cli_pvp_bo3(bool v) {
     g_ui.has_cli_pvp_bo3 = true;
     g_ui.cli_pvp_bo3 = v;
@@ -4405,6 +5099,8 @@ void DojaRuntime::save_full_snapshot(FullHeapSnapshot& out) const {
     out.heap = heap_;
     out.palettes.clear();
     out.offscreen_argb.clear();
+    out.offscreen_pix_text.clear();
+    out.offscreen_hd_text.clear();
     out.paletted_image_refs.clear();
     for (size_t i = 1; i < heap_.size(); ++i) {
         const HeapObject& o = heap_[i];
@@ -4412,6 +5108,12 @@ void DojaRuntime::save_full_snapshot(FullHeapSnapshot& out) const {
             out.palettes.emplace_back(static_cast<Ref>(i), *o.pal);
         } else if (o.kind == ObjKind::Image && o.img && !o.img->argb.empty()) {
             out.offscreen_argb.emplace_back(static_cast<Ref>(i), o.img->argb);
+            if (!o.img->pix_text.empty()) {
+                out.offscreen_pix_text.emplace_back(static_cast<Ref>(i), o.img->pix_text);
+            }
+            if (!o.img->hd_text.empty()) {
+                out.offscreen_hd_text.emplace_back(static_cast<Ref>(i), o.img->hd_text);
+            }
         } else if (o.kind == ObjKind::PalettedImage && o.img) {
             out.paletted_image_refs.emplace_back(static_cast<Ref>(i), o.img->palette_ref);
         }
@@ -4428,6 +5130,18 @@ void DojaRuntime::restore_full_snapshot(const FullHeapSnapshot& in) {
     for (const auto& im : in.offscreen_argb) {
         if (im.first > 0 && static_cast<size_t>(im.first) < heap_.size() && heap_[im.first].img) {
             heap_[im.first].img->argb = im.second;
+            heap_[im.first].img->pix_text.clear();
+            heap_[im.first].img->hd_text.clear();
+        }
+    }
+    for (const auto& pt : in.offscreen_pix_text) {
+        if (pt.first > 0 && static_cast<size_t>(pt.first) < heap_.size() && heap_[pt.first].img) {
+            heap_[pt.first].img->pix_text = pt.second;
+        }
+    }
+    for (const auto& ht : in.offscreen_hd_text) {
+        if (ht.first > 0 && static_cast<size_t>(ht.first) < heap_.size() && heap_[ht.first].img) {
+            heap_[ht.first].img->hd_text = ht.second;
         }
     }
     for (const auto& pr : in.paletted_image_refs) {
@@ -4435,6 +5149,8 @@ void DojaRuntime::restore_full_snapshot(const FullHeapSnapshot& in) {
             heap_[pr.first].img->palette_ref = pr.second;
         }
     }
+    std::fill(std::begin(fb_pix_text_), std::end(fb_pix_text_), 0u);
+    std::fill(fb_hd_text_.begin(), fb_hd_text_.end(), 0u);
     g_interp.reset();
 }
 
@@ -4499,22 +5215,28 @@ uint32_t DojaRuntime::interp_test_img_gen(Ref img_ref) const {
 
 void DojaRuntime::interp_test_begin_frame() {
     g_interp.test_capture_override = true;
-    g_interp.on_screen_lock(framebuffer_);
+    g_interp.on_screen_lock(framebuffer_, fb_pix_text_, fb_hd_text_.data(), hd_scale_);
 }
 
 bool DojaRuntime::interp_test_end_and_rasterize(float alpha, uint32_t* out_fb_240x240) {
-    g_interp.on_screen_unlock(framebuffer_, true);
+    g_interp.on_screen_unlock(framebuffer_, fb_pix_text_, fb_hd_text_.data(), hd_scale_, true);
     g_interp.test_capture_override = false;
     if (!g_interp.can_interpolate) return false;
     g_interp.rasterize_subframe(*this, alpha);
     if (out_fb_240x240) {
-        std::memcpy(out_fb_240x240, g_interp.interp_fb, 240 * 240 * sizeof(uint32_t));
+        for (int i = 0; i < 240 * 240; ++i) {
+            uint32_t pm = g_interp.interp_pix_text[i];
+            out_fb_240x240[i] = (pm != 0u) ? composite_pm_over_opaque(g_interp.interp_fb[i], pm)
+                                           : (g_interp.interp_fb[i] | 0xFF000000u);
+        }
     }
     return true;
 }
 
 void DojaRuntime::fb_fill_rect_alpha(int rx, int ry, int rw, int rh, uint32_t argb) {
     UiInputManager::fill_rect_alpha(framebuffer_, 240, 240, rx, ry, rw, rh, argb);
+    uint32_t ca = (argb >> 24) & 0xFFu;
+    attenuate_text_rect(fb_pix_text_, fb_hd_text_.data(), 240, 240, hd_scale_, rx, ry, rw, rh, ca);
     if (g_interp.capturing && (g_interp.test_capture_override || (g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_))) {
         g_interp.record_fb_rect_alpha(rx, ry, rw, rh, argb);
     }
@@ -4522,17 +5244,23 @@ void DojaRuntime::fb_fill_rect_alpha(int rx, int ry, int rw, int rh, uint32_t ar
 
 void DojaRuntime::fb_draw_border(int rx, int ry, int rw, int rh, uint32_t argb) {
     UiInputManager::draw_rect_border(framebuffer_, 240, 240, rx, ry, rw, rh, argb);
+    uint32_t ca = (argb >> 24) & 0xFFu;
+    attenuate_text_border(fb_pix_text_, fb_hd_text_.data(), 240, 240, hd_scale_, rx, ry, rw, rh, ca);
     if (g_interp.capturing && (g_interp.test_capture_override || (g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_))) {
         g_interp.record_fb_border(rx, ry, rw, rh, argb);
     }
 }
 
 int DojaRuntime::fb_measure_text(const std::string& utf8) const {
-    return UiInputManager::measure_ui_text(utf8);
+    return g_ui.measure_ui_text(utf8);
 }
 
 void DojaRuntime::fb_draw_text(const std::string& utf8, int x, int baseline_y, uint32_t color, bool shadow) {
-    UiInputManager::draw_ui_text(framebuffer_, 240, 240, utf8, x, baseline_y, color, shadow);
+    UiInputManager::draw_ui_text_pm(fb_pix_text_, fb_hd_text_.data(), 240, 240, hd_scale_,
+                                    utf8, x, baseline_y, color, shadow);
+    if (should_bake_1x_text_into_gfx()) {
+        UiInputManager::draw_ui_text(framebuffer_, 240, 240, utf8, x, baseline_y, color, shadow);
+    }
     if (g_interp.capturing && (g_interp.test_capture_override || (g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_))) {
         g_interp.record_fb_text(utf8, x, baseline_y, color, shadow);
     }
@@ -4558,6 +5286,10 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
         g_ui.config_path = (std::filesystem::path(base_dir) / "controls.cfg").string();
     }
     window_scale_ = std::max(1, scale);
+    hd_scale_ = (scale >= 2) ? std::clamp(scale, 2, 4) : 3;
+    g_ui.hd_scale = hd_scale_;
+    fb_hd_text_.assign(static_cast<size_t>(240 * hd_scale_) * static_cast<size_t>(240 * hd_scale_), 0u);
+    std::fill(std::begin(fb_pix_text_), std::end(fb_pix_text_), 0u);
 
     g_ft.init(base_dir);
 
@@ -4615,8 +5347,8 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
     default_font_ref_ = static_cast<Ref>(heap_.size());
     heap_.push_back(fnt);
 
-    // Initialize SDL2 window & renderer (unless headless scale <= 0)
-    if (scale > 0) {
+    // Initialize SDL2 window & renderer (unless headless)
+    if (!headless_ && scale > 0) {
 #ifdef SDL_HINT_TIMER_RESOLUTION
         // Request 1ms OS timer resolution on Windows so unfocused windows in multi-instance PvP
         // never degrade to 15.625ms sleep granularity during CpCanvas.exe() frame pacing
@@ -4659,7 +5391,8 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
                 }
                 sdl_renderer_ = ren;
                 if (ren) {
-                    SDL_RenderSetLogicalSize(ren, 240, init_h);
+                    int init_s = g_ui.hd_font_mode ? hd_scale_ : 1;
+                    SDL_RenderSetLogicalSize(ren, 240 * init_s, init_h * init_s);
                     sdl_texture_ = SDL_CreateTexture(
                         ren,
                         SDL_PIXELFORMAT_ARGB8888,
@@ -4667,6 +5400,19 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
                         240,
                         260
                     );
+                    if (sdl_texture_) {
+                        SDL_SetTextureScaleMode(static_cast<SDL_Texture*>(sdl_texture_), SDL_ScaleModeNearest);
+                    }
+                    sdl_texture_hd_ = SDL_CreateTexture(
+                        ren,
+                        SDL_PIXELFORMAT_ARGB8888,
+                        SDL_TEXTUREACCESS_STREAMING,
+                        240 * hd_scale_,
+                        260 * hd_scale_
+                    );
+                    if (sdl_texture_hd_) {
+                        SDL_SetTextureScaleMode(static_cast<SDL_Texture*>(sdl_texture_hd_), SDL_ScaleModeLinear);
+                    }
                 }
             }
             g_audio.init_sdl_audio();
@@ -4694,6 +5440,10 @@ void DojaRuntime::shutdown() {
     g_ui.stop_probe_worker();
     g_ui.close_controllers();
     g_audio.shutdown_sdl_audio();
+    if (sdl_texture_hd_) {
+        SDL_DestroyTexture(static_cast<SDL_Texture*>(sdl_texture_hd_));
+        sdl_texture_hd_ = nullptr;
+    }
     if (sdl_texture_) {
         SDL_DestroyTexture(static_cast<SDL_Texture*>(sdl_texture_));
         sdl_texture_ = nullptr;
@@ -4872,22 +5622,40 @@ std::vector<uint8_t> DojaRuntime::read_jar_Bytes(const std::string& entry_path) 
 void DojaRuntime::draw_image_internal(HeapObject& gfx, Ref img_ref, int dx, int dy, int sx, int sy, int sw, int sh, int dw, int dh) {
     if (img_ref <= 0 || dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
 
-    uint32_t* dst_buf = framebuffer_;
-    int dst_w = 240;
-    int dst_h = 240;
+    bool src_has_text = false;
+    {
+        HeapObject& s_obj = get(img_ref);
+        if (s_obj.img && !s_obj.img->is_paletted) {
+            src_has_text = !s_obj.img->pix_text.empty() || !s_obj.img->hd_text.empty();
+        }
+    }
+
+    SurfaceTarget dst{framebuffer_, fb_pix_text_, fb_hd_text_.data(), 240, 240, hd_scale_};
     if (gfx.target_image > 0) {
         HeapObject& t_obj = get(gfx.target_image);
         if (t_obj.img && !t_obj.img->argb.empty()) {
-            dst_buf = t_obj.img->argb.data();
-            dst_w = t_obj.img->width;
-            dst_h = t_obj.img->height;
+            int tw = t_obj.img->width;
+            int th = t_obj.img->height;
+            if (src_has_text) {
+                if (t_obj.img->pix_text.empty()) {
+                    t_obj.img->pix_text.assign(static_cast<size_t>(tw) * static_cast<size_t>(th), 0u);
+                }
+                if (t_obj.img->hd_text.empty()) {
+                    t_obj.img->hd_text.assign(static_cast<size_t>(tw * hd_scale_) * static_cast<size_t>(th * hd_scale_), 0u);
+                }
+            }
+            dst.gfx = t_obj.img->argb.data();
+            dst.pix_text = t_obj.img->pix_text.empty() ? nullptr : t_obj.img->pix_text.data();
+            dst.hd_text = t_obj.img->hd_text.empty() ? nullptr : t_obj.img->hd_text.data();
+            dst.w = tw;
+            dst.h = th;
         }
         g_interp.mark_offscreen_dirty(gfx.target_image);
     }
 
     int base_dx = dx + gfx.origin_x;
     int base_dy = dy + gfx.origin_y;
-    blit_image_buf(*this, dst_buf, dst_w, dst_h, img_ref, base_dx, base_dy, sx, sy, sw, sh, dw, dh, gfx.flip_mode);
+    blit_image_surface(*this, dst, img_ref, base_dx, base_dy, sx, sy, sw, sh, dw, dh, gfx.flip_mode);
 
     if (gfx.target_image == 0 && (g_interp.test_capture_override || (g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_))) {
         g_interp.record_image(img_ref, base_dx, base_dy, sx, sy, sw, sh, dw, dh, gfx.flip_mode);
@@ -4895,15 +5663,23 @@ void DojaRuntime::draw_image_internal(HeapObject& gfx, Ref img_ref, int dx, int 
 }
 
 void DojaRuntime::draw_text_internal(HeapObject& gfx, const std::string& text, int x, int y) {
-    uint32_t* dst_buf = framebuffer_;
-    int dst_w = 240;
-    int dst_h = 240;
+    SurfaceTarget dst{framebuffer_, fb_pix_text_, fb_hd_text_.data(), 240, 240, hd_scale_};
     if (gfx.target_image > 0) {
         HeapObject& t_obj = get(gfx.target_image);
         if (t_obj.img && !t_obj.img->argb.empty()) {
-            dst_buf = t_obj.img->argb.data();
-            dst_w = t_obj.img->width;
-            dst_h = t_obj.img->height;
+            int tw = t_obj.img->width;
+            int th = t_obj.img->height;
+            if (t_obj.img->pix_text.empty()) {
+                t_obj.img->pix_text.assign(static_cast<size_t>(tw) * static_cast<size_t>(th), 0u);
+            }
+            if (t_obj.img->hd_text.empty()) {
+                t_obj.img->hd_text.assign(static_cast<size_t>(tw * hd_scale_) * static_cast<size_t>(th * hd_scale_), 0u);
+            }
+            dst.gfx = t_obj.img->argb.data();
+            dst.pix_text = t_obj.img->pix_text.data();
+            dst.hd_text = t_obj.img->hd_text.data();
+            dst.w = tw;
+            dst.h = th;
         }
         g_interp.mark_offscreen_dirty(gfx.target_image);
     }
@@ -4911,7 +5687,7 @@ void DojaRuntime::draw_text_internal(HeapObject& gfx, const std::string& text, i
     uint32_t color = static_cast<uint32_t>(gfx.aux_i32) | 0xFF000000u;
     int pen_x = x + gfx.origin_x;
     int baseline_y = y + gfx.origin_y;
-    blit_text_buf(dst_buf, dst_w, dst_h, text, pen_x, baseline_y, color);
+    blit_text_surface(dst, text, pen_x, baseline_y, color, should_bake_1x_text_into_gfx());
 
     if (gfx.target_image == 0 && (g_interp.test_capture_override || (g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_))) {
         g_interp.record_text(text, pen_x, baseline_y, color);
@@ -4985,7 +5761,11 @@ void DojaRuntime::poll_events() {
             static_cast<SDL_Window*>(sdl_window_),
             static_cast<SDL_Renderer*>(sdl_renderer_),
             static_cast<SDL_Texture*>(sdl_texture_),
+            static_cast<SDL_Texture*>(sdl_texture_hd_),
             framebuffer_,
+            fb_pix_text_,
+            fb_hd_text_.data(),
+            hd_scale_,
             window_scale_
         );
         in_modal = false;
@@ -5054,12 +5834,16 @@ void DojaRuntime::poll_events() {
                     g_ui.toggle_language_mode();
                     continue;
                 }
+                if (sym == SDLK_F5) {
+                    g_ui.toggle_font_mode();
+                    continue;
+                }
                 if (sym == SDLK_F11 || (sym == SDLK_RETURN && (ev.key.keysym.mod & KMOD_ALT))) {
                     g_ui.toggle_fullscreen(static_cast<SDL_Window*>(sdl_window_));
                     continue;
                 }
                 if (sym == SDLK_F12) {
-                    g_ui.save_screenshot_bmp(framebuffer_);
+                    g_ui.save_screenshot_bmp(framebuffer_, fb_pix_text_, fb_hd_text_.data(), hd_scale_);
                     continue;
                 }
                 if (sym == SDLK_F9 || (sym == SDLK_m && !g_ui.is_keycode_bound(SDLK_m))) {
@@ -5173,6 +5957,7 @@ void DojaRuntime::present_screen() {
                 case 103: sym = SDLK_LEFT; break;
                 case 104: sym = SDLK_RIGHT; break;
                 case 105: sym = SDLK_UP; break;
+                case 106: sym = SDLK_F5; break;
                 default: break;
             }
             if (sdl_window_) {
@@ -5226,28 +6011,28 @@ void DojaRuntime::present_screen() {
     } else {
         poll_events();
     }
-    if (sdl_renderer_ && sdl_texture_) {
+    if (sdl_renderer_ && (sdl_texture_ || sdl_texture_hd_)) {
         SDL_Renderer* ren = static_cast<SDL_Renderer*>(sdl_renderer_);
-        SDL_Texture* tex = static_cast<SDL_Texture*>(sdl_texture_);
+        SDL_Texture* tex_pix = static_cast<SDL_Texture*>(sdl_texture_);
+        SDL_Texture* tex_hd = static_cast<SDL_Texture*>(sdl_texture_hd_);
         SDL_Window* win = static_cast<SDL_Window*>(sdl_window_);
         bool win_minimized = win && ((SDL_GetWindowFlags(win) & SDL_WINDOW_MINIMIZED) != 0);
         bool interp_active = !win_minimized && g_ui.high_fps_mode && !fast_forward_ &&
                              (!g_ui.is_turbo_held() || g_pvp.active());
-        g_interp.on_screen_unlock(framebuffer_, interp_active);
+        g_interp.on_screen_unlock(framebuffer_, fb_pix_text_, fb_hd_text_.data(), hd_scale_, interp_active);
 
         if (!(win_minimized && g_pvp.active())) {
             const uint32_t* present_fb = framebuffer_;
+            const uint32_t* present_pix_text = fb_pix_text_;
+            const uint32_t* present_hd_text = fb_hd_text_.data();
             if (interp_active && g_interp.can_interpolate && g_interp.any_motion) {
                 g_interp.rasterize_subframe(*this, 0.25f);
                 present_fb = g_interp.interp_fb;
+                present_pix_text = g_interp.interp_pix_text;
+                present_hd_text = g_interp.interp_hd_text.data();
             }
-            g_ui.compose_display_buffer(present_fb, keypad_state_, true);
-            int logical_h = g_ui.show_softkey_bar ? 260 : 240;
-            SDL_Rect src_rect{0, 0, 240, logical_h};
-            SDL_UpdateTexture(tex, nullptr, g_ui.display_buf, 240 * sizeof(uint32_t));
-            SDL_RenderClear(ren);
-            SDL_RenderCopy(ren, tex, &src_rect, nullptr);
-            SDL_RenderPresent(ren);
+            g_ui.compose_display_buffer(present_fb, present_pix_text, present_hd_text, hd_scale_, keypad_state_, true);
+            g_ui.present_sdl_frame(ren, tex_pix, tex_hd);
         } else if (g_ui.toast_frames > 0) {
             --g_ui.toast_frames;
         }
@@ -5270,19 +6055,44 @@ void DojaRuntime::present_screen() {
     }
     if (max_frames_ > 0 && frame_count_ >= max_frames_) {
         if (!dump_ppm_path_.empty()) {
-            g_ui.compose_display_buffer(framebuffer_, keypad_state_, false);
+            g_ui.compose_display_buffer(framebuffer_, fb_pix_text_, fb_hd_text_.data(), hd_scale_, keypad_state_, false);
             int dump_h = g_ui.show_softkey_bar ? 260 : 240;
             std::ofstream ppm(dump_ppm_path_, std::ios::binary | std::ios::trunc);
             if (ppm) {
-                ppm << "P6\n240 " << dump_h << "\n255\n";
-                for (int i = 0; i < 240 * dump_h; ++i) {
-                    uint32_t c = g_ui.display_buf[i];
-                    uint8_t rgb[3] = {
-                        static_cast<uint8_t>((c >> 16) & 0xFF),
-                        static_cast<uint8_t>((c >> 8) & 0xFF),
-                        static_cast<uint8_t>(c & 0xFF)
-                    };
-                    ppm.write(reinterpret_cast<const char*>(rgb), 3);
+                if (g_ui.hd_font_mode && !g_ui.display_buf_hd.empty()) {
+                    int s = std::clamp(hd_scale_, 2, 4);
+                    int out_w = 240 * s;
+                    int out_h = dump_h * s;
+                    ppm << "P6\n" << out_w << " " << out_h << "\n255\n";
+                    for (int i = 0; i < out_w * out_h; ++i) {
+                        uint32_t c = g_ui.display_buf_hd[static_cast<size_t>(i)];
+                        uint8_t rgb[3] = {
+                            static_cast<uint8_t>((c >> 16) & 0xFF),
+                            static_cast<uint8_t>((c >> 8) & 0xFF),
+                            static_cast<uint8_t>(c & 0xFF)
+                        };
+                        ppm.write(reinterpret_cast<const char*>(rgb), 3);
+                    }
+                } else {
+                    int s = std::max(1, window_scale_);
+                    int out_w = 240 * s;
+                    int out_h = dump_h * s;
+                    ppm << "P6\n" << out_w << " " << out_h << "\n255\n";
+                    for (int y = 0; y < dump_h; ++y) {
+                        for (int sy = 0; sy < s; ++sy) {
+                            for (int x = 0; x < 240; ++x) {
+                                uint32_t c = g_ui.display_buf[y * 240 + x];
+                                uint8_t rgb[3] = {
+                                    static_cast<uint8_t>((c >> 16) & 0xFF),
+                                    static_cast<uint8_t>((c >> 8) & 0xFF),
+                                    static_cast<uint8_t>(c & 0xFF)
+                                };
+                                for (int sx = 0; sx < s; ++sx) {
+                                    ppm.write(reinterpret_cast<const char*>(rgb), 3);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -5350,7 +6160,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             SDL_Window* ywin = static_cast<SDL_Window*>(sdl_window_);
             bool y_minimized = ywin && ((SDL_GetWindowFlags(ywin) & SDL_WINDOW_MINIMIZED) != 0);
             int max_sf = g_pvp.active() ? 3 : 4;
-            if (!y_minimized && g_ui.high_fps_mode && sdl_renderer_ && sdl_texture_ &&
+            if (!y_minimized && g_ui.high_fps_mode && sdl_renderer_ && (sdl_texture_ || sdl_texture_hd_) &&
                 g_interp.subframes_presented < max_sf) {
                 auto now_tp = std::chrono::steady_clock::now();
                 double elapsed_ms = std::chrono::duration<double, std::milli>(now_tp - g_interp.tick_unlock_tp).count();
@@ -5360,20 +6170,21 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
                 if (elapsed_ms >= kSubTargetsMs[next_sf] && elapsed_ms < max_allowed_ms) {
                     g_interp.subframes_presented = next_sf + 1;
                     const uint32_t* sub_fb = framebuffer_;
+                    const uint32_t* sub_pix_text = fb_pix_text_;
+                    const uint32_t* sub_hd_text = fb_hd_text_.data();
                     if (g_interp.can_interpolate && g_interp.any_motion && next_sf < (max_sf - 1)) {
                         float alpha = std::clamp(static_cast<float>((elapsed_ms + 15.5) / 62.0), 0.25f, 1.0f);
                         g_interp.rasterize_subframe(*this, alpha);
                         sub_fb = g_interp.interp_fb;
+                        sub_pix_text = g_interp.interp_pix_text;
+                        sub_hd_text = g_interp.interp_hd_text.data();
                     }
-                    SDL_Renderer* ren = static_cast<SDL_Renderer*>(sdl_renderer_);
-                    SDL_Texture* tex = static_cast<SDL_Texture*>(sdl_texture_);
-                    g_ui.compose_display_buffer(sub_fb, keypad_state_, false);
-                    int logical_h = g_ui.show_softkey_bar ? 260 : 240;
-                    SDL_Rect src_rect{0, 0, 240, logical_h};
-                    SDL_UpdateTexture(tex, nullptr, g_ui.display_buf, 240 * sizeof(uint32_t));
-                    SDL_RenderClear(ren);
-                    SDL_RenderCopy(ren, tex, &src_rect, nullptr);
-                    SDL_RenderPresent(ren);
+                    g_ui.compose_display_buffer(sub_fb, sub_pix_text, sub_hd_text, hd_scale_, keypad_state_, false);
+                    g_ui.present_sdl_frame(
+                        static_cast<SDL_Renderer*>(sdl_renderer_),
+                        static_cast<SDL_Texture*>(sdl_texture_),
+                        static_cast<SDL_Texture*>(sdl_texture_hd_)
+                    );
                     return Slot(0);
                 }
             }
@@ -5824,7 +6635,7 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
         if (m == "lock") {
             graphics_locked_ = true;
             if (gfx.target_image == 0) {
-                g_interp.on_screen_lock(framebuffer_);
+                g_interp.on_screen_lock(framebuffer_, fb_pix_text_, fb_hd_text_.data(), hd_scale_);
             }
             return Slot(0);
         }
@@ -5842,20 +6653,20 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
             int rh = args[4].i;
             uint32_t col = static_cast<uint32_t>(gfx.aux_i32) | 0xFF000000u;
 
-            uint32_t* dst_buf = framebuffer_;
-            int dst_w = 240;
-            int dst_h = 240;
+            SurfaceTarget dst{framebuffer_, fb_pix_text_, fb_hd_text_.data(), 240, 240, hd_scale_};
             if (gfx.target_image > 0) {
                 HeapObject& t_obj = get(gfx.target_image);
                 if (t_obj.img && !t_obj.img->argb.empty()) {
-                    dst_buf = t_obj.img->argb.data();
-                    dst_w = t_obj.img->width;
-                    dst_h = t_obj.img->height;
+                    dst.gfx = t_obj.img->argb.data();
+                    dst.pix_text = t_obj.img->pix_text.empty() ? nullptr : t_obj.img->pix_text.data();
+                    dst.hd_text = t_obj.img->hd_text.empty() ? nullptr : t_obj.img->hd_text.data();
+                    dst.w = t_obj.img->width;
+                    dst.h = t_obj.img->height;
                 }
                 g_interp.mark_offscreen_dirty(gfx.target_image);
             }
             bool is_fill = (m == "fillRect");
-            blit_rect_buf(dst_buf, dst_w, dst_h, is_fill, rx, ry, rw, rh, col);
+            blit_rect_surface(dst, is_fill, rx, ry, rw, rh, col);
             if (gfx.target_image == 0 && (g_interp.test_capture_override || (g_ui.high_fps_mode && sdl_renderer_ && !fast_forward_))) {
                 g_interp.record_rect(is_fill, rx, ry, rw, rh, col);
             }
