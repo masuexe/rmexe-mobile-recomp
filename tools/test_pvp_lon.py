@@ -317,8 +317,16 @@ def run_isolation_and_security_tests() -> None:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-                time.sleep(1.0)
-                p.terminate()
+                expected_404 = f"game={bad_game}&room={target_rid} -> 404"
+                deadline = time.monotonic() + 5.0
+                srv_text = ""
+                while time.monotonic() < deadline:
+                    srv_text = open(srv_log, "r", encoding="utf-8", errors="replace").read()
+                    if expected_404 in srv_text or p.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                if p.poll() is None:
+                    p.terminate()
                 try:
                     p.wait(timeout=3)
                 except subprocess.TimeoutExpired:
@@ -330,7 +338,6 @@ def run_isolation_and_security_tests() -> None:
                     f"{label} unexpectedly mutated room #{target_rid}: {cur_rooms}"
                 )
                 srv_text = open(srv_log, "r", encoding="utf-8", errors="replace").read()
-                expected_404 = f"game={bad_game}&room={target_rid} -> 404"
                 assert expected_404 in srv_text, f"{label} did not trigger HTTP 404 on server log"
 
             http_json("POST", f"http://127.0.0.1:{port}/pvp/leave?room={lon_rid}&token={lon_tok}")
