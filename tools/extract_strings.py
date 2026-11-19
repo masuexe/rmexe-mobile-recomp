@@ -426,6 +426,117 @@ def has_nonempty_zh(val: Any) -> bool:
     return False
 
 
+def jp_entry_hash(jp: Any) -> str:
+    if isinstance(jp, list):
+        text = "\n".join(str(x) for x in jp)
+    else:
+        text = str(jp or "")
+    return fnv1a_64(text.encode("utf-8"))
+
+
+def export_zh_patch(source_json: Path, patch_out: Path) -> tuple[int, int]:
+    doc = json.loads(source_json.read_text(encoding="utf-8"))
+    cls_out: dict[str, dict[str, Any]] = {}
+    for entry in doc.get("class_strings", []):
+        zh = entry.get("zh", "")
+        if has_nonempty_zh(zh):
+            cls_out[str(entry["id"])] = {
+                "jp_fnv1a": jp_entry_hash(entry.get("jp", "")),
+                "zh": zh,
+            }
+
+    streams_out: dict[str, dict[str, Any]] = {}
+    rec_count = 0
+    for st in doc.get("streams", []):
+        entries_out: dict[str, dict[str, Any]] = {}
+        for e in st.get("entries", []):
+            zh = e.get("zh")
+            if has_nonempty_zh(zh):
+                entries_out[str(e["index"])] = {
+                    "jp_fnv1a": jp_entry_hash(e.get("jp")),
+                    "zh": zh,
+                }
+        if entries_out:
+            streams_out[str(st["id"])] = {
+                "description": st.get("description", ""),
+                "jp_fnv1a": st.get("jp_fnv1a", ""),
+                "entries": entries_out,
+            }
+            rec_count += len(entries_out)
+
+    patch_doc = {
+        "schema_version": 1,
+        "format": "zh_patch",
+        "game": doc.get("game", ""),
+        "class_strings": cls_out,
+        "streams": streams_out,
+    }
+    patch_out.parent.mkdir(parents=True, exist_ok=True)
+    patch_out.write_text(json.dumps(patch_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return len(cls_out), rec_count
+
+
+def apply_zh_patch(doc: dict[str, Any], patch_path: Path, overwrite: bool = True) -> tuple[int, int]:
+    if not patch_path.is_file():
+        return 0, 0
+    patch = json.loads(patch_path.read_text(encoding="utf-8"))
+    if patch.get("format") != "zh_patch":
+        raise ValueError(f"Invalid patch format in {patch_path}")
+
+    applied = 0
+    skipped = 0
+
+    cls_patch = patch.get("class_strings", {})
+    cls_by_hash: dict[str, Any] = {}
+    for item in cls_patch.values():
+        h = item.get("jp_fnv1a", "")
+        if h and h not in cls_by_hash:
+            cls_by_hash[h] = item.get("zh", "")
+
+    for entry in doc.get("class_strings", []):
+        if not overwrite and has_nonempty_zh(entry.get("zh")):
+            continue
+        cid = str(entry.get("id", ""))
+        jhash = jp_entry_hash(entry.get("jp", ""))
+        if cid in cls_patch:
+            item = cls_patch[cid]
+            if item.get("jp_fnv1a") == jhash:
+                entry["zh"] = item.get("zh", "")
+                applied += 1
+            else:
+                skipped += 1
+        elif jhash in cls_by_hash:
+            entry["zh"] = cls_by_hash[jhash]
+            applied += 1
+
+    streams_patch = patch.get("streams", {})
+    for st in doc.get("streams", []):
+        sid = str(st.get("id", ""))
+        pst = streams_patch.get(sid)
+        if not pst:
+            continue
+        p_st_hash = pst.get("jp_fnv1a", "")
+        d_st_hash = st.get("jp_fnv1a", "")
+        pentries = pst.get("entries", {})
+        if p_st_hash and d_st_hash and p_st_hash != d_st_hash:
+            skipped += len(pentries)
+            continue
+        for e in st.get("entries", []):
+            sidx = str(e["index"])
+            if sidx not in pentries:
+                continue
+            if not overwrite and has_nonempty_zh(e.get("zh")):
+                continue
+            pitem = pentries[sidx]
+            if pitem.get("jp_fnv1a") == jp_entry_hash(e.get("jp")):
+                e["zh"] = pitem.get("zh")
+                applied += 1
+            else:
+                skipped += 1
+
+    return applied, skipped
+
+
 def merge_existing_translations(new_doc: dict[str, Any], old_path: Path) -> int:
     if not old_path.is_file():
         return 0
@@ -567,11 +678,59 @@ def main() -> int:
     parser.add_argument("-o", "--out-dir", type=Path, default=Path("assets/translations"))
     parser.add_argument("--no-merge", action="store_true", help="Do not preserve existing zh strings")
     parser.add_argument("--validate", type=Path, help="Validate an existing translation JSON file")
+    parser.add_argument(
+        "--export-patch",
+        nargs="?",
+        const=Path("translations"),
+        type=Path,
+        help="Export zh-only patch JSON (no JP/EN source text) from -o/<game>_zh.json to DIR (default: translations)",
+    )
+    parser.add_argument(
+        "--apply-patch",
+        nargs="?",
+        const=Path("translations"),
+        type=Path,
+        help="Apply zh-only patch file or DIR onto -o/<game>_zh.json",
+    )
     args = parser.parse_args()
 
     if args.validate:
         ok = validate_translation_json(args.validate)
         return 0 if ok else 1
+
+    games = ["pon", "lon"] if args.game == "all" else [args.game]
+
+    if args.export_patch is not None:
+        if args.export_patch.suffix.lower() == ".json" and args.game == "all":
+            parser.error("Single-file --export-patch target requires --game pon or --game lon")
+        for g in games:
+            src_json = args.out_dir / f"{g}_zh.json"
+            if not src_json.is_file():
+                raise FileNotFoundError(f"Missing source translation JSON: {src_json}")
+            patch_out = (
+                args.export_patch
+                if args.export_patch.suffix.lower() == ".json"
+                else args.export_patch / f"{g}_zh_patch.json"
+            )
+            cls_n, rec_n = export_zh_patch(src_json, patch_out)
+            print(f"[export-patch] {g}: wrote {patch_out} (class_strings={cls_n}, stream_records={rec_n})")
+        return 0
+
+    if args.apply_patch is not None:
+        if args.apply_patch.is_file() and args.game == "all":
+            parser.error("Single-file --apply-patch source requires --game pon or --game lon")
+        for g in games:
+            target_json = args.out_dir / f"{g}_zh.json"
+            if not target_json.is_file():
+                raise FileNotFoundError(f"Missing target translation JSON: {target_json}")
+            patch_in = args.apply_patch if args.apply_patch.is_file() else args.apply_patch / f"{g}_zh_patch.json"
+            if not patch_in.is_file():
+                raise FileNotFoundError(f"Missing patch JSON: {patch_in}")
+            doc = json.loads(target_json.read_text(encoding="utf-8"))
+            applied, skipped = apply_zh_patch(doc, patch_in, overwrite=True)
+            target_json.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            print(f"[apply-patch] {g}: updated {target_json} from {patch_in} (applied={applied}, skipped={skipped})")
+        return 0
 
     if args.game == "all" and (args.jp_jar or args.jp_sp or args.en_jar or args.en_sp):
         parser.error("Path overrides require --game pon or --game lon")
@@ -596,7 +755,6 @@ def main() -> int:
     }
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    games = ["pon", "lon"] if args.game == "all" else [args.game]
 
     for g in games:
         jp_j_def, jp_sp_orig, jp_sp_fallback, en_j_def, en_sp_orig, en_sp_fallback = defaults[g]
@@ -610,13 +768,18 @@ def main() -> int:
         doc = extract_game_json(g, jp_jar, jp_sp, en_jar, en_sp)
         out_path = args.out_dir / f"{g}_zh.json"
         merged = 0 if args.no_merge else merge_existing_translations(doc, out_path)
+        patch_applied = 0
+        if not args.no_merge:
+            default_patch = Path("translations") / f"{g}_zh_patch.json"
+            if default_patch.is_file():
+                patch_applied, _ = apply_zh_patch(doc, default_patch, overwrite=False)
         out_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
         total_records = sum(len(s["entries"]) for s in doc["streams"])
         print(
             f"[extract] {g}: wrote {out_path} "
             f"(class_strings={len(doc['class_strings'])}, streams={len(doc['streams'])}, "
-            f"stream_records={total_records}, preserved_zh={merged})"
+            f"stream_records={total_records}, preserved_zh={merged}, patch_zh={patch_applied})"
         )
 
     return 0

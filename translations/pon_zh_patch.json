@@ -1,0 +1,5418 @@
+{
+  "schema_version": 1,
+  "format": "zh_patch",
+  "game": "pon",
+  "class_strings": {
+    "app.CpCanvas#2": {
+      "jp_fnv1a": "0xd4f1a9e55e0fc232",
+      "zh": "会员认证："
+    },
+    "app.CpCanvas#5": {
+      "jp_fnv1a": "0x549daf50f673b025",
+      "zh": "首次数据下载："
+    },
+    "app.CpCanvas#6": {
+      "jp_fnv1a": "0x61dc8f1607c7b8b4",
+      "zh": "数据展开中..."
+    },
+    "app.CpCanvas#12": {
+      "jp_fnv1a": "0x267f1453ab051d64",
+      "zh": "尚未注册会员。"
+    },
+    "app.CpCanvas#13": {
+      "jp_fnv1a": "0xfb1a34870a130184",
+      "zh": "启动需要注册会员。"
+    },
+    "app.CpCanvas#15": {
+      "jp_fnv1a": "0x230ee7a700141f53",
+      "zh": "网络连接失败。"
+    },
+    "app.CpCanvas#16": {
+      "jp_fnv1a": "0x9bbe0b497f96b7e8",
+      "zh": "要重新连接吗？"
+    },
+    "app.CpCanvas#20": {
+      "jp_fnv1a": "0xcbae5e2e8fb9a108",
+      "zh": "即将结束。"
+    },
+    "app.CpCanvas#37": {
+      "jp_fnv1a": "0x33557c1b74754b75",
+      "zh": "月"
+    },
+    "app.CpCanvas#38": {
+      "jp_fnv1a": "0x33753f1b7491475d",
+      "zh": "日"
+    },
+    "app.CpCanvas#39": {
+      "jp_fnv1a": "0x20519b997d731f82",
+      "zh": "第 "
+    },
+    "app.CpCanvas#40": {
+      "jp_fnv1a": "0x1c8458754bd43f3f",
+      "zh": " 话"
+    },
+    "app.CpCanvas#41": {
+      "jp_fnv1a": "0xa8e129db0d4827ee",
+      "zh": "前往网站"
+    },
+    "app.CpCanvas#43": {
+      "jp_fnv1a": "0x1a9a37a720d294ed",
+      "zh": "战 "
+    },
+    "app.CpCanvas#44": {
+      "jp_fnv1a": "0x82b9c3b6a12360e5",
+      "zh": "显示测试"
+    },
+    "app.CpCanvas#45": {
+      "jp_fnv1a": "0x410c9eeded3cc986",
+      "zh": "电 "
+    },
+    "app.CpCanvas#47": {
+      "jp_fnv1a": "0xacdd32fb3ed1397d",
+      "zh": "街 "
+    },
+    "app.CpCanvas#48": {
+      "jp_fnv1a": "0x3aeb90de4394d673",
+      "zh": "返回标题"
+    },
+    "app.CpCanvas#49": {
+      "jp_fnv1a": "0x9cc5838d32132cb4",
+      "zh": "SE："
+    },
+    "app.CpCanvas#50": {
+      "jp_fnv1a": "0xe370ee77cab6cc58",
+      "zh": "BGM："
+    },
+    "app.CpCanvas#53": {
+      "jp_fnv1a": "0x7f2b40b470ffe4cf",
+      "zh": "[4]洛克人无敌："
+    },
+    "app.CpCanvas#54": {
+      "jp_fnv1a": "0x486b48e0724a9a8c",
+      "zh": "[5]敌HP+1000："
+    },
+    "app.CpCanvas#55": {
+      "jp_fnv1a": "0x0d41d741a861606a",
+      "zh": "[#]强:"
+    },
+    "app.CpCanvas#56": {
+      "jp_fnv1a": "0xbc28753da610d28e",
+      "zh": "[3]Q:"
+    },
+    "app.CpCanvas#67": {
+      "jp_fnv1a": "0x496481d13b637889",
+      "zh": " tip【"
+    },
+    "app.CpCanvas#68": {
+      "jp_fnv1a": "0x4d96de1b8368adc5",
+      "zh": "】"
+    },
+    "app.CpCanvas#80": {
+      "jp_fnv1a": "0x6f73611b965cc579",
+      "zh": "个"
+    },
+    "app.CpCanvas#140": {
+      "jp_fnv1a": "0xf2520be55c194ae9",
+      "zh": "要更新首次数据吗？"
+    },
+    "app.CpCanvas#141": {
+      "jp_fnv1a": "0x7b52eb17be1c7a66",
+      "zh": "是"
+    },
+    "app.CpCanvas#142": {
+      "jp_fnv1a": "0x442a9f4e09b013ef",
+      "zh": "否"
+    },
+    "app.CpCanvas#148": {
+      "jp_fnv1a": "0x424929ad1e4a10e1",
+      "zh": "购买认证："
+    },
+    "app.CpCanvas#149": {
+      "jp_fnv1a": "0xfde6c7fb1de3fc6c",
+      "zh": "感谢您购买本产品，"
+    },
+    "app.CpCanvas#150": {
+      "jp_fnv1a": "0xf934628a76468bda",
+      "zh": "非常感谢。"
+    },
+    "app.CpCanvas#151": {
+      "jp_fnv1a": "0x8b412e297e577a60",
+      "zh": "正在启动应用。"
+    },
+    "app.CpCanvas#152": {
+      "jp_fnv1a": "0x7b5447c95c3d4bdd",
+      "zh": "要使用本应用，"
+    },
+    "app.CpCanvas#153": {
+      "jp_fnv1a": "0x0a19c10e4e0414af",
+      "zh": "需要先进行购买。"
+    },
+    "app.CpCanvas#154": {
+      "jp_fnv1a": "0x78e15442219d256f",
+      "zh": "要连接到购买网站吗？"
+    },
+    "app.CpCanvas#155": {
+      "jp_fnv1a": "0x877d936c0113df9b",
+      "zh": "连接到网站"
+    },
+    "app.CpCanvas#156": {
+      "jp_fnv1a": "0xafc01baaf3e002e5",
+      "zh": "退出应用"
+    },
+    "app.CpCanvas#157": {
+      "jp_fnv1a": "0x013804a17e59003b",
+      "zh": "当前服务器正在维护中。"
+    },
+    "app.CpCanvas#158": {
+      "jp_fnv1a": "0x2f013260f0d51e94",
+      "zh": "请稍后再试。"
+    },
+    "app.CpCanvas#159": {
+      "jp_fnv1a": "0xcd55c6aa6a795715",
+      "zh": "即将退出应用。"
+    },
+    "app.CpCanvas#160": {
+      "jp_fnv1a": "0x9cd10b28555f1e79",
+      "zh": "应用版本错误。"
+    },
+    "app.CpCanvas#161": {
+      "jp_fnv1a": "0x9b2a7898d9103266",
+      "zh": "请前往网站确认"
+    },
+    "app.CpCanvas#162": {
+      "jp_fnv1a": "0x4d519b4c9456f210",
+      "zh": "相关内容。"
+    },
+    "app.CpCanvas#163": {
+      "jp_fnv1a": "0x8091263ccc97f8f3",
+      "zh": "(错误代码："
+    },
+    "app.CpCanvas#165": {
+      "jp_fnv1a": "0xb96445a7352119e0",
+      "zh": "重试"
+    },
+    "app.CpCanvas#175": {
+      "jp_fnv1a": "0xe8fd22318f312c8d",
+      "zh": "秋原区域1"
+    },
+    "app.CpCanvas#176": {
+      "jp_fnv1a": "0xe8fd1f318f312774",
+      "zh": "秋原区域2"
+    },
+    "app.CpCanvas#177": {
+      "jp_fnv1a": "0xe8fd20318f312927",
+      "zh": "秋原区域3"
+    },
+    "app.CpCanvas#178": {
+      "jp_fnv1a": "0x28bf45b0e55df8c5",
+      "zh": "电算区域1"
+    },
+    "app.CpCanvas#179": {
+      "jp_fnv1a": "0x28bf42b0e55df3ac",
+      "zh": "电算区域2"
+    },
+    "app.CpCanvas#180": {
+      "jp_fnv1a": "0x28bf43b0e55df55f",
+      "zh": "电算区域3"
+    },
+    "app.CpCanvas#181": {
+      "jp_fnv1a": "0x77c988b97b80bcc9",
+      "zh": "官厅区域1"
+    },
+    "app.CpCanvas#182": {
+      "jp_fnv1a": "0x77c985b97b80b7b0",
+      "zh": "官厅区域2"
+    },
+    "app.CpCanvas#183": {
+      "jp_fnv1a": "0x4823e50f98003324",
+      "zh": "里网络1"
+    },
+    "app.CpCanvas#184": {
+      "jp_fnv1a": "0x4823e80f9800383d",
+      "zh": "里网络2"
+    },
+    "app.CpCanvas#185": {
+      "jp_fnv1a": "0x4823e70f9800368a",
+      "zh": "里网络3"
+    },
+    "app.CpCanvas#186": {
+      "jp_fnv1a": "0x4823e20f98002e0b",
+      "zh": "里网络4"
+    },
+    "app.CpCanvas#187": {
+      "jp_fnv1a": "0x4823e10f98002c58",
+      "zh": "里网络5"
+    },
+    "app.CpCanvas#188": {
+      "jp_fnv1a": "0x466ab68bd443cf8b",
+      "zh": "秘密区域1"
+    },
+    "app.CpCanvas#189": {
+      "jp_fnv1a": "0x466ab78bd443d13e",
+      "zh": "秘密区域2"
+    },
+    "app.CpCanvas#190": {
+      "jp_fnv1a": "0xba1e514b70d6c6ad",
+      "zh": "热斗PC的电脑"
+    },
+    "app.CpCanvas#191": {
+      "jp_fnv1a": "0x8e1cd6e9276aa88e",
+      "zh": "电视的电脑"
+    },
+    "app.CpCanvas#192": {
+      "jp_fnv1a": "0xe613d7551187c562",
+      "zh": "冰箱的电脑"
+    },
+    "app.CpCanvas#193": {
+      "jp_fnv1a": "0x5a6edeb15884e5fb",
+      "zh": "狗屋的电脑"
+    },
+    "app.CpCanvas#194": {
+      "jp_fnv1a": "0xd07140fbb20444a4",
+      "zh": "玩偶的电脑"
+    },
+    "app.CpCanvas#195": {
+      "jp_fnv1a": "0x838cf8c311f1e64b",
+      "zh": "黑板的电脑"
+    },
+    "app.CpCanvas#196": {
+      "jp_fnv1a": "0x3834bc6967517a81",
+      "zh": "书桌的电脑"
+    },
+    "app.CpCanvas#197": {
+      "jp_fnv1a": "0xa2f5d3549fa2ff9a",
+      "zh": "老师PC的电脑"
+    },
+    "app.CpCanvas#198": {
+      "jp_fnv1a": "0xede3ec4197187730",
+      "zh": "售票机的电脑"
+    },
+    "app.CpCanvas#199": {
+      "jp_fnv1a": "0xe748bc6c8196f35c",
+      "zh": "登记机的电脑"
+    },
+    "app.CpCanvas#200": {
+      "jp_fnv1a": "0x416f633661f30a02",
+      "zh": "观叶植物的电脑"
+    },
+    "app.CpCanvas#201": {
+      "jp_fnv1a": "0xe6cd755520512b99",
+      "zh": "看板的电脑"
+    },
+    "app.CpCanvas#202": {
+      "jp_fnv1a": "0xae77d31e6f3f9586",
+      "zh": "红绿灯的电脑"
+    },
+    "app.CpCanvas#203": {
+      "jp_fnv1a": "0x568f497fe83c6f4a",
+      "zh": "新型PET的电脑"
+    },
+    "app.CpCanvas#204": {
+      "jp_fnv1a": "0xb31b3e925db7cb94",
+      "zh": "监控系统的电脑"
+    },
+    "app.CpCanvas#205": {
+      "jp_fnv1a": "0xebde3d71a9373bcb",
+      "zh": "座位的电脑"
+    },
+    "app.CpCanvas#206": {
+      "jp_fnv1a": "0xa3a954a026d9ecbd",
+      "zh": "自动门的电脑"
+    },
+    "app.CpCanvas#207": {
+      "jp_fnv1a": "0xe0a99daab544dc29",
+      "zh": "纪念碑的电脑"
+    },
+    "app.CpCanvas#208": {
+      "jp_fnv1a": "0xf2985724351fb226",
+      "zh": "爸爸PC的电脑"
+    },
+    "app.CpCanvas#209": {
+      "jp_fnv1a": "0xcf198577f5319629",
+      "zh": "控制面板的电脑"
+    },
+    "app.CpCanvas#210": {
+      "jp_fnv1a": "0xd2e01c5537df885f",
+      "zh": "天线的电脑"
+    },
+    "app.CpCanvas#211": {
+      "jp_fnv1a": "0x916a7a6f1daeb974",
+      "zh": "美露PC的电脑1"
+    },
+    "app.CpCanvas#212": {
+      "jp_fnv1a": "0x916a7d6f1daebe8d",
+      "zh": "美露PC的电脑2"
+    },
+    "app.CpCanvas#213": {
+      "jp_fnv1a": "0x916a7c6f1daebcda",
+      "zh": "美露PC的电脑3"
+    },
+    "app.CpCanvas#214": {
+      "jp_fnv1a": "0x1159960e11e56b2e",
+      "zh": "水道管理服务器的电脑1"
+    },
+    "app.CpCanvas#215": {
+      "jp_fnv1a": "0x1159950e11e5697b",
+      "zh": "水道管理服务器的电脑2"
+    },
+    "app.CpCanvas#216": {
+      "jp_fnv1a": "0x1159940e11e567c8",
+      "zh": "水道管理服务器的电脑3"
+    },
+    "app.CpCanvas#217": {
+      "jp_fnv1a": "0x02fb84101d797a96",
+      "zh": "对战机器的电脑1"
+    },
+    "app.CpCanvas#218": {
+      "jp_fnv1a": "0x02fb83101d7978e3",
+      "zh": "对战机器的电脑2"
+    },
+    "app.CpCanvas#219": {
+      "jp_fnv1a": "0x02fb82101d797730",
+      "zh": "对战机器的电脑3"
+    },
+    "app.CpCanvas#220": {
+      "jp_fnv1a": "0x9e2689df3adf3d2b",
+      "zh": "帐篷的电脑1"
+    },
+    "app.CpCanvas#221": {
+      "jp_fnv1a": "0x9e268adf3adf3ede",
+      "zh": "帐篷的电脑2"
+    },
+    "app.CpCanvas#222": {
+      "jp_fnv1a": "0xf135e05b712acdbe",
+      "zh": "舞台装置的电脑1"
+    },
+    "app.CpCanvas#223": {
+      "jp_fnv1a": "0xf135df5b712acc0b",
+      "zh": "舞台装置的电脑2"
+    },
+    "app.CpCanvas#224": {
+      "jp_fnv1a": "0xf135de5b712aca58",
+      "zh": "舞台装置的电脑3"
+    },
+    "app.CpCanvas#225": {
+      "jp_fnv1a": "0xfb1d7cf9106bd828",
+      "zh": "IPC服务器的电脑1"
+    },
+    "app.CpCanvas#226": {
+      "jp_fnv1a": "0xfb1d7ff9106bdd41",
+      "zh": "IPC服务器的电脑2"
+    },
+    "app.CpCanvas#227": {
+      "jp_fnv1a": "0xfb1d7ef9106bdb8e",
+      "zh": "IPC服务器的电脑3"
+    },
+    "app.CpCanvas#228": {
+      "jp_fnv1a": "0xfb1d81f9106be0a7",
+      "zh": "IPC服务器的电脑4"
+    },
+    "app.CpCanvas#229": {
+      "jp_fnv1a": "0x0169bd7806f1ed82",
+      "zh": "移动区域的电脑1"
+    },
+    "app.CpCanvas#230": {
+      "jp_fnv1a": "0x0169bc7806f1ebcf",
+      "zh": "移动区域的电脑2"
+    },
+    "app.CpCanvas#231": {
+      "jp_fnv1a": "0x0169bb7806f1ea1c",
+      "zh": "移动区域的电脑3"
+    },
+    "app.CpCanvas#232": {
+      "jp_fnv1a": "0x0169ba7806f1e869",
+      "zh": "移动区域的电脑4"
+    },
+    "app.CpCanvas#233": {
+      "jp_fnv1a": "0x641552a6a3a98500",
+      "zh": "电脑世界之穴的电脑1"
+    },
+    "app.CpCanvas#234": {
+      "jp_fnv1a": "0x641555a6a3a98a19",
+      "zh": "电脑世界之穴的电脑2"
+    },
+    "app.CpCanvas#235": {
+      "jp_fnv1a": "0x641554a6a3a98866",
+      "zh": "电脑世界之穴的电脑3"
+    },
+    "app.CpCanvas#236": {
+      "jp_fnv1a": "0x641557a6a3a98d7f",
+      "zh": "电脑世界之穴的电脑4"
+    },
+    "app.CpCanvas#237": {
+      "jp_fnv1a": "0x57e8bf83501e5407",
+      "zh": "安全服务器的电脑1"
+    },
+    "app.CpCanvas#238": {
+      "jp_fnv1a": "0x57e8c083501e55ba",
+      "zh": "安全服务器的电脑2"
+    },
+    "app.CpCanvas#239": {
+      "jp_fnv1a": "0x373e04eb396c72af",
+      "zh": "缓存服务器的电脑1"
+    },
+    "app.CpCanvas#240": {
+      "jp_fnv1a": "0x373e05eb396c7462",
+      "zh": "缓存服务器的电脑2"
+    },
+    "app.CpCanvas#241": {
+      "jp_fnv1a": "0x373e06eb396c7615",
+      "zh": "缓存服务器的电脑3"
+    },
+    "app.CpCanvas#242": {
+      "jp_fnv1a": "0x373dffeb396c6a30",
+      "zh": "缓存服务器的电脑4"
+    },
+    "app.CpCanvas#243": {
+      "jp_fnv1a": "0x373e00eb396c6be3",
+      "zh": "缓存服务器的电脑5"
+    },
+    "app.CpCanvas#244": {
+      "jp_fnv1a": "0x4d89b7181b7c50a4",
+      "zh": "开始游戏"
+    },
+    "app.CpCanvas#245": {
+      "jp_fnv1a": "0x96351df542f0772f",
+      "zh": "选项"
+    },
+    "app.CpCanvas#246": {
+      "jp_fnv1a": "0xe91bf746d74cdef4",
+      "zh": "检查更新"
+    },
+    "app.CpCanvas#247": {
+      "jp_fnv1a": "0x16a8658159c37639",
+      "zh": "话更新"
+    },
+    "app.CpCanvas#248": {
+      "jp_fnv1a": "0x5ce77266f90a3611",
+      "zh": "音效　：　"
+    },
+    "app.CpCanvas#249": {
+      "jp_fnv1a": "0xfbdd021579dae30d",
+      "zh": "返回标题"
+    },
+    "app.CpCanvas#250": {
+      "jp_fnv1a": "0xfac31440228efd2e",
+      "zh": "保存服务器存档"
+    },
+    "app.CpCanvas#251": {
+      "jp_fnv1a": "0xec30b090b16fb020",
+      "zh": "读取服务器存档"
+    },
+    "app.CpCanvas#252": {
+      "jp_fnv1a": "0x8f0f434ab8a51d9c",
+      "zh": "初始化并从头游玩"
+    },
+    "app.CpCanvas#253": {
+      "jp_fnv1a": "0x5db5de870085f7eb",
+      "zh": "< 大 >"
+    },
+    "app.CpCanvas#254": {
+      "jp_fnv1a": "0x6e7ec7503f075122",
+      "zh": "< 中 >"
+    },
+    "app.CpCanvas#255": {
+      "jp_fnv1a": "0xf354372e5a716077",
+      "zh": "< 小 >"
+    },
+    "app.CpCanvas#257": {
+      "jp_fnv1a": "0xda6e94dc44a1d349",
+      "zh": "热斗的房间"
+    },
+    "app.CpCanvas#258": {
+      "jp_fnv1a": "0xc75317b623fab709",
+      "zh": "热斗的家"
+    },
+    "app.CpCanvas#259": {
+      "jp_fnv1a": "0x2840d2d41a90aedf",
+      "zh": "秋原町"
+    },
+    "app.CpCanvas#260": {
+      "jp_fnv1a": "0xd063a1c3c04db729",
+      "zh": "美露的家"
+    },
+    "app.CpCanvas#261": {
+      "jp_fnv1a": "0x51eaef8aaaca5532",
+      "zh": "日暮屋"
+    },
+    "app.CpCanvas#262": {
+      "jp_fnv1a": "0x53a3546df3da3ee5",
+      "zh": "学校-教室"
+    },
+    "app.CpCanvas#263": {
+      "jp_fnv1a": "0x6e529a211095be24",
+      "zh": "学校-办公室"
+    },
+    "app.CpCanvas#264": {
+      "jp_fnv1a": "0xc3dcfa2a15ec02d6",
+      "zh": "电算镇"
+    },
+    "app.CpCanvas#265": {
+      "jp_fnv1a": "0x0d1a9aca533bb255",
+      "zh": "电算巨蛋"
+    },
+    "app.CpCanvas#266": {
+      "jp_fnv1a": "0x4bb3647bd20ac0f8",
+      "zh": "对战体育场"
+    },
+    "app.CpCanvas#267": {
+      "jp_fnv1a": "0x796b4a9795c596a2",
+      "zh": "帐篷内"
+    },
+    "app.CpCanvas#268": {
+      "jp_fnv1a": "0x395c8c7685e70ec7",
+      "zh": "工作人员区"
+    },
+    "app.CpCanvas#269": {
+      "jp_fnv1a": "0x8454d0837c88e9c3",
+      "zh": "IPC-大厅"
+    },
+    "app.CpCanvas#270": {
+      "jp_fnv1a": "0x534fb8196d824575",
+      "zh": "IPC-管理室"
+    },
+    "app.CpCanvas#271": {
+      "jp_fnv1a": "0x99884d41f7ee9a9c",
+      "zh": "官厅街"
+    },
+    "app.CpCanvas#272": {
+      "jp_fnv1a": "0x6637b6e3abcf57e3",
+      "zh": "爸爸的研究室"
+    },
+    "app.CpCanvas#273": {
+      "jp_fnv1a": "0xd3ef5dbe209a404a",
+      "zh": "移动基站"
+    },
+    "app.CpCanvas#274": {
+      "jp_fnv1a": "0xfa68cce628c79fb7",
+      "zh": "旧电脑研究所"
+    },
+    "app.CpCanvas#275": {
+      "jp_fnv1a": "0x1b9961fa5b31ab7e",
+      "zh": "服务器室"
+    },
+    "app.CpCanvas#276": {
+      "jp_fnv1a": "0xd79c2631ea539d87",
+      "zh": "地铁站"
+    },
+    "app.CpCanvas#277": {
+      "jp_fnv1a": "0x7f20548e40955383",
+      "zh": "热斗的个人电脑"
+    },
+    "app.CpCanvas#278": {
+      "jp_fnv1a": "0x55f938fdbaf22f66",
+      "zh": "电视"
+    },
+    "app.CpCanvas#279": {
+      "jp_fnv1a": "0x839de7eaeafc0982",
+      "zh": "冰箱"
+    },
+    "app.CpCanvas#280": {
+      "jp_fnv1a": "0x367bb7b596483851",
+      "zh": "狗屋"
+    },
+    "app.CpCanvas#281": {
+      "jp_fnv1a": "0x83151b957f5057ac",
+      "zh": "玩偶"
+    },
+    "app.CpCanvas#282": {
+      "jp_fnv1a": "0xee088c8f7f8d88e1",
+      "zh": "黑板"
+    },
+    "app.CpCanvas#283": {
+      "jp_fnv1a": "0x33554a1b7474f67f",
+      "zh": "书桌"
+    },
+    "app.CpCanvas#284": {
+      "jp_fnv1a": "0x8e3123f5a49b89ba",
+      "zh": "老师的个人电脑"
+    },
+    "app.CpCanvas#285": {
+      "jp_fnv1a": "0x77ff180a88edc530",
+      "zh": "售票机"
+    },
+    "app.CpCanvas#286": {
+      "jp_fnv1a": "0xee83f64574e1e964",
+      "zh": "登记机"
+    },
+    "app.CpCanvas#287": {
+      "jp_fnv1a": "0xb807899c7c6572e2",
+      "zh": "观叶植物"
+    },
+    "app.CpCanvas#288": {
+      "jp_fnv1a": "0x086f44d39483e4b7",
+      "zh": "看板"
+    },
+    "app.CpCanvas#289": {
+      "jp_fnv1a": "0xa59927b0aa7097fe",
+      "zh": "红绿灯"
+    },
+    "app.CpCanvas#290": {
+      "jp_fnv1a": "0x17eadf8c7fb268aa",
+      "zh": "新型PET"
+    },
+    "app.CpCanvas#291": {
+      "jp_fnv1a": "0xb39c9aad4ce52cdc",
+      "zh": "监控系统"
+    },
+    "app.CpCanvas#292": {
+      "jp_fnv1a": "0xb185fb65f11dec61",
+      "zh": "座位"
+    },
+    "app.CpCanvas#293": {
+      "jp_fnv1a": "0xf6b15f237fbbb6d3",
+      "zh": "自动门"
+    },
+    "app.CpCanvas#294": {
+      "jp_fnv1a": "0xfd376273685b75c7",
+      "zh": "纪念碑"
+    },
+    "app.CpCanvas#295": {
+      "jp_fnv1a": "0x3cd29d4e95ecd85e",
+      "zh": "爸爸的个人电脑"
+    },
+    "app.CpCanvas#296": {
+      "jp_fnv1a": "0x7664190351bb13c7",
+      "zh": "控制面板"
+    },
+    "app.CpCanvas#297": {
+      "jp_fnv1a": "0x74d03b23e734db7d",
+      "zh": "天线"
+    },
+    "app.CpCanvas#298": {
+      "jp_fnv1a": "0x51cfd4cca81e3623",
+      "zh": "美露的个人电脑"
+    },
+    "app.CpCanvas#299": {
+      "jp_fnv1a": "0xab3fcd639f25ac81",
+      "zh": "水道管理服务器"
+    },
+    "app.CpCanvas#300": {
+      "jp_fnv1a": "0x0fbaa00b028fb959",
+      "zh": "对战机器"
+    },
+    "app.CpCanvas#301": {
+      "jp_fnv1a": "0xdc5a9d61d2b35798",
+      "zh": "帐篷"
+    },
+    "app.CpCanvas#302": {
+      "jp_fnv1a": "0xd18228c934d1a4d1",
+      "zh": "舞台装置"
+    },
+    "app.CpCanvas#303": {
+      "jp_fnv1a": "0x9e014450efd736e7",
+      "zh": "IPC服务器"
+    },
+    "app.CpCanvas#304": {
+      "jp_fnv1a": "0x96b62634a57458b4",
+      "zh": "安全服务器"
+    },
+    "app.CpCanvas#305": {
+      "jp_fnv1a": "0x4ab2f2548d15482c",
+      "zh": "缓存服务器"
+    },
+    "app.CpCanvas#306": {
+      "jp_fnv1a": "0x5e5ed31563e180da",
+      "zh": "芯片交易机"
+    },
+    "app.CpCanvas#307": {
+      "jp_fnv1a": "0x8d2ea2fe959e4abe",
+      "zh": "委托留言板"
+    },
+    "app.CpCanvas#308": {
+      "jp_fnv1a": "0x69c0b298ea3f3e37",
+      "zh": "剩余点数："
+    },
+    "app.CpCanvas#309": {
+      "jp_fnv1a": "0xb636ebe0817669fc",
+      "zh": "芯片文件夹"
+    },
+    "app.CpCanvas#310": {
+      "jp_fnv1a": "0x5e60212e4edbf9e4",
+      "zh": "数据库"
+    },
+    "app.CpCanvas#311": {
+      "jp_fnv1a": "0xa009f13dac6a616d",
+      "zh": "全满能源"
+    },
+    "app.CpCanvas#312": {
+      "jp_fnv1a": "0xf84df46c3d0da3f6",
+      "zh": "洛克人"
+    },
+    "app.CpCanvas#313": {
+      "jp_fnv1a": "0x0084b037390470b7",
+      "zh": "电子邮件"
+    },
+    "app.CpCanvas#314": {
+      "jp_fnv1a": "0x3db0e2ec6d107703",
+      "zh": "存档"
+    },
+    "app.CpCanvas#315": {
+      "jp_fnv1a": "0x157efb3c734ac299",
+      "zh": "文件夹"
+    },
+    "app.CpCanvas#316": {
+      "jp_fnv1a": "0x706cb2bcfd069183",
+      "zh": "背包"
+    },
+    "app.CpCanvas#317": {
+      "jp_fnv1a": "0xad06364125a851b6",
+      "zh": "标准芯片"
+    },
+    "app.CpCanvas#318": {
+      "jp_fnv1a": "0xce513df00935a785",
+      "zh": "MEGA芯片"
+    },
+    "app.CpCanvas#319": {
+      "jp_fnv1a": "0xc179d78274481849",
+      "zh": "GIGA芯片"
+    },
+    "app.CpCanvas#320": {
+      "jp_fnv1a": "0x2341f7c908f5b441",
+      "zh": "P・A笔记"
+    },
+    "app.CpCanvas#321": {
+      "jp_fnv1a": "0x0fa29b2ecfa8aa0e",
+      "zh": "ID"
+    },
+    "app.CpCanvas#322": {
+      "jp_fnv1a": "0xbc1087d12964ff5d",
+      "zh": "名称"
+    },
+    "app.CpCanvas#323": {
+      "jp_fnv1a": "0x2aea1b233749a752",
+      "zh": "代码"
+    },
+    "app.CpCanvas#324": {
+      "jp_fnv1a": "0x0ada039827fa52f7",
+      "zh": "攻击力"
+    },
+    "app.CpCanvas#325": {
+      "jp_fnv1a": "0x77e10fe03d9eee6a",
+      "zh": "属性"
+    },
+    "app.CpCanvas#326": {
+      "jp_fnv1a": "0x844619ae10e175f4",
+      "zh": "枚数"
+    },
+    "app.CpCanvas#327": {
+      "jp_fnv1a": "0x42483a1bfb624cbe",
+      "zh": "容量"
+    },
+    "app.CpCanvas#328": {
+      "jp_fnv1a": "0x01edf369e54ad2ea",
+      "zh": "收件箱"
+    },
+    "app.CpCanvas#329": {
+      "jp_fnv1a": "0x0e893230580a7e77",
+      "zh": "Zenny"
+    },
+    "app.CpCanvas#330": {
+      "jp_fnv1a": "0xa3c899ac5ed5d9b4",
+      "zh": "技能"
+    },
+    "app.CpCanvas#331": {
+      "jp_fnv1a": "0xec467e134c8e8792",
+      "zh": "技能列表"
+    },
+    "app.CpCanvas#332": {
+      "jp_fnv1a": "0x707bd04783863937",
+      "zh": "攻击 LV"
+    },
+    "app.CpCanvas#333": {
+      "jp_fnv1a": "0x839009a2fc84c746",
+      "zh": "集气 LV"
+    },
+    "app.CpCanvas#334": {
+      "jp_fnv1a": "0x8107a849aee36f0e",
+      "zh": "HP内存"
+    },
+    "app.CpCanvas#335": {
+      "jp_fnv1a": "0x0ec7396d1f9d88b7",
+      "zh": "常规强化"
+    },
+    "app.CpCanvas#336": {
+      "jp_fnv1a": "0x8ea743815acb2b80",
+      "zh": "技能槽+3"
+    },
+    "app.CpCanvas#337": {
+      "jp_fnv1a": "0xd5109b3164f089ad",
+      "zh": "删除时间"
+    },
+    "app.CpCanvas#338": {
+      "jp_fnv1a": "0x7ed2428b63dbcfe3",
+      "zh": "消灭等级"
+    },
+    "app.CpCanvas#339": {
+      "jp_fnv1a": "0x3f21350b40096651",
+      "zh": "BUG碎片"
+    },
+    "app.CpCanvas#340": {
+      "jp_fnv1a": "0x199e161b65f8e1f1",
+      "zh": "个"
+    },
+    "app.CpCanvas#341": {
+      "jp_fnv1a": "0x217675ccc48bca10",
+      "zh": "　　　？？"
+    },
+    "app.CpCanvas#342": {
+      "jp_fnv1a": "0x16e124f818e204d9",
+      "zh": "改装"
+    },
+    "app.CpCanvas#343": {
+      "jp_fnv1a": "0xf05a2b0693307224",
+      "zh": "取消"
+    },
+    "app.CpCanvas#344": {
+      "jp_fnv1a": "0xe01859299cf630cd",
+      "zh": "逃跑"
+    },
+    "app.CpCanvas#347": {
+      "jp_fnv1a": "0x97ad3e81d983fad7",
+      "zh": "选项"
+    },
+    "app.CpCanvas#348": {
+      "jp_fnv1a": "0x7380ce6990d03945",
+      "zh": "排序"
+    },
+    "app.CpCanvas#349": {
+      "jp_fnv1a": "0xa14dc507b07747ab",
+      "zh": "结束"
+    },
+    "app.CpCanvas#350": {
+      "jp_fnv1a": "0x699951884d5278ed",
+      "zh": "区域窃取"
+    },
+    "app.CpCanvas#351": {
+      "jp_fnv1a": "0xa16f29539b24be64",
+      "zh": "缓存加载"
+    },
+    "app.CpCanvas#352": {
+      "jp_fnv1a": "0xc8121cdb512c3fe9",
+      "zh": "重启"
+    },
+    "app.CpCanvas#353": {
+      "jp_fnv1a": "0xce110e5812ae7c74",
+      "zh": "名："
+    },
+    "app.CpCanvas#354": {
+      "jp_fnv1a": "0x52b5d95b21034d64",
+      "zh": "1键：查看文件夹"
+    },
+    "app.CpCanvas#355": {
+      "jp_fnv1a": "0x6ed40d393428f7ba",
+      "zh": "参加排行"
+    },
+    "app.CpCanvas#356": {
+      "jp_fnv1a": "0x2528d920f976d7da",
+      "zh": "更新排行"
+    },
+    "app.CpCanvas#357": {
+      "jp_fnv1a": "0xaf42d615b6feee3a",
+      "zh": "月度排行"
+    },
+    "app.CpCanvas#361": {
+      "jp_fnv1a": "0x9e27b27e6aed2ab4",
+      "zh": "移动步数"
+    },
+    "app.CpCanvas#362": {
+      "jp_fnv1a": "0x1e79b95ba72b6532",
+      "zh": "受伤次数"
+    },
+    "app.CpCanvas#363": {
+      "jp_fnv1a": "0x36d1cfef83c72214",
+      "zh": "使用回复"
+    },
+    "app.CpCanvas#364": {
+      "jp_fnv1a": "0xe7b40926c1fecee5",
+      "zh": "剩余HP％"
+    },
+    "app.CpCanvas#365": {
+      "jp_fnv1a": "0xc0f0530238f48c0b",
+      "zh": "总分"
+    },
+    "app.CpCanvas#367": {
+      "jp_fnv1a": "0x19f9eb1b6646f78d",
+      "zh": "次"
+    },
+    "app.CpCanvas#368": {
+      "jp_fnv1a": "0x33f5571b74fd380f",
+      "zh": "步"
+    },
+    "app.CpCanvas#369": {
+      "jp_fnv1a": "0x6f6fee1b9659cc39",
+      "zh": "％"
+    },
+    "app.CpCanvas#370": {
+      "jp_fnv1a": "0xe9c8d1a28c80e596",
+      "zh": "我的文件夹"
+    },
+    "app.Mail#0": {
+      "jp_fnv1a": "0x84dac9344091e60e",
+      "zh": "电算新闻"
+    },
+    "app.Mail#1": {
+      "jp_fnv1a": "0x3c6af1b3667b771b",
+      "zh": "迪卡欧"
+    },
+    "app.Mail#2": {
+      "jp_fnv1a": "0xfd756f9d022bd854",
+      "zh": "美露"
+    },
+    "app.Mail#3": {
+      "jp_fnv1a": "0x12157c35a6cbf97d",
+      "zh": "日暮"
+    },
+    "app.Mail#4": {
+      "jp_fnv1a": "0x2001476747f78a8f",
+      "zh": "爸爸"
+    },
+    "app.Mail#5": {
+      "jp_fnv1a": "0x23634d1798693762",
+      "zh": "巨蛋大会事务局"
+    },
+    "app.Mail#6": {
+      "jp_fnv1a": "0xabd9ca9e4b36cb06",
+      "zh": "修一"
+    },
+    "app.Mail#7": {
+      "jp_fnv1a": "0xf652792ca6749bfc",
+      "zh": "科学省"
+    },
+    "app.Mail#8": {
+      "jp_fnv1a": "0xf1493cf772d36f4b",
+      "zh": "秋原ML"
+    },
+    "app.Mail#9": {
+      "jp_fnv1a": "0x937d1aa9a627dff4",
+      "zh": "热斗"
+    },
+    "app.Mail#10": {
+      "jp_fnv1a": "0x5f5735c81ae4c345",
+      "zh": "热斗"
+    },
+    "app.Mail#11": {
+      "jp_fnv1a": "0xb9f5a2cd9ab6fe0a",
+      "zh": "光热斗选手"
+    },
+    "app.Mail#12": {
+      "jp_fnv1a": "0x788d9f717f8544e5",
+      "zh": "光热斗先生"
+    }
+  },
+  "streams": {
+    "sp:22": {
+      "description": "battle_chips",
+      "jp_fnv1a": "0xbdadea2fea7a8717",
+      "entries": {
+        "0": {
+          "jp_fnv1a": "0x3f331cd632ecc89f",
+          "zh": "洛克炮"
+        },
+        "1": {
+          "jp_fnv1a": "0xe57192ca4223dbee",
+          "zh": "集气洛克炮"
+        },
+        "2": {
+          "jp_fnv1a": "0x2e617414fc41c3e9",
+          "zh": "加农炮"
+        },
+        "3": {
+          "jp_fnv1a": "0x87d8d2310ea9f653",
+          "zh": "高超加农炮"
+        },
+        "4": {
+          "jp_fnv1a": "0x1937309e69bfbf75",
+          "zh": "MEGA加农炮"
+        },
+        "5": {
+          "jp_fnv1a": "0x986e6ba4c8a9b3c0",
+          "zh": "火神炮1"
+        },
+        "6": {
+          "jp_fnv1a": "0x986e6ea4c8a9b8d9",
+          "zh": "火神炮2"
+        },
+        "7": {
+          "jp_fnv1a": "0x986e6da4c8a9b726",
+          "zh": "火神炮3"
+        },
+        "8": {
+          "jp_fnv1a": "0x4f1e76be58de0315",
+          "zh": "散弹枪"
+        },
+        "9": {
+          "jp_fnv1a": "0xad4cf7d0ac3df338",
+          "zh": "V字枪"
+        },
+        "10": {
+          "jp_fnv1a": "0x61ec715ac795fe05",
+          "zh": "侧击枪"
+        },
+        "11": {
+          "jp_fnv1a": "0xaaa176fe0ed71f7a",
+          "zh": "散射枪"
+        },
+        "12": {
+          "jp_fnv1a": "0xf631df7f5e1c3c14",
+          "zh": "泡沫散弹"
+        },
+        "13": {
+          "jp_fnv1a": "0x9c6013ea74819ea9",
+          "zh": "泡沫V字"
+        },
+        "14": {
+          "jp_fnv1a": "0x88b37e43e8fbb7ba",
+          "zh": "泡沫侧击"
+        },
+        "15": {
+          "jp_fnv1a": "0x638486cd7c733a39",
+          "zh": "热焰散弹"
+        },
+        "16": {
+          "jp_fnv1a": "0x634c5cd8882327a8",
+          "zh": "热焰V字"
+        },
+        "17": {
+          "jp_fnv1a": "0x75b80779789fa1b1",
+          "zh": "热焰侧击"
+        },
+        "18": {
+          "jp_fnv1a": "0x598b5981355ef654",
+          "zh": "兔环1"
+        },
+        "19": {
+          "jp_fnv1a": "0x598b5c81355efb6d",
+          "zh": "兔环2"
+        },
+        "20": {
+          "jp_fnv1a": "0x598b5b81355ef9ba",
+          "zh": "兔环3"
+        },
+        "21": {
+          "jp_fnv1a": "0x7eb0d12d3ef01e76",
+          "zh": "龙卷风"
+        },
+        "22": {
+          "jp_fnv1a": "0x94ba8c8821e0519b",
+          "zh": "电力冲击1"
+        },
+        "23": {
+          "jp_fnv1a": "0x94ba8d8821e0534e",
+          "zh": "电力冲击2"
+        },
+        "24": {
+          "jp_fnv1a": "0x94ba8e8821e05501",
+          "zh": "电力冲击3"
+        },
+        "25": {
+          "jp_fnv1a": "0xbf2dc7a5cefe2ca7",
+          "zh": "迷你炸弹"
+        },
+        "26": {
+          "jp_fnv1a": "0xb4c36180b2888c88",
+          "zh": "直线炸弹"
+        },
+        "27": {
+          "jp_fnv1a": "0x02df8abe685a7dda",
+          "zh": "十字炸弹"
+        },
+        "28": {
+          "jp_fnv1a": "0x990ed7ba80156c2b",
+          "zh": "炮丸"
+        },
+        "29": {
+          "jp_fnv1a": "0x4df01a49f70eecc0",
+          "zh": "冰冻炮丸"
+        },
+        "30": {
+          "jp_fnv1a": "0x30278b2038ce7f8a",
+          "zh": "熔岩炮丸"
+        },
+        "31": {
+          "jp_fnv1a": "0x0299f0debc1b83eb",
+          "zh": "毒沼炮丸"
+        },
+        "32": {
+          "jp_fnv1a": "0x2542b4161796dd57",
+          "zh": "巨鼠1"
+        },
+        "33": {
+          "jp_fnv1a": "0x2542b5161796df0a",
+          "zh": "巨鼠2"
+        },
+        "34": {
+          "jp_fnv1a": "0x2542b6161796e0bd",
+          "zh": "巨鼠3"
+        },
+        "35": {
+          "jp_fnv1a": "0x504db68d6670a0bd",
+          "zh": "丛林炸弹1"
+        },
+        "36": {
+          "jp_fnv1a": "0x504db38d66709ba4",
+          "zh": "丛林炸弹2"
+        },
+        "37": {
+          "jp_fnv1a": "0x504db48d66709d57",
+          "zh": "丛林炸弹3"
+        },
+        "38": {
+          "jp_fnv1a": "0xf8d86b83e185b457",
+          "zh": "间歇泉"
+        },
+        "39": {
+          "jp_fnv1a": "0xf7f999072f5a7e10",
+          "zh": "剑"
+        },
+        "40": {
+          "jp_fnv1a": "0x255e2767ad149ff3",
+          "zh": "宽剑"
+        },
+        "41": {
+          "jp_fnv1a": "0xa9837195eca6279f",
+          "zh": "长剑"
+        },
+        "42": {
+          "jp_fnv1a": "0x49248d321deb5ea5",
+          "zh": "宽刃"
+        },
+        "43": {
+          "jp_fnv1a": "0x8c969d1379ebefe1",
+          "zh": "长刃"
+        },
+        "44": {
+          "jp_fnv1a": "0x46481e3e49a3bd72",
+          "zh": "烈焰剑"
+        },
+        "45": {
+          "jp_fnv1a": "0x5e4c5a05aaa20904",
+          "zh": "水斩剑"
+        },
+        "46": {
+          "jp_fnv1a": "0xcd398ed240b6bd25",
+          "zh": "电力剑"
+        },
+        "47": {
+          "jp_fnv1a": "0x483553e0c1d19e31",
+          "zh": "竹剑"
+        },
+        "48": {
+          "jp_fnv1a": "0x3230c10deabdcd1e",
+          "zh": "烈焰刃"
+        },
+        "49": {
+          "jp_fnv1a": "0xf848e66702efa2c0",
+          "zh": "水刃"
+        },
+        "50": {
+          "jp_fnv1a": "0xfa490b4a119ed8bf",
+          "zh": "电力刃"
+        },
+        "51": {
+          "jp_fnv1a": "0xd3e576f95c0de3ab",
+          "zh": "竹刃"
+        },
+        "52": {
+          "jp_fnv1a": "0x4fd4201605373f7c",
+          "zh": "冲击波"
+        },
+        "53": {
+          "jp_fnv1a": "0xccc0a7e40e8130fe",
+          "zh": "音速波"
+        },
+        "54": {
+          "jp_fnv1a": "0x11da3656f5baf113",
+          "zh": "动能波"
+        },
+        "55": {
+          "jp_fnv1a": "0x1875133298640f11",
+          "zh": "烈焰线1"
+        },
+        "56": {
+          "jp_fnv1a": "0x18751032986409f8",
+          "zh": "烈焰线2"
+        },
+        "57": {
+          "jp_fnv1a": "0x1875113298640bab",
+          "zh": "烈焰线3"
+        },
+        "58": {
+          "jp_fnv1a": "0x1424fab75f76a15d",
+          "zh": "水柱塔1"
+        },
+        "59": {
+          "jp_fnv1a": "0x1424f7b75f769c44",
+          "zh": "水柱塔2"
+        },
+        "60": {
+          "jp_fnv1a": "0x1424f8b75f769df7",
+          "zh": "水柱塔3"
+        },
+        "61": {
+          "jp_fnv1a": "0x4d81ad762cd6adb2",
+          "zh": "木桩塔1"
+        },
+        "62": {
+          "jp_fnv1a": "0x4d81ac762cd6abff",
+          "zh": "木桩塔2"
+        },
+        "63": {
+          "jp_fnv1a": "0x4d81ab762cd6aa4c",
+          "zh": "木桩塔3"
+        },
+        "64": {
+          "jp_fnv1a": "0xa7ab4e3d1e44ec2c",
+          "zh": "气垫球1"
+        },
+        "65": {
+          "jp_fnv1a": "0xa7ab513d1e44f145",
+          "zh": "气垫球2"
+        },
+        "66": {
+          "jp_fnv1a": "0xa7ab503d1e44ef92",
+          "zh": "气垫球3"
+        },
+        "67": {
+          "jp_fnv1a": "0x4ef634733cddb723",
+          "zh": "回力镖1"
+        },
+        "68": {
+          "jp_fnv1a": "0x4ef635733cddb8d6",
+          "zh": "回力镖2"
+        },
+        "69": {
+          "jp_fnv1a": "0x4ef636733cddba89",
+          "zh": "回力镖3"
+        },
+        "70": {
+          "jp_fnv1a": "0xd009b9467ea0c82f",
+          "zh": "绒绒圆冲刺1"
+        },
+        "71": {
+          "jp_fnv1a": "0xd009ba467ea0c9e2",
+          "zh": "绒绒圆冲刺2"
+        },
+        "72": {
+          "jp_fnv1a": "0xd009bb467ea0cb95",
+          "zh": "绒绒圆冲刺3"
+        },
+        "73": {
+          "jp_fnv1a": "0xa19f2591e4aed128",
+          "zh": "卫星1"
+        },
+        "74": {
+          "jp_fnv1a": "0xa19f2891e4aed641",
+          "zh": "卫星2"
+        },
+        "75": {
+          "jp_fnv1a": "0xa19f2791e4aed48e",
+          "zh": "卫星3"
+        },
+        "76": {
+          "jp_fnv1a": "0x3bd28eae725ce142",
+          "zh": "竹枪"
+        },
+        "77": {
+          "jp_fnv1a": "0x7e29d301aadc128a",
+          "zh": "随机流星1"
+        },
+        "78": {
+          "jp_fnv1a": "0x7e29d201aadc10d7",
+          "zh": "随机流星2"
+        },
+        "79": {
+          "jp_fnv1a": "0x7e29d101aadc0f24",
+          "zh": "随机流星3"
+        },
+        "80": {
+          "jp_fnv1a": "0x11b9928756958ee2",
+          "zh": "隐形地雷"
+        },
+        "81": {
+          "jp_fnv1a": "0xf730da64cd0e358c",
+          "zh": "冰块"
+        },
+        "82": {
+          "jp_fnv1a": "0x53c9ac84649b0a55",
+          "zh": "石头方块"
+        },
+        "83": {
+          "jp_fnv1a": "0xa79bec2a1add032c",
+          "zh": "突风"
+        },
+        "84": {
+          "jp_fnv1a": "0x5cba28519edee4d7",
+          "zh": "抽风机"
+        },
+        "85": {
+          "jp_fnv1a": "0xcbbf77e01d6828b7",
+          "zh": "钢盔防御"
+        },
+        "86": {
+          "jp_fnv1a": "0x9c3cf372989fe842",
+          "zh": "诅咒盾1"
+        },
+        "87": {
+          "jp_fnv1a": "0x9c3cf272989fe68f",
+          "zh": "诅咒盾2"
+        },
+        "88": {
+          "jp_fnv1a": "0x9c3cf172989fe4dc",
+          "zh": "诅咒盾3"
+        },
+        "89": {
+          "jp_fnv1a": "0xaa04151b614e34db",
+          "zh": "裂解"
+        },
+        "90": {
+          "jp_fnv1a": "0x39d8bbdb57516fd2",
+          "zh": "双重裂解"
+        },
+        "91": {
+          "jp_fnv1a": "0x56ab28f3c5b864b5",
+          "zh": "三重裂解"
+        },
+        "92": {
+          "jp_fnv1a": "0xf907989a13f67394",
+          "zh": "回复10"
+        },
+        "93": {
+          "jp_fnv1a": "0xf90e849a13fc7046",
+          "zh": "回复30"
+        },
+        "94": {
+          "jp_fnv1a": "0xf8fa009a13eae6f0",
+          "zh": "回复50"
+        },
+        "95": {
+          "jp_fnv1a": "0xf9260e9a141039a5",
+          "zh": "回复80"
+        },
+        "96": {
+          "jp_fnv1a": "0x1e627dcfebcbd93e",
+          "zh": "回复120"
+        },
+        "97": {
+          "jp_fnv1a": "0x1e517fcfebbd6971",
+          "zh": "回复150"
+        },
+        "98": {
+          "jp_fnv1a": "0x393202cffb377c4d",
+          "zh": "回复200"
+        },
+        "99": {
+          "jp_fnv1a": "0x301bc7cff5f31882",
+          "zh": "回复300"
+        },
+        "100": {
+          "jp_fnv1a": "0xb4f4fcef6cd8fc4a",
+          "zh": "地面窃取"
+        },
+        "101": {
+          "jp_fnv1a": "0x699951884d5278ed",
+          "zh": "区域窃取"
+        },
+        "102": {
+          "jp_fnv1a": "0xc5b0310f548749d1",
+          "zh": "地面复原"
+        },
+        "103": {
+          "jp_fnv1a": "0x8879c87b889923c3",
+          "zh": "死斗1"
+        },
+        "104": {
+          "jp_fnv1a": "0x8879c97b88992576",
+          "zh": "死斗2"
+        },
+        "105": {
+          "jp_fnv1a": "0x8879ca7b88992729",
+          "zh": "死斗3"
+        },
+        "106": {
+          "jp_fnv1a": "0xc7e818f90e9f63af",
+          "zh": "岩浆战场"
+        },
+        "107": {
+          "jp_fnv1a": "0x27155251e7979aee",
+          "zh": "冰战场"
+        },
+        "108": {
+          "jp_fnv1a": "0x8133a3478d3e7689",
+          "zh": "草原战场"
+        },
+        "109": {
+          "jp_fnv1a": "0x81a6bef07ae7eaa9",
+          "zh": "快速量表"
+        },
+        "110": {
+          "jp_fnv1a": "0x414f23a56e9b1235",
+          "zh": "超级北风"
+        },
+        "111": {
+          "jp_fnv1a": "0x2d84ddea7e7723c5",
+          "zh": "神圣地面"
+        },
+        "112": {
+          "jp_fnv1a": "0x0bb8bba0ed015182",
+          "zh": "隐身"
+        },
+        "113": {
+          "jp_fnv1a": "0xe3aa4853c95ca4a8",
+          "zh": "防护罩"
+        },
+        "114": {
+          "jp_fnv1a": "0x8cb4c9ec55b5d6f3",
+          "zh": "防护罩100"
+        },
+        "115": {
+          "jp_fnv1a": "0xc7e1d5f5872694ec",
+          "zh": "火气严禁"
+        },
+        "116": {
+          "jp_fnv1a": "0x6bf274b9c8384b63",
+          "zh": "大洪水"
+        },
+        "117": {
+          "jp_fnv1a": "0x0102f6ae1ad940d2",
+          "zh": "避雷针"
+        },
+        "118": {
+          "jp_fnv1a": "0xd7def41eeafa2492",
+          "zh": "迷惑森林"
+        },
+        "119": {
+          "jp_fnv1a": "0x5126911669936c0f",
+          "zh": "替身"
+        },
+        "120": {
+          "jp_fnv1a": "0x95aad35c2a9d8931",
+          "zh": "领航员征用"
+        },
+        "121": {
+          "jp_fnv1a": "0x9b1dc3479b7ab79d",
+          "zh": "攻击+10"
+        },
+        "122": {
+          "jp_fnv1a": "0x9b2129479b7d9ac6",
+          "zh": "攻击+20"
+        },
+        "123": {
+          "jp_fnv1a": "0x85060447f61a8156",
+          "zh": "领航员+10"
+        },
+        "124": {
+          "jp_fnv1a": "0x85029e47f6179e2d",
+          "zh": "领航员+20"
+        },
+        "125": {
+          "jp_fnv1a": "0x6a7011cefc17d99e",
+          "zh": "超级火神炮"
+        },
+        "126": {
+          "jp_fnv1a": "0xf443c10fcb16e106",
+          "zh": "超级加农炮"
+        },
+        "127": {
+          "jp_fnv1a": "0xb6f088e47e70006a",
+          "zh": "大型炸弹"
+        },
+        "128": {
+          "jp_fnv1a": "0x95cb04ec5afa3abe",
+          "zh": "防护罩200"
+        },
+        "129": {
+          "jp_fnv1a": "0xa9d7f9f3bec15357",
+          "zh": "音速爆击"
+        },
+        "130": {
+          "jp_fnv1a": "0x02d8066837cf435a",
+          "zh": "英雄剑"
+        },
+        "131": {
+          "jp_fnv1a": "0xadb037d4586479a3",
+          "zh": "妖刀村正"
+        },
+        "132": {
+          "jp_fnv1a": "0xc711e8e1643ab4fa",
+          "zh": "流星群"
+        },
+        "133": {
+          "jp_fnv1a": "0x3af8c3e197f879bb",
+          "zh": "量表全满"
+        },
+        "134": {
+          "jp_fnv1a": "0xfbc2bc1cb22baabd",
+          "zh": "圣殿"
+        },
+        "135": {
+          "jp_fnv1a": "0x9b24af479b80b44f",
+          "zh": "攻击+30"
+        },
+        "136": {
+          "jp_fnv1a": "0x84ff1847f61484a4",
+          "zh": "领航员+30"
+        },
+        "137": {
+          "jp_fnv1a": "0xfe7841c392dc6083",
+          "zh": "萝露"
+        },
+        "138": {
+          "jp_fnv1a": "0xd82de544b0d24287",
+          "zh": "萝露V2"
+        },
+        "139": {
+          "jp_fnv1a": "0xd82de444b0d240d4",
+          "zh": "萝露V3"
+        },
+        "140": {
+          "jp_fnv1a": "0xd81ca944b0c36960",
+          "zh": "萝露SP"
+        },
+        "141": {
+          "jp_fnv1a": "0xd4272ff3020b1ffc",
+          "zh": "气力人"
+        },
+        "142": {
+          "jp_fnv1a": "0xe74cf6d1702fe804",
+          "zh": "气力人V2"
+        },
+        "143": {
+          "jp_fnv1a": "0xe74cf7d1702fe9b7",
+          "zh": "气力人V3"
+        },
+        "144": {
+          "jp_fnv1a": "0xe75d96d1703db817",
+          "zh": "气力人SP"
+        },
+        "145": {
+          "jp_fnv1a": "0x4d19e8e854f3169c",
+          "zh": "布鲁斯"
+        },
+        "146": {
+          "jp_fnv1a": "0x43ef446f55b76f64",
+          "zh": "布鲁斯V2"
+        },
+        "147": {
+          "jp_fnv1a": "0x43ef456f55b77117",
+          "zh": "布鲁斯V3"
+        },
+        "148": {
+          "jp_fnv1a": "0x4400a46f55c685b7",
+          "zh": "布鲁斯SP"
+        },
+        "149": {
+          "jp_fnv1a": "0xb576ed3c20377e21",
+          "zh": "火焰人"
+        },
+        "150": {
+          "jp_fnv1a": "0xf6a8cba15af477e5",
+          "zh": "火焰人V2"
+        },
+        "151": {
+          "jp_fnv1a": "0xf6a8caa15af47632",
+          "zh": "火焰人V3"
+        },
+        "152": {
+          "jp_fnv1a": "0xf6982ba15ae6a7d2",
+          "zh": "火焰人SP"
+        },
+        "153": {
+          "jp_fnv1a": "0x8a49f143b1e3635c",
+          "zh": "冰冻人"
+        },
+        "154": {
+          "jp_fnv1a": "0x5be1d85ae45065a4",
+          "zh": "冰冻人V2"
+        },
+        "155": {
+          "jp_fnv1a": "0x5be1d95ae4506757",
+          "zh": "冰冻人V3"
+        },
+        "156": {
+          "jp_fnv1a": "0x5bf2b85ae45ea277",
+          "zh": "冰冻人SP"
+        },
+        "157": {
+          "jp_fnv1a": "0x965bd0a43cb8d5c9",
+          "zh": "木头人"
+        },
+        "158": {
+          "jp_fnv1a": "0x45f8d1974a441bad",
+          "zh": "木头人V2"
+        },
+        "159": {
+          "jp_fnv1a": "0x45f8d0974a4419fa",
+          "zh": "木头人V3"
+        },
+        "160": {
+          "jp_fnv1a": "0x45e831974a364b9a",
+          "zh": "木头人SP"
+        },
+        "161": {
+          "jp_fnv1a": "0x48ec2824ecda5f22",
+          "zh": "阴影人"
+        },
+        "162": {
+          "jp_fnv1a": "0x86194fa45085442a",
+          "zh": "阴影人V2"
+        },
+        "163": {
+          "jp_fnv1a": "0x861950a4508545dd",
+          "zh": "阴影人V3"
+        },
+        "164": {
+          "jp_fnv1a": "0x860f5ba4507d0409",
+          "zh": "阴影人SP"
+        },
+        "165": {
+          "jp_fnv1a": "0xb57dd4e4688614de",
+          "zh": "钻头人"
+        },
+        "166": {
+          "jp_fnv1a": "0xf87cb44fcabe005e",
+          "zh": "钻头人V2"
+        },
+        "167": {
+          "jp_fnv1a": "0xf87cb54fcabe0211",
+          "zh": "钻头人V3"
+        },
+        "168": {
+          "jp_fnv1a": "0xf88dd04fcacca325",
+          "zh": "钻头人SP"
+        },
+        "169": {
+          "jp_fnv1a": "0x7af50ee12de6a29f",
+          "zh": "电波干扰人"
+        },
+        "170": {
+          "jp_fnv1a": "0xe86aad9121da9b5b",
+          "zh": "电波干扰人V2"
+        },
+        "171": {
+          "jp_fnv1a": "0xe86aac9121da99a8",
+          "zh": "电波干扰人V3"
+        },
+        "172": {
+          "jp_fnv1a": "0xe875019121e37e9c",
+          "zh": "电波干扰人SP"
+        },
+        "173": {
+          "jp_fnv1a": "0x0ce5cb783a36ce10",
+          "zh": "帽子人"
+        },
+        "174": {
+          "jp_fnv1a": "0xac2b584d883ac640",
+          "zh": "帽子人V2"
+        },
+        "175": {
+          "jp_fnv1a": "0xac2b594d883ac7f3",
+          "zh": "帽子人V3"
+        },
+        "176": {
+          "jp_fnv1a": "0xac21084d8831e9cb",
+          "zh": "帽子人SP"
+        },
+        "177": {
+          "jp_fnv1a": "0x157efd3c734ac5ff",
+          "zh": "佛鲁迪"
+        },
+        "178": {
+          "jp_fnv1a": "0xec6d1cec79136c79",
+          "zh": "佛鲁迪另"
+        },
+        "179": {
+          "jp_fnv1a": "0x50ac54690bb41d5e",
+          "zh": "缓存"
+        },
+        "180": {
+          "jp_fnv1a": "0x7e2e5b9bcfdd565b",
+          "zh": "缓存EX"
+        },
+        "181": {
+          "jp_fnv1a": "0xd4f67fb8006407d8",
+          "zh": "GIGA加农炮1"
+        },
+        "182": {
+          "jp_fnv1a": "0xd4f682b800640cf1",
+          "zh": "GIGA加农炮2"
+        },
+        "183": {
+          "jp_fnv1a": "0xd4f681b800640b3e",
+          "zh": "GIGA加农炮3"
+        },
+        "184": {
+          "jp_fnv1a": "0x11817fdf16370814",
+          "zh": "超级爆破"
+        },
+        "185": {
+          "jp_fnv1a": "0x1f1a862dc5f10dbe",
+          "zh": "热焰散射"
+        },
+        "186": {
+          "jp_fnv1a": "0x6f678eaa8d62ed15",
+          "zh": "泡沫散射"
+        },
+        "187": {
+          "jp_fnv1a": "0x1dbdc0fd30fd9de5",
+          "zh": "梦之剑"
+        },
+        "188": {
+          "jp_fnv1a": "0x17beb9e37938efa3",
+          "zh": "元素剑"
+        },
+        "189": {
+          "jp_fnv1a": "0x39c8292e2401057f",
+          "zh": "梦之刃"
+        },
+        "190": {
+          "jp_fnv1a": "0x914f12829d1ca127",
+          "zh": "烈焰交错1"
+        },
+        "191": {
+          "jp_fnv1a": "0x914f13829d1ca2da",
+          "zh": "烈焰交错2"
+        },
+        "192": {
+          "jp_fnv1a": "0x914f14829d1ca48d",
+          "zh": "烈焰交错3"
+        },
+        "193": {
+          "jp_fnv1a": "0x1c01ac5731e26a3a",
+          "zh": "地狱回力镖1"
+        },
+        "194": {
+          "jp_fnv1a": "0x1c01ab5731e26887",
+          "zh": "地狱回力镖2"
+        },
+        "195": {
+          "jp_fnv1a": "0x1c01aa5731e266d4",
+          "zh": "地狱回力镖3"
+        },
+        "196": {
+          "jp_fnv1a": "0x2b899e893b323999",
+          "zh": "水之交错1"
+        },
+        "197": {
+          "jp_fnv1a": "0x2b899b893b323480",
+          "zh": "水之交错2"
+        },
+        "198": {
+          "jp_fnv1a": "0x2b899c893b323633",
+          "zh": "水之交错3"
+        },
+        "199": {
+          "jp_fnv1a": "0xf27538ce7160e1ba",
+          "zh": "雷电伏特1"
+        },
+        "200": {
+          "jp_fnv1a": "0xf27537ce7160e007",
+          "zh": "雷电伏特2"
+        },
+        "201": {
+          "jp_fnv1a": "0xf27536ce7160de54",
+          "zh": "雷电伏特3"
+        },
+        "202": {
+          "jp_fnv1a": "0x853b4fa59e2e8ab6",
+          "zh": "地狱气垫球1"
+        },
+        "203": {
+          "jp_fnv1a": "0x853b4ea59e2e8903",
+          "zh": "地狱气垫球2"
+        },
+        "204": {
+          "jp_fnv1a": "0x853b4da59e2e8750",
+          "zh": "地狱气垫球3"
+        },
+        "205": {
+          "jp_fnv1a": "0x79e9d17bca26aa83",
+          "zh": "巨鼠进行曲"
+        },
+        "206": {
+          "jp_fnv1a": "0x6e0315965af3d6dc",
+          "zh": "愤怒诅咒"
+        },
+        "207": {
+          "jp_fnv1a": "0x4a9475dfb8cdbc06",
+          "zh": "帽子戏法"
+        },
+        "208": {
+          "jp_fnv1a": "0x8be6377939b74211",
+          "zh": "死亡惩罚"
+        },
+        "209": {
+          "jp_fnv1a": "0x377be1cac9f8279e",
+          "zh": "热焰充能"
+        },
+        "210": {
+          "jp_fnv1a": "0xd22884387ad3acb4",
+          "zh": "水之充能"
+        },
+        "211": {
+          "jp_fnv1a": "0x54fac63375a87f57",
+          "zh": "电力充能"
+        }
+      }
+    },
+    "sp:12": {
+      "description": "chip_descriptions",
+      "jp_fnv1a": "0x99fcbbc5049cab97",
+      "entries": {
+        "0": {
+          "jp_fnv1a": "0x2f353a0b795ad825",
+          "zh": [
+            "可攻击前方1名敌人的",
+            "加农炮"
+          ]
+        },
+        "1": {
+          "jp_fnv1a": "0xf034c8c0c0b7fcd9",
+          "zh": [
+            "命中后会向后方1格",
+            "引发连环爆炸！"
+          ]
+        },
+        "2": {
+          "jp_fnv1a": "0xd14d65d62cdcb9f4",
+          "zh": [
+            "命中后会向斜后方2格",
+            "引发连环爆炸"
+          ]
+        },
+        "3": {
+          "jp_fnv1a": "0x648dda0a4c7fd1de",
+          "zh": [
+            "命中后会向上下2格",
+            "引发连环爆炸"
+          ]
+        },
+        "4": {
+          "jp_fnv1a": "0xc467542abbd8bb64",
+          "zh": [
+            "命中后会向周围1格",
+            "引发连环爆炸！"
+          ]
+        },
+        "5": {
+          "jp_fnv1a": "0xfd662970e5a4f81a",
+          "zh": [
+            "朝前方3格处",
+            "投掷炸弹"
+          ]
+        },
+        "6": {
+          "jp_fnv1a": "0xc98132542866a4ec",
+          "zh": [
+            "朝前方3格处投掷",
+            "爆风纵向扩散的炸弹"
+          ]
+        },
+        "7": {
+          "jp_fnv1a": "0x3fe9f27196d38f99",
+          "zh": [
+            "朝前方3格处投掷",
+            "爆风呈十字扩散的炸弹"
+          ]
+        },
+        "8": {
+          "jp_fnv1a": "0xc962205c6c515f96",
+          "zh": [
+            "朝前方3格投掷炮丸！",
+            "破坏地面攻击！"
+          ]
+        },
+        "9": {
+          "jp_fnv1a": "0x90a392114753ddf3",
+          "zh": [
+            "朝前方3格投掷炮丸！",
+            "使地面结冰！"
+          ]
+        },
+        "10": {
+          "jp_fnv1a": "0xa170bcd24b1e773a",
+          "zh": [
+            "朝前方3格投掷炮丸！",
+            "使地面变为岩浆！"
+          ]
+        },
+        "11": {
+          "jp_fnv1a": "0x7ce5e7a3c5ec23a4",
+          "zh": [
+            "朝前方3格投掷炮丸！",
+            "使地面变为毒沼！"
+          ]
+        },
+        "12": {
+          "jp_fnv1a": "0x306b67d92025a208",
+          "zh": [
+            "贴地前进的鼠型导弹",
+            "可转弯1次"
+          ]
+        },
+        "13": {
+          "jp_fnv1a": "0x45a90b2d5a61f528",
+          "zh": [
+            "斩击眼前的敌人！",
+            "攻击范围为1格"
+          ]
+        },
+        "14": {
+          "jp_fnv1a": "0xfe9db2f73a5410e3",
+          "zh": [
+            "斩击眼前的敌人！",
+            "攻击范围为纵向3格"
+          ]
+        },
+        "15": {
+          "jp_fnv1a": "0xb2296ba3e3e2be55",
+          "zh": [
+            "斩击眼前的敌人！",
+            "攻击范围为横向2格"
+          ]
+        },
+        "16": {
+          "jp_fnv1a": "0x90127b3e0462503a",
+          "zh": [
+            "斩击眼前纵向3格的",
+            "火焰之剑"
+          ]
+        },
+        "17": {
+          "jp_fnv1a": "0x411267249c625c15",
+          "zh": [
+            "斩击眼前纵向3格的",
+            "水之剑"
+          ]
+        },
+        "18": {
+          "jp_fnv1a": "0x0ca4f12f394a70cf",
+          "zh": [
+            "斩击眼前纵向3格的",
+            "电力之剑"
+          ]
+        },
+        "19": {
+          "jp_fnv1a": "0xccf657846cf24e7d",
+          "zh": [
+            "斩击眼前纵向3格的",
+            "木之剑"
+          ]
+        },
+        "20": {
+          "jp_fnv1a": "0x0d03e3396d044e30",
+          "zh": [
+            "斩击眼前横向2格的",
+            "火焰之剑"
+          ]
+        },
+        "21": {
+          "jp_fnv1a": "0x29a65e74619ea6d3",
+          "zh": [
+            "斩击眼前横向2格的",
+            "水之剑"
+          ]
+        },
+        "22": {
+          "jp_fnv1a": "0x66cf0fb9dd783285",
+          "zh": [
+            "斩击眼前横向2格的",
+            "电力之剑"
+          ]
+        },
+        "23": {
+          "jp_fnv1a": "0x21a87b72e7537da3",
+          "zh": [
+            "斩击眼前横向2格的",
+            "木之剑"
+          ]
+        },
+        "24": {
+          "jp_fnv1a": "0xa589c1575cd08303",
+          "zh": [
+            "贴着地面前进的",
+            "贯穿攻击"
+          ]
+        },
+        "25": {
+          "jp_fnv1a": "0x3a90c56b36b97aa1",
+          "zh": [
+            "电力套环攻击！",
+            "命中的敌人会暂时麻痹！"
+          ]
+        },
+        "26": {
+          "jp_fnv1a": "0x952a2d73f1049f40",
+          "zh": [
+            "朝前方3格投掷种子！",
+            "在敌区随机位置冒出木柱！"
+          ]
+        },
+        "27": {
+          "jp_fnv1a": "0x8ed75d7a6b0b9c23",
+          "zh": [
+            "在前方2格处的纵向3格",
+            "喷出火柱攻击！"
+          ]
+        },
+        "28": {
+          "jp_fnv1a": "0xa3a92ce4ca21c7c6",
+          "zh": [
+            "沿着地面前进的水柱攻击",
+            "可上下诱导"
+          ]
+        },
+        "29": {
+          "jp_fnv1a": "0xc3dc6a3c12057f25",
+          "zh": [
+            "放射状放电攻击！",
+            "使地面产生裂缝"
+          ]
+        },
+        "30": {
+          "jp_fnv1a": "0x5af28534eb306cbe",
+          "zh": [
+            "沿着地面前进的木柱攻击",
+            "可上下诱导"
+          ]
+        },
+        "31": {
+          "jp_fnv1a": "0x2bdf891b97796081",
+          "zh": [
+            "沿着战斗场地边缘",
+            "飞行的贯穿回力镖"
+          ]
+        },
+        "32": {
+          "jp_fnv1a": "0xa3051200c253a6f0",
+          "zh": [
+            "朝右前方斜角投出",
+            "遇墙反弹的气垫球！"
+          ]
+        },
+        "33": {
+          "jp_fnv1a": "0x701d740f4ff04e4b",
+          "zh": [
+            "3只绒绒圆",
+            "排成一纵列向前突进！"
+          ]
+        },
+        "34": {
+          "jp_fnv1a": "0x362cd6f51e1e9f38",
+          "zh": [
+            "摇晃飞行的卫星",
+            "撞到敌人会造成电击伤害"
+          ]
+        },
+        "35": {
+          "jp_fnv1a": "0x2d6135f350ac66cd",
+          "zh": [
+            "在眼前设置法杖",
+            "召唤陨石瞄准敌人坠落"
+          ]
+        },
+        "36": {
+          "jp_fnv1a": "0x70bdf83f0134ab25",
+          "zh": [
+            "看准时机防御后",
+            "会咬向前方敌人的盾牌"
+          ]
+        },
+        "37": {
+          "jp_fnv1a": "0x84932a61277f5baf",
+          "zh": [
+            "看准时机防御的话",
+            "可将攻击化为冲击波反击"
+          ]
+        },
+        "38": {
+          "jp_fnv1a": "0x305ae04e6e039819",
+          "zh": [
+            "放置风箱",
+            "向敌方区域吹风"
+          ]
+        },
+        "39": {
+          "jp_fnv1a": "0x228d29d1fc538f0b",
+          "zh": [
+            "放置真空风扇",
+            "用风将敌人吸过来"
+          ]
+        },
+        "40": {
+          "jp_fnv1a": "0x52a789fdbd92f4a3",
+          "zh": [
+            "在前方2格处",
+            "掀起6连击的龙卷风！"
+          ]
+        },
+        "41": {
+          "jp_fnv1a": "0x613006d71bb0e75c",
+          "zh": [
+            "朝前方3格投出",
+            "落入洞穴格便会喷出泉水！"
+          ]
+        },
+        "42": {
+          "jp_fnv1a": "0x27147f8d19074b77",
+          "zh": [
+            "敌方区域最右端一纵列",
+            "突然冒出竹枪！"
+          ]
+        },
+        "43": {
+          "jp_fnv1a": "0xcd117d79bf9e0ee1",
+          "zh": [
+            "在眼前一格",
+            "生成冰块"
+          ]
+        },
+        "44": {
+          "jp_fnv1a": "0xc9803e39b21174fc",
+          "zh": [
+            "在眼前一格",
+            "生成石头方块"
+          ]
+        },
+        "45": {
+          "jp_fnv1a": "0x1e4061ed61f01c6a",
+          "zh": [
+            "短时间内变为隐身状态",
+            "不会受到攻击"
+          ]
+        },
+        "46": {
+          "jp_fnv1a": "0xd68dad5c18eedc1a",
+          "zh": [
+            "破坏地面攻击！",
+            "让眼前1格直接消失"
+          ]
+        },
+        "47": {
+          "jp_fnv1a": "0x083c7e8223744017",
+          "zh": [
+            "破坏地面攻击！",
+            "让前方横向2格直接消失"
+          ]
+        },
+        "48": {
+          "jp_fnv1a": "0xd262a38e88c2a34f",
+          "zh": [
+            "破坏地面攻击！",
+            "让前方纵向3格直接消失"
+          ]
+        },
+        "49": {
+          "jp_fnv1a": "0x83c503056f987181",
+          "zh": [
+            "将前方敌区的1格",
+            "涂改成己方区域"
+          ]
+        },
+        "50": {
+          "jp_fnv1a": "0xb066efa75ec4e34b",
+          "zh": [
+            "将敌区最左端的纵向1列",
+            "涂改成己方区域"
+          ]
+        },
+        "51": {
+          "jp_fnv1a": "0x73d1e6b4709a19d7",
+          "zh": [
+            "将己方区域的地面",
+            "恢复成普通地面！"
+          ]
+        },
+        "52": {
+          "jp_fnv1a": "0x4cf55739d69119da",
+          "zh": [
+            "将HP回复10点",
+            ""
+          ]
+        },
+        "53": {
+          "jp_fnv1a": "0xd90a674b862b4698",
+          "zh": [
+            "将HP回复30点",
+            ""
+          ]
+        },
+        "54": {
+          "jp_fnv1a": "0x622d8e5a9a77cdfe",
+          "zh": [
+            "将HP回复50点",
+            ""
+          ]
+        },
+        "55": {
+          "jp_fnv1a": "0xdb6aa19d5a1ab951",
+          "zh": [
+            "将HP回复80点",
+            ""
+          ]
+        },
+        "56": {
+          "jp_fnv1a": "0xaabaa4a2afa8174d",
+          "zh": [
+            "将HP回复120点",
+            ""
+          ]
+        },
+        "57": {
+          "jp_fnv1a": "0x6638f03a41f2f4a8",
+          "zh": [
+            "将HP回复150点",
+            ""
+          ]
+        },
+        "58": {
+          "jp_fnv1a": "0x831e764019d05688",
+          "zh": [
+            "将HP回复200点",
+            ""
+          ]
+        },
+        "59": {
+          "jp_fnv1a": "0xcde8ff2da563acd1",
+          "zh": [
+            "将HP回复300点",
+            ""
+          ]
+        },
+        "60": {
+          "jp_fnv1a": "0x623708057fa12ad3",
+          "zh": [
+            "停下光标并射出",
+            "破坏地面的大型枪弹"
+          ]
+        },
+        "61": {
+          "jp_fnv1a": "0xa68bd5a28f21d0ab",
+          "zh": [
+            "在敌区某处",
+            "埋下看不见的地雷！"
+          ]
+        },
+        "62": {
+          "jp_fnv1a": "0x7c468ff9e17f50e4",
+          "zh": [
+            "场上所有地面",
+            "全部产生裂缝！"
+          ]
+        },
+        "63": {
+          "jp_fnv1a": "0x4f9fb6b15238667e",
+          "zh": [
+            "所有空着的地面",
+            "全部遭到破坏！"
+          ]
+        },
+        "64": {
+          "jp_fnv1a": "0x0e98374a4523e33e",
+          "zh": [
+            "场上所有地面",
+            "全部变为毒沼！"
+          ]
+        },
+        "65": {
+          "jp_fnv1a": "0xa416a105c0a20c5f",
+          "zh": [
+            "战斗期间持续加快",
+            "改装量表的速度"
+          ]
+        },
+        "66": {
+          "jp_fnv1a": "0x2d531c5ff9f65e58",
+          "zh": [
+            "凛冽的北风",
+            "会将防护罩与灵光吹散"
+          ]
+        },
+        "67": {
+          "jp_fnv1a": "0xb9e57e5ad29bb9b0",
+          "zh": [
+            "将眼前的地面变为",
+            "伤害减半的神圣地面！"
+          ]
+        },
+        "68": {
+          "jp_fnv1a": "0x3cd194f923cc7f72",
+          "zh": [
+            "展开防护罩",
+            "抵消10点HP的伤害"
+          ]
+        },
+        "69": {
+          "jp_fnv1a": "0xe87e3b4f84f50ed9",
+          "zh": [
+            "展开防护罩",
+            "抵消100点HP的伤害"
+          ]
+        },
+        "70": {
+          "jp_fnv1a": "0xa76a7bf7188a5429",
+          "zh": [
+            "对敌人设下陷阱，对方一使出",
+            "火属性攻击就会自己受伤！"
+          ]
+        },
+        "71": {
+          "jp_fnv1a": "0x782dcc4f53056686",
+          "zh": [
+            "对敌人设下陷阱，对方一使出",
+            "水属性攻击就会自己受伤！"
+          ]
+        },
+        "72": {
+          "jp_fnv1a": "0x51e1eeae40e16640",
+          "zh": [
+            "对敌人设下陷阱，对方一使出",
+            "电属性攻击就会自己受伤！"
+          ]
+        },
+        "73": {
+          "jp_fnv1a": "0x90af4b64be4dcb56",
+          "zh": [
+            "对敌人设下陷阱，对方一使出",
+            "木属性攻击就会自己受伤！"
+          ]
+        },
+        "74": {
+          "jp_fnv1a": "0xedb530cd996fced2",
+          "zh": [
+            "设下陷阱",
+            "中招时以手里剑反击！"
+          ]
+        },
+        "75": {
+          "jp_fnv1a": "0x30b5a5f85cbaae63",
+          "zh": [
+            "设下陷阱",
+            "让召唤出的领航员倒戈"
+          ]
+        },
+        "76": {
+          "jp_fnv1a": "0x8cc5ea332c260670",
+          "zh": [
+            "选在攻击芯片之后",
+            "可使攻击力＋10"
+          ]
+        },
+        "77": {
+          "jp_fnv1a": "0xc70f231b85a591b5",
+          "zh": [
+            "选在攻击芯片之后",
+            "可使攻击力＋20"
+          ]
+        },
+        "78": {
+          "jp_fnv1a": "0x33e5dab405b945ef",
+          "zh": [
+            "选在领航员芯片之后",
+            "可使攻击力＋10！"
+          ]
+        },
+        "79": {
+          "jp_fnv1a": "0x296480f2e9c8784e",
+          "zh": [
+            "选在领航员芯片之后",
+            "可使攻击力＋20！"
+          ]
+        },
+        "80": {
+          "jp_fnv1a": "0x6da0f76260452e8c",
+          "zh": [
+            "将全场所有地面",
+            "全部变为岩浆地面"
+          ]
+        },
+        "81": {
+          "jp_fnv1a": "0xb3af278193e6acd2",
+          "zh": [
+            "将全场所有地面",
+            "全部变为冰块地面"
+          ]
+        },
+        "82": {
+          "jp_fnv1a": "0xfd6992f2244d5926",
+          "zh": [
+            "将全场所有地面",
+            "全部变为草地地面"
+          ]
+        },
+        "83": {
+          "jp_fnv1a": "0x75cba14bc82b5877",
+          "zh": [
+            "传说圣骑士之剑！",
+            "横斩前方3格！"
+          ]
+        },
+        "84": {
+          "jp_fnv1a": "0x2f9e61db9e15dbfc",
+          "zh": [
+            "已损失的HP数值",
+            "会化为攻击力的诅咒之刃"
+          ]
+        },
+        "85": {
+          "jp_fnv1a": "0x27c4b918dd22beab",
+          "zh": [
+            "在对手区域降下",
+            "无数流星！"
+          ]
+        },
+        "86": {
+          "jp_fnv1a": "0x6e3357204f8c3449",
+          "zh": [
+            "将己方区域所有地面",
+            "全部变为神圣地面！"
+          ]
+        },
+        "87": {
+          "jp_fnv1a": "0xe7c3d1f35772156e",
+          "zh": [
+            "选在攻击芯片之后",
+            "可使攻击力＋30"
+          ]
+        },
+        "88": {
+          "jp_fnv1a": "0x355aac508cbded51",
+          "zh": [
+            "选在领航员芯片之后",
+            "可使攻击力＋30！"
+          ]
+        },
+        "89": {
+          "jp_fnv1a": "0x9198859bcd47ec87",
+          "zh": [
+            "改装量表",
+            "在一瞬间完全蓄满！"
+          ]
+        },
+        "90": {
+          "jp_fnv1a": "0x085793632cddfc50",
+          "zh": [
+            "可攻击前方1名敌人的",
+            "超级加农炮"
+          ]
+        },
+        "91": {
+          "jp_fnv1a": "0x2772f2ef9782190b",
+          "zh": [
+            "投掷会在落点周围",
+            "全部格子连环爆炸的炸弹"
+          ]
+        },
+        "92": {
+          "jp_fnv1a": "0x3ac58a894edaa004",
+          "zh": [
+            "展开防护罩",
+            "抵消200点HP的伤害"
+          ]
+        },
+        "93": {
+          "jp_fnv1a": "0x8cd8e34939f3c133",
+          "zh": [
+            "挥剑放出纵向3格的",
+            "冲击波！"
+          ]
+        },
+        "94": {
+          "jp_fnv1a": "0xb7d3aab58859903e",
+          "zh": [
+            "3连射的火神炮",
+            "命中后会向后贯穿1格！"
+          ]
+        },
+        "95": {
+          "jp_fnv1a": "0x6b7355ea74d872b4",
+          "zh": [
+            "5连射的火神炮",
+            "命中后会向后贯穿1格！"
+          ]
+        },
+        "96": {
+          "jp_fnv1a": "0xdf209013c5406962",
+          "zh": [
+            "7连射的火神炮",
+            "命中后会向后贯穿1格！"
+          ]
+        },
+        "97": {
+          "jp_fnv1a": "0x02e0b2ec6b24ac6e",
+          "zh": [
+            "惊人的12连射火神炮",
+            "命中后会向后贯穿1格！"
+          ]
+        },
+        "98": {
+          "jp_fnv1a": "0x1d610655850c2b13",
+          "zh": [
+            "攻击1名敌人！",
+            "同时以爱心回复HP"
+          ]
+        },
+        "99": {
+          "jp_fnv1a": "0xdacf0d2f7797514d",
+          "zh": [
+            "向正前方一整行放出",
+            "贴地前进的冲击波！"
+          ]
+        },
+        "100": {
+          "jp_fnv1a": "0x44f053f897112b40",
+          "zh": [
+            "瞬移到敌人面前斩击！",
+            "部分地形无法移动"
+          ]
+        },
+        "101": {
+          "jp_fnv1a": "0x18f73de608aafc32",
+          "zh": [
+            "以GIGA力量发射的",
+            "强力加农炮！"
+          ]
+        },
+        "102": {
+          "jp_fnv1a": "0x53b5f253927fcd64",
+          "zh": [
+            "爆风会向周围1格",
+            "扩散的爆裂弹！"
+          ]
+        },
+        "103": {
+          "jp_fnv1a": "0x3ef4296d8f20ec17",
+          "zh": [
+            "爆炎会向周围1格",
+            "扩散的广范围攻击！"
+          ]
+        },
+        "104": {
+          "jp_fnv1a": "0x4c4bb1530d109ae7",
+          "zh": [
+            "水泡会向周围1格",
+            "扩散的广范围攻击！"
+          ]
+        },
+        "105": {
+          "jp_fnv1a": "0x49de98383ee6d02c",
+          "zh": [
+            "以纵3横2的巨大之剑",
+            "将敌人一刀两断！"
+          ]
+        },
+        "106": {
+          "jp_fnv1a": "0x0f177e1eb993379b",
+          "zh": [
+            "遇墙反弹的地狱气垫球！",
+            "朝右前方斜角投出！"
+          ]
+        },
+        "107": {
+          "jp_fnv1a": "0x5b201783097bf5b3",
+          "zh": [
+            "呈十字扩散的地狱业火",
+            "将范围内的敌人烧尽！"
+          ]
+        },
+        "108": {
+          "jp_fnv1a": "0xad105719e302f5d5",
+          "zh": [
+            "3把回力镖",
+            "连续不断地袭向对手！"
+          ]
+        },
+        "109": {
+          "jp_fnv1a": "0xe6c60cddff5ec33c",
+          "zh": [
+            "向前方横向一列喷出",
+            "贯穿敌人与地面的火焰臂！"
+          ]
+        },
+        "110": {
+          "jp_fnv1a": "0x8a5dc4e43ae53267",
+          "zh": [
+            "朝前方3格投掷冰炸弹！",
+            "呈十字扩散的冰锥贯穿敌人"
+          ]
+        },
+        "111": {
+          "jp_fnv1a": "0x735c0dcec363626e",
+          "zh": [
+            "防下敌人攻击后",
+            "向3行放出诅咒盾！"
+          ]
+        },
+        "112": {
+          "jp_fnv1a": "0x45d0ae9967c52805",
+          "zh": [
+            "在对手区域内随机",
+            "生成木桩塔！"
+          ]
+        },
+        "113": {
+          "jp_fnv1a": "0xe351e32ccdd8e3ee",
+          "zh": [
+            "从上空发动手里剑攻击",
+            "3枚手里剑袭向敌人！"
+          ]
+        },
+        "114": {
+          "jp_fnv1a": "0xa34c9c370366bbec",
+          "zh": [
+            "用3个钻头向前突击！",
+            "同时刨碎脚下的地面！"
+          ]
+        },
+        "115": {
+          "jp_fnv1a": "0xbc054612c0d78bbb",
+          "zh": [
+            "向前方发射电波干扰球",
+            "命中后使敌人麻痹！"
+          ]
+        },
+        "116": {
+          "jp_fnv1a": "0x1665ce98f7e69a0d",
+          "zh": [
+            "玫瑰与长剑交织的",
+            "华丽连续攻击幻象！"
+          ]
+        },
+        "117": {
+          "jp_fnv1a": "0x17b6f5e2c07bc03a",
+          "zh": [
+            "向全部3行",
+            "乱射爆破弹进行攻击！"
+          ]
+        },
+        "118": {
+          "jp_fnv1a": "0xd26f20b91afbe50a",
+          "zh": [
+            "以黑暗臂刃的冲击波",
+            "将敌人撕裂！"
+          ]
+        },
+        "119": {
+          "jp_fnv1a": "0x7fb18d4b66fff135",
+          "zh": [
+            "连续放出追踪敌人的",
+            "缓存光环！"
+          ]
+        },
+        "120": {
+          "jp_fnv1a": "0x538aaf15d52e4d9c",
+          "zh": [
+            "以缓存数据能量",
+            "发射的激光束！"
+          ]
+        },
+        "121": {
+          "jp_fnv1a": "0xf6036eba5fc5e0f8",
+          "zh": [
+            "从前方2格呈十字扩散",
+            "喷涌而出的水柱攻击！"
+          ]
+        },
+        "122": {
+          "jp_fnv1a": "0x71762d84d95f231d",
+          "zh": [
+            "对全体敌人必中的",
+            "电力冲击攻击！"
+          ]
+        },
+        "123": {
+          "jp_fnv1a": "0x4a4df89049d1bd88",
+          "zh": [
+            "连续5只、能转弯1次的",
+            "鼠型导弹编队！"
+          ]
+        },
+        "124": {
+          "jp_fnv1a": "0x48261e2d6b36e57b",
+          "zh": [
+            "看准时机防御后",
+            "连续咬向敌人的盾牌！"
+          ]
+        },
+        "125": {
+          "jp_fnv1a": "0x9ddf61c06cf95a5f",
+          "zh": [
+            "从高顶礼帽中飞出",
+            "无数白鸽的魔术！"
+          ]
+        },
+        "126": {
+          "jp_fnv1a": "0x7f4c0f93be65ecc0",
+          "zh": [
+            "将黑暗能量全开的",
+            "唤来死亡的连续攻击！"
+          ]
+        }
+      }
+    },
+    "sp:19": {
+      "description": "navicust_names",
+      "jp_fnv1a": "0xd6cd3866b819fa92",
+      "entries": {
+        "0": {
+          "jp_fnv1a": "0x5228ef6ced25e452",
+          "zh": "改装1"
+        },
+        "1": {
+          "jp_fnv1a": "0x5228ee6ced25e29f",
+          "zh": "改装2"
+        },
+        "2": {
+          "jp_fnv1a": "0x3f9f9d4b7c6f5344",
+          "zh": "MEGA文件1"
+        },
+        "3": {
+          "jp_fnv1a": "0x3f9fa04b7c6f585d",
+          "zh": "MEGA文件2"
+        },
+        "4": {
+          "jp_fnv1a": "0xd089e14c2542b888",
+          "zh": "GIGA文件1"
+        },
+        "5": {
+          "jp_fnv1a": "0x867d8aacec7c6311",
+          "zh": "超级装甲"
+        },
+        "6": {
+          "jp_fnv1a": "0xccccc3a7b03c082d",
+          "zh": "初始防护罩"
+        },
+        "7": {
+          "jp_fnv1a": "0x4f353c31a1d94d11",
+          "zh": "飞行鞋"
+        },
+        "8": {
+          "jp_fnv1a": "0xa6288b257dc1b1b2",
+          "zh": "紧身衣"
+        },
+        "9": {
+          "jp_fnv1a": "0xca5b098b96c7aa00",
+          "zh": "身体套组"
+        },
+        "10": {
+          "jp_fnv1a": "0x746f7f9f0a269060",
+          "zh": "忍术冲刺"
+        },
+        "11": {
+          "jp_fnv1a": "0x859ec8a171da32ae",
+          "zh": "收藏家之眼"
+        },
+        "12": {
+          "jp_fnv1a": "0xe2d60ec652bbb0bb",
+          "zh": "生财器"
+        },
+        "13": {
+          "jp_fnv1a": "0xe9aab22606e93e25",
+          "zh": "敌方搜索"
+        },
+        "14": {
+          "jp_fnv1a": "0xf83a8dbc8f2f808c",
+          "zh": "幽灵天线"
+        },
+        "15": {
+          "jp_fnv1a": "0x378ef3c94b46b188",
+          "zh": "二次机会"
+        },
+        "16": {
+          "jp_fnv1a": "0x902142b1e4b2995f",
+          "zh": "攻击+1"
+        },
+        "17": {
+          "jp_fnv1a": "0x1f9d07e2f32b7b30",
+          "zh": "集气+1"
+        },
+        "18": {
+          "jp_fnv1a": "0xc848a54967c28cdf",
+          "zh": "攻击MAX"
+        },
+        "19": {
+          "jp_fnv1a": "0xe082c4a2a098fcfe",
+          "zh": "集气MAX"
+        },
+        "20": {
+          "jp_fnv1a": "0x291790cb40ef911f",
+          "zh": "子弹套组"
+        },
+        "21": {
+          "jp_fnv1a": "0xb3ac40019876623a",
+          "zh": "元素修正档"
+        },
+        "22": {
+          "jp_fnv1a": "0xd7d0a47771579d12",
+          "zh": "彩斗修正档"
+        },
+        "23": {
+          "jp_fnv1a": "0xd7ebb65d569d1bc7",
+          "zh": "HP+50"
+        },
+        "24": {
+          "jp_fnv1a": "0x5ffcab9a19561d49",
+          "zh": "HP+100"
+        },
+        "25": {
+          "jp_fnv1a": "0x46d9ba9a0b56eb88",
+          "zh": "HP+200"
+        },
+        "26": {
+          "jp_fnv1a": "0x4e3cd59a0f298473",
+          "zh": "HP+300"
+        },
+        "27": {
+          "jp_fnv1a": "0x798c3c9a27b17dca",
+          "zh": "HP+400"
+        },
+        "28": {
+          "jp_fnv1a": "0x82a2d79a2cf684b5",
+          "zh": "HP+500"
+        }
+      }
+    },
+    "sp:13": {
+      "description": "navicust_descriptions",
+      "jp_fnv1a": "0x250df1ebe64757e4",
+      "entries": {
+        "0": {
+          "jp_fnv1a": "0x75fa450b8317e616",
+          "zh": [
+            "改装画面最初可选择的",
+            "芯片数量＋1"
+          ]
+        },
+        "1": {
+          "jp_fnv1a": "0xbac4b7312cbf3a46",
+          "zh": [
+            "改装画面最初可选择的",
+            "芯片数量＋2"
+          ]
+        },
+        "2": {
+          "jp_fnv1a": "0xebfe23213a849181",
+          "zh": [
+            "能放入文件夹中的",
+            "MEGA芯片数量＋1"
+          ]
+        },
+        "3": {
+          "jp_fnv1a": "0xebfe20213a848c68",
+          "zh": [
+            "能放入文件夹中的",
+            "MEGA芯片数量＋2"
+          ]
+        },
+        "4": {
+          "jp_fnv1a": "0x9b3d2054bd2d0efd",
+          "zh": [
+            "能放入文件夹中的",
+            "GIGA芯片数量＋1"
+          ]
+        },
+        "5": {
+          "jp_fnv1a": "0xa8a3df74c7790f87",
+          "zh": [
+            "即使受到敌人攻击",
+            "也不会陷入僵直！"
+          ]
+        },
+        "6": {
+          "jp_fnv1a": "0x1f7a0f3deaac78e6",
+          "zh": [
+            "战斗一开始就会",
+            "装备好防护罩！"
+          ]
+        },
+        "7": {
+          "jp_fnv1a": "0x821e59c70883c33e",
+          "zh": [
+            "即使是没有地面的格子",
+            "也能够自由移动！"
+          ]
+        },
+        "8": {
+          "jp_fnv1a": "0x1da41b13cfd0f0bf",
+          "zh": [
+            "受到致命伤害时",
+            "也能以HP1勉强撑住！"
+          ]
+        },
+        "9": {
+          "jp_fnv1a": "0x6105d68eb32e4329",
+          "zh": [
+            "超级装甲、飞行鞋、",
+            "紧身衣三件套！"
+          ]
+        },
+        "10": {
+          "jp_fnv1a": "0x1a6d4ebe3b0fd4a7",
+          "zh": [
+            "放轻脚步，降低",
+            "与敌人遭遇的概率！"
+          ]
+        },
+        "11": {
+          "jp_fnv1a": "0x41822139ca8d2097",
+          "zh": [
+            "提高从敌人身上",
+            "获得芯片的概率！"
+          ]
+        },
+        "12": {
+          "jp_fnv1a": "0xf1b2ac5428096300",
+          "zh": [
+            "提高击败敌人后",
+            "可获得的Zenny！"
+          ]
+        },
+        "13": {
+          "jp_fnv1a": "0x5ddb342dd0fa853f",
+          "zh": [
+            "搜敌雷达，提高",
+            "与敌人遭遇的概率！"
+          ]
+        },
+        "14": {
+          "jp_fnv1a": "0xf0e415aac79a1665",
+          "zh": [
+            "幽灵领航员专用雷达",
+            "可提高遭遇概率！"
+          ]
+        },
+        "15": {
+          "jp_fnv1a": "0x684b66a2ea88c5bb",
+          "zh": [
+            "仅限战斗第1回合",
+            "可将手牌芯片洗牌！"
+          ]
+        },
+        "16": {
+          "jp_fnv1a": "0xc30e5a8f5a79aa79",
+          "zh": [
+            "洛克炮的攻击力",
+            "提升1！"
+          ]
+        },
+        "17": {
+          "jp_fnv1a": "0x228d7d4c5219909c",
+          "zh": [
+            "洛克炮的集气力",
+            "提升1！"
+          ]
+        },
+        "18": {
+          "jp_fnv1a": "0x5bc191b88cb1aa99",
+          "zh": [
+            "洛克炮的攻击力",
+            "提升至MAX！"
+          ]
+        },
+        "19": {
+          "jp_fnv1a": "0x93a86b61240ea73c",
+          "zh": [
+            "洛克炮的集气力",
+            "提升至MAX！"
+          ]
+        },
+        "20": {
+          "jp_fnv1a": "0x53c2b4a72f717038",
+          "zh": [
+            "洛克炮的攻击力与集气力",
+            "各提升3！"
+          ]
+        },
+        "21": {
+          "jp_fnv1a": "0x03c9129e30030ffc",
+          "zh": [
+            "用来调节洛克人属性的",
+            "批处理文件"
+          ]
+        },
+        "22": {
+          "jp_fnv1a": "0x96d8f3c3a9a0828d",
+          "zh": [
+            "能将潜能100％发挥出来的",
+            "危险程序"
+          ]
+        },
+        "23": {
+          "jp_fnv1a": "0xdd1c7dfa02b121f7",
+          "zh": [
+            "MAX HP增加50",
+            ""
+          ]
+        },
+        "24": {
+          "jp_fnv1a": "0xe059cd456784e448",
+          "zh": [
+            "MAX HP增加100",
+            ""
+          ]
+        },
+        "25": {
+          "jp_fnv1a": "0x7a538d6093528d79",
+          "zh": [
+            "MAX HP增加200",
+            ""
+          ]
+        },
+        "26": {
+          "jp_fnv1a": "0x463bb2a55868da96",
+          "zh": [
+            "MAX HP增加300",
+            ""
+          ]
+        },
+        "27": {
+          "jp_fnv1a": "0xd9b7e063373273c7",
+          "zh": [
+            "MAX HP增加400",
+            ""
+          ]
+        },
+        "28": {
+          "jp_fnv1a": "0x3d9ce38a4122c0e6",
+          "zh": [
+            "MAX HP增加500"
+          ]
+        }
+      }
+    },
+    "sp:29": {
+      "description": "enemy_names",
+      "jp_fnv1a": "0xf56ba564e45d19b9",
+      "entries": {
+        "0": {
+          "jp_fnv1a": "0x27b1812dac86793f",
+          "zh": "小矮兵1"
+        },
+        "1": {
+          "jp_fnv1a": "0x27b1822dac867af2",
+          "zh": "小矮兵2"
+        },
+        "2": {
+          "jp_fnv1a": "0x27b1832dac867ca5",
+          "zh": "小矮兵3"
+        },
+        "3": {
+          "jp_fnv1a": "0xf8b19b9c282915af",
+          "zh": "小矮兵SP"
+        },
+        "4": {
+          "jp_fnv1a": "0x13570c3af3b675f7",
+          "zh": "加农弹1"
+        },
+        "5": {
+          "jp_fnv1a": "0x13570d3af3b677aa",
+          "zh": "加农弹2"
+        },
+        "6": {
+          "jp_fnv1a": "0x13570e3af3b6795d",
+          "zh": "加农弹3"
+        },
+        "7": {
+          "jp_fnv1a": "0x93d37b2c1f6cefb7",
+          "zh": "加农弹SP"
+        },
+        "8": {
+          "jp_fnv1a": "0xd6b7230dbb9948a0",
+          "zh": "剑兵"
+        },
+        "9": {
+          "jp_fnv1a": "0xec719d980f8c325c",
+          "zh": "剑火兵"
+        },
+        "10": {
+          "jp_fnv1a": "0x0545880eeb9024c7",
+          "zh": "剑水兵"
+        },
+        "11": {
+          "jp_fnv1a": "0xfb6ee3be8921d65b",
+          "zh": "剑兵SP"
+        },
+        "12": {
+          "jp_fnv1a": "0x87265ae8158f7a27",
+          "zh": "吠狼"
+        },
+        "13": {
+          "jp_fnv1a": "0xa549286c71941d43",
+          "zh": "吠狼巴"
+        },
+        "14": {
+          "jp_fnv1a": "0x503615ef60f003ca",
+          "zh": "吠狼丹"
+        },
+        "15": {
+          "jp_fnv1a": "0xf7b6ed68a277ca24",
+          "zh": "吠狼SP"
+        },
+        "16": {
+          "jp_fnv1a": "0xe565dd8852a98a9f",
+          "zh": "虾龙"
+        },
+        "17": {
+          "jp_fnv1a": "0xd4632e5fc39085dd",
+          "zh": "虾射"
+        },
+        "18": {
+          "jp_fnv1a": "0x1f8689034d8dfde9",
+          "zh": "虾侧"
+        },
+        "19": {
+          "jp_fnv1a": "0xf9829974a8d2a69c",
+          "zh": "虾龙SP"
+        },
+        "20": {
+          "jp_fnv1a": "0xab89396dd8512ec1",
+          "zh": "鼠顿1"
+        },
+        "21": {
+          "jp_fnv1a": "0xab89366dd85129a8",
+          "zh": "鼠顿2"
+        },
+        "22": {
+          "jp_fnv1a": "0xab89376dd8512b5b",
+          "zh": "鼠顿3"
+        },
+        "23": {
+          "jp_fnv1a": "0xcbc17aa692496251",
+          "zh": "鼠顿SP"
+        },
+        "24": {
+          "jp_fnv1a": "0xc05093e59c891753",
+          "zh": "甲虫坦克1"
+        },
+        "25": {
+          "jp_fnv1a": "0xc05094e59c891906",
+          "zh": "甲虫坦克2"
+        },
+        "26": {
+          "jp_fnv1a": "0xc05095e59c891ab9",
+          "zh": "甲虫坦克3"
+        },
+        "27": {
+          "jp_fnv1a": "0x50c35e28fbe38a8b",
+          "zh": "甲虫坦克SP"
+        },
+        "28": {
+          "jp_fnv1a": "0xe73aee21441859af",
+          "zh": "线圈兔"
+        },
+        "29": {
+          "jp_fnv1a": "0x926e112a6816703d",
+          "zh": "高超线圈兔"
+        },
+        "30": {
+          "jp_fnv1a": "0xce3788afc073ed83",
+          "zh": "MEGA线圈兔"
+        },
+        "31": {
+          "jp_fnv1a": "0xe7a8c2e633a92eec",
+          "zh": "线圈兔SP"
+        },
+        "32": {
+          "jp_fnv1a": "0x5deba58438d5d6be",
+          "zh": "坚硬炮座"
+        },
+        "33": {
+          "jp_fnv1a": "0xc3b9c74daba5330d",
+          "zh": "寒冷炮座"
+        },
+        "34": {
+          "jp_fnv1a": "0x40a4860379a7d5ef",
+          "zh": "熔岩炮座"
+        },
+        "35": {
+          "jp_fnv1a": "0x01f3d03e65ade485",
+          "zh": "坚硬炮座SP"
+        },
+        "36": {
+          "jp_fnv1a": "0x484a3e5fe3839299",
+          "zh": "杀手植物"
+        },
+        "37": {
+          "jp_fnv1a": "0x9b90798d1723f644",
+          "zh": "杀手杂草"
+        },
+        "38": {
+          "jp_fnv1a": "0xa8235ce952065a23",
+          "zh": "杀手花"
+        },
+        "39": {
+          "jp_fnv1a": "0x0acd772040cff1ea",
+          "zh": "杀手植物SP"
+        },
+        "40": {
+          "jp_fnv1a": "0xec61e63aad13d9a3",
+          "zh": "达玛"
+        },
+        "41": {
+          "jp_fnv1a": "0xec5f923aad12c810",
+          "zh": "达喀尔"
+        },
+        "42": {
+          "jp_fnv1a": "0x33f7022da7327c36",
+          "zh": "达塔拉"
+        },
+        "43": {
+          "jp_fnv1a": "0x8f9aa5b580b4bc16",
+          "zh": "达玛SP"
+        },
+        "44": {
+          "jp_fnv1a": "0xeb8830686bdd827c",
+          "zh": "回转手"
+        },
+        "45": {
+          "jp_fnv1a": "0x6d36b32db86ec1e6",
+          "zh": "回转圈"
+        },
+        "46": {
+          "jp_fnv1a": "0x14a572f34f0a7020",
+          "zh": "回转棒"
+        },
+        "47": {
+          "jp_fnv1a": "0xa4f89a19b546fe97",
+          "zh": "回转手SP"
+        },
+        "48": {
+          "jp_fnv1a": "0x829c19e0e3ae39ac",
+          "zh": "绒绒圆"
+        },
+        "49": {
+          "jp_fnv1a": "0x8d13518175ce2f55",
+          "zh": "麋绒圆"
+        },
+        "50": {
+          "jp_fnv1a": "0x031531482f013127",
+          "zh": "格绒圆"
+        },
+        "51": {
+          "jp_fnv1a": "0xa2ccc04468521547",
+          "zh": "绒绒圆SP"
+        },
+        "52": {
+          "jp_fnv1a": "0x999fd00330364214",
+          "zh": "摇星"
+        },
+        "53": {
+          "jp_fnv1a": "0x322eea295c72dda9",
+          "zh": "摇摇星"
+        },
+        "54": {
+          "jp_fnv1a": "0x1eedb20d3617a41c",
+          "zh": "摇星盟"
+        },
+        "55": {
+          "jp_fnv1a": "0x554f1eaf5a041a4f",
+          "zh": "摇星SP"
+        },
+        "56": {
+          "jp_fnv1a": "0xb91239b842c9e2bb",
+          "zh": "流星魔法"
+        },
+        "57": {
+          "jp_fnv1a": "0xfaf87f4d6619885c",
+          "zh": "流星大师"
+        },
+        "58": {
+          "jp_fnv1a": "0x7425e89dd95ca650",
+          "zh": "流星闪焰"
+        },
+        "59": {
+          "jp_fnv1a": "0x59aac74f7c5960b8",
+          "zh": "流星魔法SP"
+        },
+        "60": {
+          "jp_fnv1a": "0xa2ccd84fbf573087",
+          "zh": "诅咒面"
+        },
+        "61": {
+          "jp_fnv1a": "0x6101598b8a12bc15",
+          "zh": "诅咒讷"
+        },
+        "62": {
+          "jp_fnv1a": "0x6101568b8a12b6fc",
+          "zh": "诅咒多"
+        },
+        "63": {
+          "jp_fnv1a": "0xb72d821e56eb1f84",
+          "zh": "诅咒面SP"
+        },
+        "64": {
+          "jp_fnv1a": "0xa0aa1627a5022cde",
+          "zh": "风箱"
+        },
+        "65": {
+          "jp_fnv1a": "0x166db309183cf08a",
+          "zh": "真空风扇"
+        },
+        "66": {
+          "jp_fnv1a": "0xca12fc6ca7809c06",
+          "zh": "风箱SP"
+        },
+        "67": {
+          "jp_fnv1a": "0x42cffa4b72ef906b",
+          "zh": "真空风扇SP"
+        },
+        "68": {
+          "jp_fnv1a": "0xf04bbf0ded2dbd7e",
+          "zh": "梦幻燃1"
+        },
+        "69": {
+          "jp_fnv1a": "0xf04bbe0ded2dbbcb",
+          "zh": "梦幻燃2"
+        },
+        "70": {
+          "jp_fnv1a": "0xf04bbd0ded2dba18",
+          "zh": "梦幻燃3"
+        },
+        "71": {
+          "jp_fnv1a": "0x7fb2c6aa05c8b7b8",
+          "zh": "梦幻燃SP"
+        },
+        "72": {
+          "jp_fnv1a": "0xa416d87f0390e48f",
+          "zh": "梦幻溅1"
+        },
+        "73": {
+          "jp_fnv1a": "0xa416d97f0390e642",
+          "zh": "梦幻溅2"
+        },
+        "74": {
+          "jp_fnv1a": "0xa416da7f0390e7f5",
+          "zh": "梦幻溅3"
+        },
+        "75": {
+          "jp_fnv1a": "0x6429aad30f96027f",
+          "zh": "梦幻溅SP"
+        },
+        "76": {
+          "jp_fnv1a": "0x7523d16883596f0a",
+          "zh": "梦幻伏1"
+        },
+        "77": {
+          "jp_fnv1a": "0x7523d06883596d57",
+          "zh": "梦幻伏2"
+        },
+        "78": {
+          "jp_fnv1a": "0x7523cf6883596ba4",
+          "zh": "梦幻伏3"
+        },
+        "79": {
+          "jp_fnv1a": "0x64d82297309530fc",
+          "zh": "梦幻伏SP"
+        },
+        "80": {
+          "jp_fnv1a": "0xdd0edc752a65dc8d",
+          "zh": "梦幻苔1"
+        },
+        "81": {
+          "jp_fnv1a": "0xdd0ed9752a65d774",
+          "zh": "梦幻苔2"
+        },
+        "82": {
+          "jp_fnv1a": "0xdd0eda752a65d927",
+          "zh": "梦幻苔3"
+        },
+        "83": {
+          "jp_fnv1a": "0x06836c170b6cea55",
+          "zh": "梦幻苔SP"
+        },
+        "84": {
+          "jp_fnv1a": "0xb576ed3c20377e21",
+          "zh": "火焰人"
+        },
+        "85": {
+          "jp_fnv1a": "0xf6a8cba15af477e5",
+          "zh": "火焰人V2"
+        },
+        "86": {
+          "jp_fnv1a": "0xf6a8caa15af47632",
+          "zh": "火焰人V3"
+        },
+        "87": {
+          "jp_fnv1a": "0xf6982ba15ae6a7d2",
+          "zh": "火焰人SP"
+        },
+        "88": {
+          "jp_fnv1a": "0x8a49f143b1e3635c",
+          "zh": "冰冻人"
+        },
+        "89": {
+          "jp_fnv1a": "0x5be1d85ae45065a4",
+          "zh": "冰冻人V2"
+        },
+        "90": {
+          "jp_fnv1a": "0x5be1d95ae4506757",
+          "zh": "冰冻人V3"
+        },
+        "91": {
+          "jp_fnv1a": "0x5bf2b85ae45ea277",
+          "zh": "冰冻人SP"
+        },
+        "92": {
+          "jp_fnv1a": "0x965bd0a43cb8d5c9",
+          "zh": "木头人"
+        },
+        "93": {
+          "jp_fnv1a": "0x45f8d1974a441bad",
+          "zh": "木头人V2"
+        },
+        "94": {
+          "jp_fnv1a": "0x45f8d0974a4419fa",
+          "zh": "木头人V3"
+        },
+        "95": {
+          "jp_fnv1a": "0x45e831974a364b9a",
+          "zh": "木头人SP"
+        },
+        "96": {
+          "jp_fnv1a": "0x48ec2824ecda5f22",
+          "zh": "阴影人"
+        },
+        "97": {
+          "jp_fnv1a": "0x86194fa45085442a",
+          "zh": "阴影人V2"
+        },
+        "98": {
+          "jp_fnv1a": "0x861950a4508545dd",
+          "zh": "阴影人V3"
+        },
+        "99": {
+          "jp_fnv1a": "0x860f5ba4507d0409",
+          "zh": "阴影人SP"
+        },
+        "100": {
+          "jp_fnv1a": "0xd4272ff3020b1ffc",
+          "zh": "气力人"
+        },
+        "101": {
+          "jp_fnv1a": "0xe74cf6d1702fe804",
+          "zh": "气力人V2"
+        },
+        "102": {
+          "jp_fnv1a": "0xe74cf7d1702fe9b7",
+          "zh": "气力人V3"
+        },
+        "103": {
+          "jp_fnv1a": "0xe75d96d1703db817",
+          "zh": "气力人SP"
+        },
+        "104": {
+          "jp_fnv1a": "0xfe7841c392dc6083",
+          "zh": "萝露"
+        },
+        "105": {
+          "jp_fnv1a": "0xd82de544b0d24287",
+          "zh": "萝露V2"
+        },
+        "106": {
+          "jp_fnv1a": "0xd82de444b0d240d4",
+          "zh": "萝露V3"
+        },
+        "107": {
+          "jp_fnv1a": "0xd81ca944b0c36960",
+          "zh": "萝露SP"
+        },
+        "108": {
+          "jp_fnv1a": "0x4d19e8e854f3169c",
+          "zh": "布鲁斯"
+        },
+        "109": {
+          "jp_fnv1a": "0x43ef446f55b76f64",
+          "zh": "布鲁斯V2"
+        },
+        "110": {
+          "jp_fnv1a": "0x43ef456f55b77117",
+          "zh": "布鲁斯V3"
+        },
+        "111": {
+          "jp_fnv1a": "0x4400a46f55c685b7",
+          "zh": "布鲁斯SP"
+        },
+        "112": {
+          "jp_fnv1a": "0xb57dd4e4688614de",
+          "zh": "钻头人"
+        },
+        "113": {
+          "jp_fnv1a": "0xf87cb44fcabe005e",
+          "zh": "钻头人V2"
+        },
+        "114": {
+          "jp_fnv1a": "0xf87cb54fcabe0211",
+          "zh": "钻头人V3"
+        },
+        "115": {
+          "jp_fnv1a": "0xf88dd04fcacca325",
+          "zh": "钻头人SP"
+        },
+        "116": {
+          "jp_fnv1a": "0x0ce5cb783a36ce10",
+          "zh": "帽子人"
+        },
+        "117": {
+          "jp_fnv1a": "0xac2b584d883ac640",
+          "zh": "帽子人V2"
+        },
+        "118": {
+          "jp_fnv1a": "0xac2b594d883ac7f3",
+          "zh": "帽子人V3"
+        },
+        "119": {
+          "jp_fnv1a": "0xac21084d8831e9cb",
+          "zh": "帽子人SP"
+        },
+        "120": {
+          "jp_fnv1a": "0x7af50ee12de6a29f",
+          "zh": "电波干扰人"
+        },
+        "121": {
+          "jp_fnv1a": "0xe86aad9121da9b5b",
+          "zh": "电波干扰人V2"
+        },
+        "122": {
+          "jp_fnv1a": "0xe86aac9121da99a8",
+          "zh": "电波干扰人V3"
+        },
+        "123": {
+          "jp_fnv1a": "0xe875019121e37e9c",
+          "zh": "电波干扰人SP"
+        },
+        "124": {
+          "jp_fnv1a": "0x50ac54690bb41d5e",
+          "zh": "缓存"
+        },
+        "125": {
+          "jp_fnv1a": "0xe3827a705a318d57",
+          "zh": "缓存未使用"
+        },
+        "126": {
+          "jp_fnv1a": "0xe3827a705a318d57",
+          "zh": "缓存未使用"
+        },
+        "127": {
+          "jp_fnv1a": "0x7e2e5b9bcfdd565b",
+          "zh": "缓存EX"
+        },
+        "128": {
+          "jp_fnv1a": "0x059edfc3c41bedce",
+          "zh": "失控缓存"
+        },
+        "129": {
+          "jp_fnv1a": "0x943cb33f5160abf2",
+          "zh": "失控缓存未使用"
+        },
+        "130": {
+          "jp_fnv1a": "0x943cb33f5160abf2",
+          "zh": "失控缓存未使用"
+        },
+        "131": {
+          "jp_fnv1a": "0x6faa8f770731ab6b",
+          "zh": "失控缓存EX"
+        },
+        "132": {
+          "jp_fnv1a": "0x157efd3c734ac5ff",
+          "zh": "佛鲁迪"
+        },
+        "133": {
+          "jp_fnv1a": "0x2222677f4f98dafc",
+          "zh": "佛鲁迪SP"
+        },
+        "134": {
+          "jp_fnv1a": "0xa0480ea01034d88c",
+          "zh": "佛鲁迪未使用"
+        },
+        "135": {
+          "jp_fnv1a": "0x540e2bed91461ef8",
+          "zh": "真・佛鲁迪"
+        }
+      }
+    },
+    "sp:11": {
+      "description": "system_messages",
+      "jp_fnv1a": "0x9e19e6c384baee64",
+      "entries": {
+        "0": {
+          "jp_fnv1a": "0x4af096e72331b363",
+          "zh": [
+            "获得了",
+            "「￥」！",
+            ""
+          ]
+        },
+        "1": {
+          "jp_fnv1a": "0x72f08506bbf4274a",
+          "zh": [
+            "这个安全方块",
+            "已经被锁定了。",
+            "要解除需要「钥匙」。"
+          ]
+        },
+        "2": {
+          "jp_fnv1a": "0x1f3c4ac2dcce531c",
+          "zh": [
+            "洛克人使用了「钥匙」！",
+            "",
+            ""
+          ]
+        },
+        "3": {
+          "jp_fnv1a": "0xfce1494ae0bafd00",
+          "zh": [
+            "…………………",
+            "密钥认证：OK",
+            "解除锁定。"
+          ]
+        },
+        "4": {
+          "jp_fnv1a": "0x6e84b83f9f8fdc7c",
+          "zh": [
+            "已装备文件夹￥！",
+            "",
+            ""
+          ]
+        },
+        "12": {
+          "jp_fnv1a": "0xd780d5119720252d",
+          "zh": [
+            "热斗，要做什么？",
+            "　编辑文件夹",
+            "　装备文件夹"
+          ]
+        },
+        "13": {
+          "jp_fnv1a": "0xcfd577560e009028",
+          "zh": [
+            "芯片文件夹里还不够",
+            "30枚芯片呢！",
+            ""
+          ]
+        },
+        "14": {
+          "jp_fnv1a": "0x15d2ec2f5d102d9a",
+          "zh": [
+            "要结束编辑吗？",
+            "　是",
+            "　否"
+          ]
+        },
+        "16": {
+          "jp_fnv1a": "0x8507ad01eb383634",
+          "zh": [
+            "这就是我的状态！",
+            "",
+            ""
+          ]
+        },
+        "17": {
+          "jp_fnv1a": "0x39e03403d6cb6d18",
+          "zh": [
+            "这就是我的状态！",
+            "　　启动技能编辑器",
+            ""
+          ]
+        },
+        "18": {
+          "jp_fnv1a": "0xbb0d4951334d800c",
+          "zh": [
+            "空闲插槽数不足！",
+            "",
+            ""
+          ]
+        },
+        "19": {
+          "jp_fnv1a": "0x84d4ad42fa4c8001",
+          "zh": [
+            "要卸下这个插槽中",
+            "装备的技能吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "20": {
+          "jp_fnv1a": "0xb2b4cc06ee109437",
+          "zh": [
+            "要使用全满能源吗？",
+            "（剩余￥个）",
+            "　是　　　　　　　否"
+          ]
+        },
+        "21": {
+          "jp_fnv1a": "0x5a87fa133e9199c9",
+          "zh": [
+            "HP完全回复了！",
+            "",
+            ""
+          ]
+        },
+        "22": {
+          "jp_fnv1a": "0x3787abf8436416fb",
+          "zh": [
+            "要把截至目前的战绩",
+            "保存下来吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "23": {
+          "jp_fnv1a": "0x035e87fa17f970a7",
+          "zh": [
+            "将会覆盖已有的存档数据，",
+            "确定吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "24": {
+          "jp_fnv1a": "0x86363d5b01b11652",
+          "zh": [
+            "存档中…",
+            "",
+            ""
+          ]
+        },
+        "25": {
+          "jp_fnv1a": "0x8840df7d7a3a6ca4",
+          "zh": [
+            "好！",
+            "存档完成了！",
+            ""
+          ]
+        },
+        "26": {
+          "jp_fnv1a": "0x2259a8a001f4368c",
+          "zh": [
+            "一个全满能源",
+            "都没有啊…",
+            ""
+          ]
+        },
+        "27": {
+          "jp_fnv1a": "0x051a0a03c0e5f506",
+          "zh": [
+            "现在没有使用的必要哦！",
+            "",
+            ""
+          ]
+        },
+        "34": {
+          "jp_fnv1a": "0xfa2d6d430d7d2cca",
+          "zh": [
+            "没有可以对话的人呢…。",
+            "",
+            ""
+          ]
+        },
+        "36": {
+          "jp_fnv1a": "0xcb584600a36fcfdb",
+          "zh": [
+            "网络连接！",
+            "洛克人.EXE，",
+            "程序传输！"
+          ]
+        },
+        "37": {
+          "jp_fnv1a": "0xd00b7476e38d4c9d",
+          "zh": [
+            "热斗，有新邮件哦！",
+            "",
+            ""
+          ]
+        },
+        "38": {
+          "jp_fnv1a": "0x909c1010ed3fcd6b",
+          "zh": [
+            "前方禁止通行，",
+            "这个安全方块",
+            "已被锁定。"
+          ]
+        },
+        "40": {
+          "jp_fnv1a": "0xdc9321e4cc0abfc1",
+          "zh": [
+            "OK！了解！",
+            "",
+            ""
+          ]
+        },
+        "41": {
+          "jp_fnv1a": "0x1e0192483478ed4d",
+          "zh": [
+            "要联网确认剧情配信等",
+            "更新状况吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "42": {
+          "jp_fnv1a": "0x4c1ceb6f20e16cc9",
+          "zh": [
+            "要下载新的剧情，",
+            "必须先进行",
+            "更新确认。"
+          ]
+        },
+        "43": {
+          "jp_fnv1a": "0xd6f3bd932cf82021",
+          "zh": [
+            "新剧情配信后",
+            "请务必执行一次。",
+            ""
+          ]
+        },
+        "44": {
+          "jp_fnv1a": "0x4ccbabe0c0b72a08",
+          "zh": [
+            "目前暂无更新。",
+            "下一话剧情的预定配信日为",
+            "￥。"
+          ]
+        },
+        "45": {
+          "jp_fnv1a": "0xc591f7e56c22f234",
+          "zh": [
+            "请在配信日之后",
+            "再次进行更新确认。",
+            ""
+          ]
+        },
+        "46": {
+          "jp_fnv1a": "0xfec1fd7734fd6ca8",
+          "zh": [
+            "已有可下载的剧情",
+            "正在配信中。",
+            ""
+          ]
+        },
+        "47": {
+          "jp_fnv1a": "0x8e14e45e1626e5d7",
+          "zh": [
+            "要下载吗？",
+            "",
+            "　是　　　　　　　否"
+          ]
+        },
+        "48": {
+          "jp_fnv1a": "0x25718fc24ee43190",
+          "zh": [
+            "若需重新下载，",
+            "请从标题画面的",
+            "「下载剧情」进行操作。"
+          ]
+        },
+        "49": {
+          "jp_fnv1a": "0x33fef40c3ca9f7f4",
+          "zh": [
+            "下载已完成。",
+            "请选择开始游戏",
+            "进入游戏。"
+          ]
+        },
+        "50": {
+          "jp_fnv1a": "0x1ceb2fcadcac4b6f",
+          "zh": [
+            "正在保存剧情通关状态的",
+            "存档数据。",
+            ""
+          ]
+        },
+        "51": {
+          "jp_fnv1a": "0x7edc2a4469c9c9df",
+          "zh": [
+            "存档已完成！",
+            "",
+            ""
+          ]
+        },
+        "52": {
+          "jp_fnv1a": "0x5d10036d8dcd5086",
+          "zh": [
+            "在标题画面选择开始游戏，",
+            "即可从剧情通关的时间点",
+            "继续游玩。"
+          ]
+        },
+        "53": {
+          "jp_fnv1a": "0xc03b746234ab03b6",
+          "zh": [
+            "若要游玩新剧情，",
+            "请先确认剧情配信的",
+            "更新状况。"
+          ]
+        },
+        "55": {
+          "jp_fnv1a": "0x5c0a6a4b8b49bac5",
+          "zh": [
+            "要接下这个委托吗？",
+            "（会消耗20点数哦）",
+            "　是　　　　　　　否"
+          ]
+        },
+        "56": {
+          "jp_fnv1a": "0xb4b6a1dfbc21bab9",
+          "zh": [
+            "要连接服务器",
+            "更新委托列表吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "57": {
+          "jp_fnv1a": "0x16099ab5c4656009",
+          "zh": [
+            "不更新列表数据的话",
+            "就没法接下委托哦…。",
+            "接委托时请允许联网。"
+          ]
+        },
+        "58": {
+          "jp_fnv1a": "0x8942ee6b46dd8c7f",
+          "zh": [
+            "联机失败了。",
+            "请在可联网的状态下",
+            "再试一次吧。"
+          ]
+        },
+        "59": {
+          "jp_fnv1a": "0xef35816254c2c20c",
+          "zh": [
+            "因为正在进行委托，",
+            "好像没法接下",
+            "新的委托呢。"
+          ]
+        },
+        "60": {
+          "jp_fnv1a": "0x5a2a35b34249e25e",
+          "zh": [
+            "请选择如何处理",
+            "当前接下的委托。",
+            "　确认委托　　　　中止委托"
+          ]
+        },
+        "61": {
+          "jp_fnv1a": "0xd522fa00216c2804",
+          "zh": [
+            "中途放弃的委托",
+            "之后还可以再次挑战哦。",
+            ""
+          ]
+        },
+        "62": {
+          "jp_fnv1a": "0x8db0b15b53d2ee22",
+          "zh": [
+            "要放弃正在进行的委托吗？",
+            "",
+            "　是　　　　　　　否"
+          ]
+        },
+        "63": {
+          "jp_fnv1a": "0x218e4f49ac184f86",
+          "zh": [
+            "登记中……",
+            "",
+            ""
+          ]
+        },
+        "64": {
+          "jp_fnv1a": "0xafb53c83f4b4d1a3",
+          "zh": [
+            "已放弃接下的委托。",
+            "返回委托列表画面。",
+            ""
+          ]
+        },
+        "65": {
+          "jp_fnv1a": "0xffb273adfd6e826e",
+          "zh": [
+            "接下这个委托所需的",
+            "点数不够哦！",
+            ""
+          ]
+        },
+        "66": {
+          "jp_fnv1a": "0x29ce51aca5c71036",
+          "zh": [
+            "现在好像一条委托都没有…。",
+            "下次再来看看吧。",
+            ""
+          ]
+        },
+        "67": {
+          "jp_fnv1a": "0x2ce5becc706650a6",
+          "zh": [
+            "那么，我先去登记一下",
+            "接下这个委托吧。",
+            ""
+          ]
+        },
+        "68": {
+          "jp_fnv1a": "0x4abcd8109b2abfc3",
+          "zh": [
+            "热斗，我已经接下委托了！",
+            "",
+            ""
+          ]
+        },
+        "69": {
+          "jp_fnv1a": "0x50f6d870f83d5fb9",
+          "zh": [
+            "正在接收列表数据……",
+            "",
+            ""
+          ]
+        },
+        "70": {
+          "jp_fnv1a": "0xbdc44f28825790a5",
+          "zh": [
+            "目前暂无更新。",
+            "",
+            ""
+          ]
+        },
+        "72": {
+          "jp_fnv1a": "0xadc7e0dc820919ca",
+          "zh": [
+            "更换手机终端或下载",
+            "追加数据遇到问题时，",
+            "请使用此功能。"
+          ]
+        },
+        "73": {
+          "jp_fnv1a": "0xffca971ce6e3a29b",
+          "zh": [
+            "要将存档保存至服务器吗？",
+            "（将会联网）",
+            "　是　　　　　　　否"
+          ]
+        },
+        "74": {
+          "jp_fnv1a": "0x3d8249757f8bac8d",
+          "zh": [
+            "正在将存档保存至",
+            "服务器…。",
+            ""
+          ]
+        },
+        "75": {
+          "jp_fnv1a": "0x34ca2c7d01bbf6e9",
+          "zh": [
+            "数据保存已完成。",
+            "需要下载时请从",
+            "读取服务器存档进行操作。"
+          ]
+        },
+        "77": {
+          "jp_fnv1a": "0xadc7e0dc820919ca",
+          "zh": [
+            "更换手机终端或下载",
+            "追加数据遇到问题时，",
+            "请使用此功能。"
+          ]
+        },
+        "78": {
+          "jp_fnv1a": "0x4d3f052e51cab65c",
+          "zh": [
+            "要读取服务器上的存档吗？",
+            "（将会联网）",
+            "　是　　　　　　　否"
+          ]
+        },
+        "79": {
+          "jp_fnv1a": "0x033c0b7e24cfa7bf",
+          "zh": [
+            "当前应用的存档将会被清除，",
+            "确定要继续吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "80": {
+          "jp_fnv1a": "0x7e1dbb828757edc0",
+          "zh": [
+            "正在从服务器下载",
+            "存档数据…。",
+            ""
+          ]
+        },
+        "81": {
+          "jp_fnv1a": "0x7a2041f1208f1255",
+          "zh": [
+            "数据读取已完成。",
+            "请选择开始游戏",
+            "进入游戏。"
+          ]
+        },
+        "83": {
+          "jp_fnv1a": "0x0a0071888c16e67e",
+          "zh": [
+            "芯片数据等无法继承。",
+            "所有数据都会恢复到",
+            "初始状态。"
+          ]
+        },
+        "84": {
+          "jp_fnv1a": "0x25d362e16843f116",
+          "zh": [
+            "要初始化当前数据，",
+            "从第一话开始游玩吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "85": {
+          "jp_fnv1a": "0x43a6c97680e8426d",
+          "zh": [
+            "数据一旦清除将无法恢复。",
+            "真的要初始化吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "86": {
+          "jp_fnv1a": "0x53d179b4f3f0d585",
+          "zh": [
+            "初始化中…。",
+            "",
+            ""
+          ]
+        },
+        "87": {
+          "jp_fnv1a": "0x3c54f91da26b9d64",
+          "zh": [
+            "初始化已完成。",
+            "请选择开始游戏",
+            "进入游戏。"
+          ]
+        },
+        "88": {
+          "jp_fnv1a": "0x6c0749a250bbc2c7",
+          "zh": [
+            "数据改写时发生错误。",
+            "在改写完成之前，",
+            "无法重新开始游戏。"
+          ]
+        },
+        "89": {
+          "jp_fnv1a": "0xf155a73c0891a9fd",
+          "zh": [
+            "要联网重试",
+            "改写数据吗？",
+            "　是　　　　　　　　否"
+          ]
+        },
+        "90": {
+          "jp_fnv1a": "0xf7eef44d9478cca0",
+          "zh": [
+            "由于上次数据改写处理",
+            "中途中断并退出了，",
+            "现在重新开始处理。"
+          ]
+        },
+        "91": {
+          "jp_fnv1a": "0x0c6bc21590e0e526",
+          "zh": [
+            "在改写完成之前，",
+            "无法开始游戏。",
+            ""
+          ]
+        },
+        "92": {
+          "jp_fnv1a": "0xaff688c3bd99b7cb",
+          "zh": [
+            "服务器上没有找到",
+            "存档数据。",
+            ""
+          ]
+        },
+        "95": {
+          "jp_fnv1a": "0x8e6a26c426f4adca",
+          "zh": [
+            "不存档就直接返回标题",
+            "确定吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "96": {
+          "jp_fnv1a": "0x5dd3e9cf0179e61d",
+          "zh": [
+            "数据传输中…。",
+            "",
+            ""
+          ]
+        },
+        "97": {
+          "jp_fnv1a": "0x2666f94c76a30753",
+          "zh": [
+            "返回标题前要保存",
+            "当前的数据吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "98": {
+          "jp_fnv1a": "0xae8fc507da2967b9",
+          "zh": [
+            "即将退出应用。请确认处于",
+            "可联网的状态后，",
+            "再重新启动。"
+          ]
+        },
+        "99": {
+          "jp_fnv1a": "0xe5d18249799a4145",
+          "zh": [
+            "联机失败。",
+            "",
+            ""
+          ]
+        },
+        "100": {
+          "jp_fnv1a": "0x6ccc867fa00df871",
+          "zh": [
+            "要购买",
+            "「￥」吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "102": {
+          "jp_fnv1a": "0x664ffba1c6ffb44c",
+          "zh": [
+            "那么，这就让正在进货的",
+            "数字人把数据传送过来",
+            "的说。"
+          ]
+        },
+        "103": {
+          "jp_fnv1a": "0xa05021b10232f191",
+          "zh": [
+            "……",
+            "传送完成！",
+            ""
+          ]
+        },
+        "104": {
+          "jp_fnv1a": "0x1a41730b053d4934",
+          "zh": [
+            "咦…",
+            "Zenny不够啊。",
+            ""
+          ]
+        },
+        "105": {
+          "jp_fnv1a": "0x3ac21ac846adfdb7",
+          "zh": [
+            "就投入这￥枚，OK吗？",
+            "",
+            "　是　　　　　　　否"
+          ]
+        },
+        "106": {
+          "jp_fnv1a": "0xfe98e66bf9d7f0d9",
+          "zh": [
+            "",
+            "哗啦哗啦…咚！",
+            ""
+          ]
+        },
+        "108": {
+          "jp_fnv1a": "0x46a3b11de5f7b9b4",
+          "zh": [
+            "要再抽一次吗？",
+            "",
+            "　是　　　　　　　否"
+          ]
+        },
+        "109": {
+          "jp_fnv1a": "0xa8838b22a56d417c",
+          "zh": [
+            "咦…",
+            "BUG碎片不够啊。",
+            ""
+          ]
+        },
+        "112": {
+          "jp_fnv1a": "0xf466eec2447c6e06",
+          "zh": [
+            "已经拿不下更多啦！",
+            "",
+            ""
+          ]
+        },
+        "113": {
+          "jp_fnv1a": "0x01b371d979aad2cd",
+          "zh": [
+            "MEGA芯片最多只能放",
+            "￥枚哦！",
+            ""
+          ]
+        },
+        "114": {
+          "jp_fnv1a": "0x039933b19c5fc721",
+          "zh": [
+            "GIGA芯片最多只能放",
+            "￥枚哦！",
+            ""
+          ]
+        },
+        "115": {
+          "jp_fnv1a": "0x2bc8145a8cf5c2b8",
+          "zh": [
+            "相同的MEGA芯片",
+            "最多只能放入1枚哦！",
+            ""
+          ]
+        },
+        "116": {
+          "jp_fnv1a": "0xa49cb6575b73d940",
+          "zh": [
+            "相同的GIGA芯片",
+            "最多只能放入1枚哦！",
+            ""
+          ]
+        },
+        "117": {
+          "jp_fnv1a": "0x4e5162acb709823a",
+          "zh": [
+            "常规容量不够哦！",
+            "",
+            ""
+          ]
+        },
+        "118": {
+          "jp_fnv1a": "0xd471993bce5ec87b",
+          "zh": [
+            "卸下这个技能的话，",
+            "现在的文件夹就无法装备了！",
+            ""
+          ]
+        },
+        "119": {
+          "jp_fnv1a": "0x51f23b943179b056",
+          "zh": [
+            "请先更换文件夹，",
+            "再来卸下技能吧！",
+            ""
+          ]
+        },
+        "120": {
+          "jp_fnv1a": "0xc48bd97e8cae5840",
+          "zh": [
+            "同一种芯片最多4枚哦！",
+            "",
+            ""
+          ]
+        },
+        "121": {
+          "jp_fnv1a": "0x43117d41eb977669",
+          "zh": [
+            "热斗，我们还是逃跑",
+            "比较好吧？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "122": {
+          "jp_fnv1a": "0x8247caf8cd122778",
+          "zh": [
+            "…………。",
+            "",
+            ""
+          ]
+        },
+        "123": {
+          "jp_fnv1a": "0x6b12df456a862e65",
+          "zh": [
+            "好！",
+            "总算成功逃掉了！",
+            ""
+          ]
+        },
+        "124": {
+          "jp_fnv1a": "0x48e6653e7b93c2c7",
+          "zh": [
+            "不行！",
+            "逃不掉…！",
+            ""
+          ]
+        },
+        "125": {
+          "jp_fnv1a": "0x9764e582d4046828",
+          "zh": [
+            "这个安全方块可以通过",
+            "操作配置变更程序",
+            "来移动它的位置。"
+          ]
+        },
+        "126": {
+          "jp_fnv1a": "0x918fe9a117bbe75c",
+          "zh": [
+            "它与普通的安全方块不同，",
+            "无法用「钥匙」",
+            "来解除锁定。"
+          ]
+        },
+        "127": {
+          "jp_fnv1a": "0x7884f36306b8a15b",
+          "zh": [
+            "这个安全方块被",
+            "编号输入式的程序",
+            "锁住了。"
+          ]
+        },
+        "128": {
+          "jp_fnv1a": "0x601c933c5ac394b7",
+          "zh": [
+            "这个安全方块被",
+            "特殊的数据",
+            "封印着。"
+          ]
+        },
+        "129": {
+          "jp_fnv1a": "0x6c29e36163520796",
+          "zh": [
+            "要解除锁定，",
+            "必须使用专用的",
+            "数据密钥。"
+          ]
+        },
+        "130": {
+          "jp_fnv1a": "0x0bb5d9a54c512e2a",
+          "zh": [
+            "洛克人使用了",
+            "「缓存密钥」！",
+            ""
+          ]
+        },
+        "131": {
+          "jp_fnv1a": "0x58cbaeaeeb60374a",
+          "zh": [
+            "这个安全方块",
+            "被专用的钥匙锁住了。",
+            ""
+          ]
+        },
+        "132": {
+          "jp_fnv1a": "0x66fcc36327b8f924",
+          "zh": [
+            "要解除锁定",
+            "需要专用的钥匙。",
+            ""
+          ]
+        },
+        "133": {
+          "jp_fnv1a": "0xa288f95afd39454f",
+          "zh": [
+            "这个安全方块",
+            "在科学省公职的管理下",
+            "处于锁定状态。"
+          ]
+        },
+        "134": {
+          "jp_fnv1a": "0x2e90f9d135ed8d33",
+          "zh": [
+            "个人无法将其解除。",
+            "",
+            ""
+          ]
+        },
+        "135": {
+          "jp_fnv1a": "0x53fa9e1c186f053d",
+          "zh": [
+            "洛克人使用了",
+            "「里网络钥匙」！",
+            ""
+          ]
+        },
+        "136": {
+          "jp_fnv1a": "0x13459eed3512ba2b",
+          "zh": [
+            "…………………",
+            "锁定已解除。",
+            ""
+          ]
+        },
+        "138": {
+          "jp_fnv1a": "0x7e320e51d05b287d",
+          "zh": [
+            "文件夹内的MEGA/GIGA芯片",
+            "数量超限了。",
+            "请先编辑文件夹。"
+          ]
+        },
+        "139": {
+          "jp_fnv1a": "0xa3dc75ac0e2f460d",
+          "zh": [
+            "排行榜的敌人数据",
+            "不是本月的数据。",
+            ""
+          ]
+        },
+        "140": {
+          "jp_fnv1a": "0x0154d9a2e19633ad",
+          "zh": [
+            "要更新至最新版吗？",
+            "（将会产生联网通信）",
+            "　是　　　　　　　否"
+          ]
+        },
+        "141": {
+          "jp_fnv1a": "0x9599ff7be86214ba",
+          "zh": [
+            "正在下载最新的",
+            "排行榜数据…。",
+            ""
+          ]
+        },
+        "142": {
+          "jp_fnv1a": "0xe37e5492bf9de093",
+          "zh": [
+            "排行榜数据下载",
+            "已完成。",
+            ""
+          ]
+        },
+        "143": {
+          "jp_fnv1a": "0x15d9da9a2d223a9f",
+          "zh": [
+            "若不下载当月的",
+            "排行榜数据，",
+            "就无法参加排行榜。"
+          ]
+        },
+        "144": {
+          "jp_fnv1a": "0x70defb5246984cb4",
+          "zh": [
+            "若要参加排行榜，",
+            "请务必下载",
+            "排行榜数据。"
+          ]
+        },
+        "145": {
+          "jp_fnv1a": "0x9b07f86542b0cf91",
+          "zh": [
+            "可以参加本月的",
+            "排行榜对战。",
+            ""
+          ]
+        },
+        "146": {
+          "jp_fnv1a": "0x942b329d36b016e4",
+          "zh": [
+            "登录最高分数据，",
+            "并更新获取与显示",
+            "排行榜一览。"
+          ]
+        },
+        "147": {
+          "jp_fnv1a": "0xf0cae7cc9b5692ad",
+          "zh": [
+            "要开始10连战的",
+            "排行榜对战吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "148": {
+          "jp_fnv1a": "0x0d42ae6f00185d2e",
+          "zh": [
+            "那么，排行榜对战",
+            "开始！",
+            ""
+          ]
+        },
+        "149": {
+          "jp_fnv1a": "0xecb42f14d032a7a3",
+          "zh": [
+            "要再次挑战吗？",
+            "",
+            "　是　　　　　　　否"
+          ]
+        },
+        "150": {
+          "jp_fnv1a": "0xafb31f71e92e8633",
+          "zh": [
+            "最高分已刷新。",
+            "要进行排行登录吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "151": {
+          "jp_fnv1a": "0x4df7034af44abd9d",
+          "zh": [
+            "正在显示登录排行时",
+            "使用的文件夹哦。",
+            ""
+          ]
+        },
+        "152": {
+          "jp_fnv1a": "0xf7107a52bd379448",
+          "zh": [
+            "热斗！",
+            "现在可不是逃跑的时候！",
+            ""
+          ]
+        },
+        "153": {
+          "jp_fnv1a": "0x446d4e733512f287",
+          "zh": [
+            "要联网更新最高分与",
+            "排行榜一览吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "154": {
+          "jp_fnv1a": "0xfd0c4c3cf912dec3",
+          "zh": [
+            "正在更新排行榜",
+            "数据…。",
+            ""
+          ]
+        },
+        "155": {
+          "jp_fnv1a": "0x65e331f0754056da",
+          "zh": [
+            "要联网查看这位",
+            "网络对战员的文件夹吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "156": {
+          "jp_fnv1a": "0x32850a758147ff15",
+          "zh": [
+            "正在显示￥月份",
+            "排行榜上位玩家的",
+            "文件夹哦。"
+          ]
+        },
+        "160": {
+          "jp_fnv1a": "0x13c6941b9d9770ca",
+          "zh": [
+            "发生通信错误。",
+            "要重新连接吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "161": {
+          "jp_fnv1a": "0x8009a808431d82b5",
+          "zh": [
+            "由于是非会员无法通信。",
+            "请先进行会员注册。",
+            ""
+          ]
+        },
+        "162": {
+          "jp_fnv1a": "0x43d5cb1c10ff63f9",
+          "zh": [
+            "秋原区域3正在维护中，",
+            "因此处于封锁状态。",
+            ""
+          ]
+        },
+        "163": {
+          "jp_fnv1a": "0x56ddccce8cdf1df3",
+          "zh": [
+            "已保存通关旗标。",
+            "之前去不了的区域",
+            "现在可以前往了。"
+          ]
+        },
+        "164": {
+          "jp_fnv1a": "0x53c39746f5e7e56e",
+          "zh": [
+            "这个安全方块",
+            "处于锁定状态。",
+            ""
+          ]
+        },
+        "165": {
+          "jp_fnv1a": "0xaf801d09fe526b92",
+          "zh": [
+            "要解除需要",
+            "「里之证明」。",
+            ""
+          ]
+        },
+        "166": {
+          "jp_fnv1a": "0xe2e19101919e1aff",
+          "zh": [
+            "洛克人使用了",
+            "「里之证明」！",
+            ""
+          ]
+        },
+        "167": {
+          "jp_fnv1a": "0xbdd583e899f6d5e7",
+          "zh": [
+            "这个安全方块",
+            "被强大的力量锁定了。",
+            ""
+          ]
+        },
+        "168": {
+          "jp_fnv1a": "0x7d1089033744d139",
+          "zh": [
+            "此门乃羁绊之门。",
+            "唯有怀有真正羁绊之人，",
+            "方可开启前路。"
+          ]
+        },
+        "169": {
+          "jp_fnv1a": "0xf21cc72dce2ab000",
+          "zh": [
+            "展现勇气，缔结真正羁绊。",
+            "如此大门自会敞开。",
+            ""
+          ]
+        },
+        "170": {
+          "jp_fnv1a": "0xe7e7a1838cd1c1f5",
+          "zh": [
+            "汝乃怀有真正羁绊之人。",
+            "已无任何事物能阻挡汝路。",
+            ""
+          ]
+        },
+        "171": {
+          "jp_fnv1a": "0x0209582f156fb46f",
+          "zh": [
+            "此门乃技巧之门。",
+            "唯有掌握众多技巧之人，",
+            "方可开启前路。"
+          ]
+        },
+        "172": {
+          "jp_fnv1a": "0x603649c58bdc9380",
+          "zh": [
+            "集齐111种技巧。",
+            "如此大门自会敞开。",
+            ""
+          ]
+        },
+        "173": {
+          "jp_fnv1a": "0x98dce72da07de88b",
+          "zh": [
+            "汝乃掌握众多技巧之人。",
+            "已无任何事物能阻挡汝路。",
+            ""
+          ]
+        },
+        "174": {
+          "jp_fnv1a": "0x8a7b77f1f0b0d597",
+          "zh": [
+            "此门乃力量之门。",
+            "唯有怀有强大力量之人，",
+            "方可开启前路。"
+          ]
+        },
+        "175": {
+          "jp_fnv1a": "0x9898c7e3d2baf970",
+          "zh": [
+            "集齐32种强大力量。",
+            "如此大门自会敞开。",
+            ""
+          ]
+        },
+        "176": {
+          "jp_fnv1a": "0x836256f526650857",
+          "zh": [
+            "汝乃怀有强大力量之人。",
+            "已无任何事物能阻挡汝路。",
+            ""
+          ]
+        },
+        "177": {
+          "jp_fnv1a": "0x94f56ca1a842d091",
+          "zh": [
+            "此门乃信赖之门。",
+            "唯有身负众人信赖之人，",
+            "方可开启前路。"
+          ]
+        },
+        "178": {
+          "jp_fnv1a": "0xc44d51d43b4bbf5f",
+          "zh": [
+            "拯救困扰之人，赢得信赖。",
+            "如此大门自会敞开。",
+            ""
+          ]
+        },
+        "179": {
+          "jp_fnv1a": "0x30c7b28d8a269187",
+          "zh": [
+            "汝乃赢得众人信赖之人。",
+            "已无任何事物能阻挡汝路。",
+            ""
+          ]
+        },
+        "180": {
+          "jp_fnv1a": "0x6c127aba4caea486",
+          "zh": [
+            "你要去哪啊，热斗！",
+            "今天你是值日生，",
+            "回家前得把黑板擦干净啊！"
+          ]
+        },
+        "181": {
+          "jp_fnv1a": "0xda616dc5c8c1905b",
+          "zh": [
+            "请从持有的技能中，",
+            "选择想要变更属性的",
+            "技能吧。"
+          ]
+        },
+        "182": {
+          "jp_fnv1a": "0x45d30789c0c0c747",
+          "zh": [
+            "请选择变更后的属性吧。",
+            "",
+            ""
+          ]
+        },
+        "183": {
+          "jp_fnv1a": "0x288cfd16e5fb21cb",
+          "zh": [
+            "要消耗￥个碎片来变更",
+            "这个技能的属性吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "184": {
+          "jp_fnv1a": "0x418df388f73013d6",
+          "zh": [
+            "属性转换中……………………",
+            "　　　　　　　　　　　　　　　",
+            ""
+          ]
+        },
+        "185": {
+          "jp_fnv1a": "0xb6cf16f6b2dbdd4d",
+          "zh": [
+            "属性转换完成！",
+            "",
+            ""
+          ]
+        },
+        "186": {
+          "jp_fnv1a": "0x0d457bbd62cef56c",
+          "zh": [
+            "属性转换后的技能持有数",
+            "好像已经满了。",
+            "没法进行转换哦。"
+          ]
+        },
+        "187": {
+          "jp_fnv1a": "0x6ea0563617cf4432",
+          "zh": [
+            "BUG碎片的数量",
+            "好像还不够啊。",
+            "攒够了再来找我吧。"
+          ]
+        },
+        "188": {
+          "jp_fnv1a": "0x86342cc80f63b0f1",
+          "zh": [
+            "今日剩余存档次数",
+            "还有￥次。",
+            ""
+          ]
+        },
+        "189": {
+          "jp_fnv1a": "0x30571d6dc7942453",
+          "zh": [
+            "今日剩余读档次数",
+            "还有￥次。",
+            ""
+          ]
+        },
+        "190": {
+          "jp_fnv1a": "0x25ba1804e25ddd0a",
+          "zh": [
+            "好像没有可变更的技能。",
+            "请预先把装备中的",
+            "技能卸下来吧。"
+          ]
+        },
+        "191": {
+          "jp_fnv1a": "0x4c774ab7dcca3b26",
+          "zh": [
+            "今日剩余次数为0，",
+            "无法使用服务器",
+            "存取档功能。"
+          ]
+        },
+        "192": {
+          "jp_fnv1a": "0xdff3c418fa2f5d9e",
+          "zh": [
+            "服务器上没有保存",
+            "存档数据。",
+            ""
+          ]
+        },
+        "193": {
+          "jp_fnv1a": "0x5449f0f514735ed8",
+          "zh": [
+            "因为这个委托之前已经",
+            "消耗过点数了，",
+            "这次以0点数接下了哦。"
+          ]
+        }
+      }
+    },
+    "sp:35": {
+      "description": "menu_help_messages",
+      "jp_fnv1a": "0x0c0de1a52d40923a",
+      "entries": {
+        "0": {
+          "jp_fnv1a": "0x0330e7052bd256ba",
+          "zh": [
+            "可以编辑芯片文件夹哦！",
+            "",
+            ""
+          ]
+        },
+        "1": {
+          "jp_fnv1a": "0x9adf4718f4684ea2",
+          "zh": [
+            "可以查看迄今为止",
+            "收集到的芯片一览哦！",
+            ""
+          ]
+        },
+        "2": {
+          "jp_fnv1a": "0xe1c2c240ec961a70",
+          "zh": [
+            "使用回复HP的副芯片哦",
+            "（剩余数量：￥个）",
+            ""
+          ]
+        },
+        "3": {
+          "jp_fnv1a": "0x8cc69eaee406c0ac",
+          "zh": [
+            "可以确认我的状态",
+            "并进行技能设置哦！",
+            ""
+          ]
+        },
+        "4": {
+          "jp_fnv1a": "0x60ad8106867d506c",
+          "zh": [
+            "可以打开邮件信箱",
+            "阅读电子邮件哦！",
+            ""
+          ]
+        },
+        "5": {
+          "jp_fnv1a": "0x9630d5a28fd781fb",
+          "zh": [
+            "可以保存当前的游戏进度哦！",
+            "",
+            ""
+          ]
+        },
+        "6": {
+          "jp_fnv1a": "0xccef1cae49841330",
+          "zh": [
+            "请选择文件夹！",
+            "",
+            ""
+          ]
+        },
+        "7": {
+          "jp_fnv1a": "0xca713e3331f789bd",
+          "zh": [
+            "热斗，",
+            "要读哪封邮件？",
+            ""
+          ]
+        },
+        "8": {
+          "jp_fnv1a": "0xdae6ea5c01f0b2ca",
+          "zh": [
+            "移动到其他地点",
+            "",
+            ""
+          ]
+        },
+        "9": {
+          "jp_fnv1a": "0x7dd1ef229e89ead2",
+          "zh": [
+            "与人交谈",
+            "",
+            ""
+          ]
+        },
+        "10": {
+          "jp_fnv1a": "0x738fae40e3756eca",
+          "zh": [
+            "向电子设备连线",
+            "",
+            ""
+          ]
+        },
+        "11": {
+          "jp_fnv1a": "0x923da776e19530f5",
+          "zh": [
+            "与洛克人交谈",
+            "",
+            ""
+          ]
+        },
+        "12": {
+          "jp_fnv1a": "0xa3d2a687a7fc1d01",
+          "zh": [
+            "要移动到哪里？",
+            "",
+            ""
+          ]
+        },
+        "13": {
+          "jp_fnv1a": "0x97fed78fc7dd2c5c",
+          "zh": [
+            "要和谁说话？",
+            "",
+            ""
+          ]
+        },
+        "14": {
+          "jp_fnv1a": "0x06a6190ff05e180e",
+          "zh": [
+            "要向什么连线？",
+            "",
+            ""
+          ]
+        },
+        "15": {
+          "jp_fnv1a": "0x4723fb11ddfb7dd4",
+          "zh": [
+            "洛克人，",
+            "要离线了吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "16": {
+          "jp_fnv1a": "0xf36ef8ae3e9bcc02",
+          "zh": [
+            "请选择想查看详情的委托！",
+            "",
+            ""
+          ]
+        },
+        "17": {
+          "jp_fnv1a": "0x96e96f63360a802b",
+          "zh": [
+            "可以将存档数据",
+            "临时保存在服务器上。",
+            ""
+          ]
+        },
+        "18": {
+          "jp_fnv1a": "0xf38bd331024f2aa0",
+          "zh": [
+            "可以下载服务器上的存档",
+            "并应用到本应用中。",
+            ""
+          ]
+        },
+        "19": {
+          "jp_fnv1a": "0x61fc52ba314aec46",
+          "zh": [
+            "可以初始化当前存档，",
+            "从第一话重新开始游玩。",
+            ""
+          ]
+        },
+        "20": {
+          "jp_fnv1a": "0x2630f90a875f2b4a",
+          "zh": [
+            "切换声音的开启／关闭。",
+            "",
+            ""
+          ]
+        },
+        "21": {
+          "jp_fnv1a": "0x7c88c51113fe6b90",
+          "zh": [
+            "返回标题画面。",
+            "（未保存的数据",
+            "　将会丢失）"
+          ]
+        },
+        "22": {
+          "jp_fnv1a": "0x395fadf1bd59a7bf",
+          "zh": [
+            "使洛克人的最大HP",
+            "提升20点。",
+            ""
+          ]
+        },
+        "23": {
+          "jp_fnv1a": "0x8665a0186f7927d6",
+          "zh": [
+            "仅可在PET画面使用。",
+            "将洛克人的HP回复至",
+            "最大值。"
+          ]
+        },
+        "24": {
+          "jp_fnv1a": "0x2eed4f80b5209e63",
+          "zh": [
+            "请选择要投入",
+            "芯片交易机的￥枚",
+            "战斗芯片。"
+          ]
+        },
+        "25": {
+          "jp_fnv1a": "0xe940ca85a4b3d4e3",
+          "zh": [
+            "将当前选中的芯片",
+            "传送给洛克人。",
+            ""
+          ]
+        },
+        "26": {
+          "jp_fnv1a": "0xd51ebcaf352687a1",
+          "zh": [
+            "舍弃当前选中的芯片，",
+            "增加下回合可选芯片数量。",
+            ""
+          ]
+        },
+        "27": {
+          "jp_fnv1a": "0x89a47d93cbbc7d54",
+          "zh": [
+            "将手头的芯片",
+            "洗牌1次。",
+            ""
+          ]
+        }
+      }
+    },
+    "jar:data/new/sys_mes2.dat": {
+      "description": "network_system_messages",
+      "jp_fnv1a": "0x00a19fd665e10608",
+      "entries": {
+        "0": {
+          "jp_fnv1a": "0xa8a7d46751e5929f",
+          "zh": [
+            "要更新剧情吗？",
+            "",
+            "　是　　　　　　　否"
+          ]
+        },
+        "1": {
+          "jp_fnv1a": "0x917b93cda8f0acca",
+          "zh": [
+            "若要更新剧情，",
+            "请在标题画面进行操作。",
+            ""
+          ]
+        },
+        "2": {
+          "jp_fnv1a": "0x774f54f8184dd81c",
+          "zh": [
+            "剧情更新已完成。",
+            "请选择开始游戏",
+            "进入游戏。"
+          ]
+        },
+        "3": {
+          "jp_fnv1a": "0xa7577723ce59cc6f",
+          "zh": [
+            "剧情更新中…。",
+            "",
+            ""
+          ]
+        },
+        "4": {
+          "jp_fnv1a": "0x0cac07935225e254",
+          "zh": [
+            "要接下这个委托吗？",
+            "",
+            "　是　　　　　　　否"
+          ]
+        },
+        "5": {
+          "jp_fnv1a": "0xd522fa00216c2804",
+          "zh": [
+            "中途放弃的委托",
+            "之后还可以再次挑战哦。",
+            ""
+          ]
+        },
+        "6": {
+          "jp_fnv1a": "0x8f43ff52db1b9ea5",
+          "zh": [
+            "由于是非会员无法通信。",
+            "要连接到网站吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "7": {
+          "jp_fnv1a": "0xa04f7e35379346bd",
+          "zh": [
+            "应用版本错误。",
+            "要连接到网站吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "8": {
+          "jp_fnv1a": "0x9526fc4cd137d4cd",
+          "zh": [
+            "服务器正在维护中。",
+            "请稍后",
+            "再试一次。"
+          ]
+        },
+        "9": {
+          "jp_fnv1a": "0xf3fa1e9a55da1b51",
+          "zh": [
+            "通信失败。",
+            "（错误代码：￥）",
+            ""
+          ]
+        },
+        "10": {
+          "jp_fnv1a": "0x9e7aac19fcc6e0fc",
+          "zh": [
+            "即将确认",
+            "排行榜数据。",
+            ""
+          ]
+        },
+        "11": {
+          "jp_fnv1a": "0xd4faf0aa2f5b7e38",
+          "zh": [
+            "要连接服务器吗？",
+            "",
+            "　是　　　　　　　否"
+          ]
+        },
+        "12": {
+          "jp_fnv1a": "0xf4a09431c749f44c",
+          "zh": [
+            "要使用排行榜功能，",
+            "需要注册Capcom Party",
+            "会员。"
+          ]
+        },
+        "13": {
+          "jp_fnv1a": "0x57d3fd97a3f2cec5",
+          "zh": [
+            "要连接到注册网站吗？",
+            "",
+            "　是　　　　　　　否"
+          ]
+        },
+        "14": {
+          "jp_fnv1a": "0x13c6941b9d9770ca",
+          "zh": [
+            "发生通信错误。",
+            "要重新连接吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "15": {
+          "jp_fnv1a": "0xdd4e16a753ed66c5",
+          "zh": [
+            "即将退出应用。",
+            "",
+            ""
+          ]
+        },
+        "16": {
+          "jp_fnv1a": "0x2abd3014eaa60feb",
+          "zh": [
+            "在连接到网站前",
+            "要先存档吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "17": {
+          "jp_fnv1a": "0xf450fe1252b1e7c2",
+          "zh": [
+            "存档已完成。",
+            "正在连接到网站。",
+            ""
+          ]
+        },
+        "18": {
+          "jp_fnv1a": "0xd4ca7f8e3953b5c2",
+          "zh": [
+            "要联网重试",
+            "改写数据吗？",
+            "　是　　　　　　　否"
+          ]
+        }
+      }
+    },
+    "jar:data/new/sina_mes2.dat": {
+      "description": "network_scenario_messages",
+      "jp_fnv1a": "0xde0317be937544ae",
+      "entries": {
+        "0": {
+          "jp_fnv1a": "0xa8a7d46751e5929f",
+          "zh": [
+            "要更新剧情吗？",
+            "",
+            "　是　　　　　　　否"
+          ]
+        },
+        "1": {
+          "jp_fnv1a": "0x2882a527a751db94",
+          "zh": [
+            "若要更新剧情，",
+            "请在标题画面进行操作。",
+            ""
+          ]
+        },
+        "2": {
+          "jp_fnv1a": "0x774f54f8184dd81c",
+          "zh": [
+            "剧情更新已完成。",
+            "请选择开始游戏",
+            "进入游戏。"
+          ]
+        },
+        "3": {
+          "jp_fnv1a": "0xa7577723ce59cc6f",
+          "zh": [
+            "剧情更新中…。",
+            "",
+            ""
+          ]
+        },
+        "4": {
+          "jp_fnv1a": "0x0cac07935225e254",
+          "zh": [
+            "要接下这个委托吗？",
+            "",
+            "　是　　　　　　　否"
+          ]
+        },
+        "5": {
+          "jp_fnv1a": "0xd522fa00216c2804",
+          "zh": [
+            "中途放弃的委托",
+            "之后还可以再次挑战哦。",
+            ""
+          ]
+        },
+        "6": {
+          "jp_fnv1a": "0x34e3e09f006cf387",
+          "zh": [
+            "由于是非会员无法通信。",
+            "要连接到服务器吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "7": {
+          "jp_fnv1a": "0x0c76190ba5b580b6",
+          "zh": [
+            "应用版本错误。",
+            "要连接到服务器吗？",
+            "　是　　　　　　　否"
+          ]
+        },
+        "8": {
+          "jp_fnv1a": "0x9526fc4cd137d4cd",
+          "zh": [
+            "服务器正在维护中。",
+            "请稍后",
+            "再试一次。"
+          ]
+        }
+      }
+    }
+  }
+}
