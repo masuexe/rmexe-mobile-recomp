@@ -230,6 +230,10 @@ public:
     }
     void set_config_path(const std::string& path);
     void set_touch_controls(bool enabled);
+    void attach_external_sdl(void* window, void* renderer) {
+        sdl_window_ = window;
+        sdl_renderer_ = renderer;
+    }
     void set_data_dir(const std::string& dir) { data_dir_ = dir; }
     void set_asset_dir(const std::string& dir) { asset_dir_ = dir; }
     const std::string& data_dir() const { return data_dir_; }

@@ -155,15 +155,19 @@ void draw_launcher_text(SDL_Renderer* ren, const std::string& txt, int x, int y,
     }
 }
 
-int run_collection_launcher(std::vector<CollectionGameEntry>& games) {
+int run_collection_launcher(std::vector<CollectionGameEntry>& games,
+                            SDL_Window*& out_win, SDL_Renderer*& out_ren) {
+    out_win = nullptr;
+    out_ren = nullptr;
     if (games.empty()) return -1;
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
+    if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
+        SDL_Log("RMEXE Launcher SDL_Init failed: %s", SDL_GetError());
         return 0;
     }
 
 #if defined(__ANDROID__) || defined(__IPHONEOS__)
     uint32_t win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
-    int init_w = 720, init_h = 1280;
+    int init_w = 0, init_h = 0;
 #else
     uint32_t win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
     int init_w = 540, init_h = 900;
@@ -171,10 +175,14 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games) {
     SDL_Window* win = SDL_CreateWindow("RMEXE Mobile Collection (PoN + LoN)",
                                        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        init_w, init_h, win_flags);
-    if (!win) return 0;
+    if (!win) {
+        SDL_Log("RMEXE Launcher SDL_CreateWindow failed: %s", SDL_GetError());
+        return 0;
+    }
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
     if (!ren) {
+        SDL_Log("RMEXE Launcher SDL_CreateRenderer failed: %s", SDL_GetError());
         SDL_DestroyWindow(win);
         return 0;
     }
@@ -191,8 +199,11 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games) {
     while (running) {
         int out_w = 0, out_h = 0;
         SDL_GetRendererOutputSize(ren, &out_w, &out_h);
-        if (out_w <= 0) out_w = init_w;
-        if (out_h <= 0) out_h = init_h;
+        if (out_w <= 0 || out_h <= 0) {
+            SDL_GetWindowSize(win, &out_w, &out_h);
+        }
+        if (out_w <= 0) out_w = 720;
+        if (out_h <= 0) out_h = 1280;
 
         const int pad = std::max(18, out_w / 18);
         const int header_h = std::max(72, out_h / 9);
@@ -277,9 +288,16 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games) {
         SDL_Delay(16);
     }
 
-    SDL_DestroyRenderer(ren);
-    SDL_DestroyWindow(win);
-    SDL_Quit();
+    if (chosen >= 0) {
+        // Keep the existing SDL_Window and SDL_Renderer alive for DojaRuntime
+        // (avoids tearing down Android Surface/GLES context between launcher and game).
+        out_win = win;
+        out_ren = ren;
+    } else {
+        SDL_DestroyRenderer(ren);
+        SDL_DestroyWindow(win);
+        SDL_Quit();
+    }
     return chosen;
 }
 
@@ -287,6 +305,7 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games) {
 } // namespace rmexe
 
 int main(int argc, char** argv) {
+    SDL_Log("RMEXE SDL_main starting...");
     std::string req_game;
     std::string data_dir;
     std::string asset_dir;
@@ -316,9 +335,10 @@ int main(int argc, char** argv) {
 
 #ifdef __ANDROID__
     if (data_dir.empty()) {
-        if (const char* ext = SDL_AndroidGetExternalStoragePath(); ext && *ext) data_dir = ext;
-        else if (const char* intr = SDL_AndroidGetInternalStoragePath(); intr && *intr) data_dir = intr;
+        if (const char* intr = SDL_AndroidGetInternalStoragePath(); intr && *intr) data_dir = intr;
+        else if (const char* ext = SDL_AndroidGetExternalStoragePath(); ext && *ext) data_dir = ext;
     }
+    SDL_Log("RMEXE Android data_dir=%s", data_dir.c_str());
     rmexe::bootstrap_android_assets(data_dir);
     if (asset_dir.empty()) asset_dir = data_dir;
 #elif defined(__IPHONEOS__)
@@ -361,9 +381,12 @@ int main(int argc, char** argv) {
         std::string jp = rmexe::resolve_entry_path(g.jar_rel, search_dir, base_dir);
         std::string sp = rmexe::resolve_entry_path(g.sp_rel, search_dir, base_dir);
         g.assets_ready = std::filesystem::is_regular_file(jp, ec) && std::filesystem::is_regular_file(sp, ec);
+        SDL_Log("RMEXE game=%s ready=%d jar=%s sp=%s", g.id, g.assets_ready ? 1 : 0, jp.c_str(), sp.c_str());
     }
 
     int pick = -1;
+    SDL_Window* shared_win = nullptr;
+    SDL_Renderer* shared_ren = nullptr;
     if (!req_game.empty()) {
         for (int i = 0; i < static_cast<int>(games.size()); ++i) {
             if (req_game == games[i].id) { pick = i; break; }
@@ -373,18 +396,23 @@ int main(int argc, char** argv) {
             if (games[i].assets_ready) { pick = i; break; }
         }
     } else {
-        pick = rmexe::run_collection_launcher(games);
+        pick = rmexe::run_collection_launcher(games, shared_win, shared_ren);
     }
 
     if (pick < 0 || pick >= static_cast<int>(games.size())) {
+        SDL_Log("RMEXE launcher exited without selecting a game (pick=%d)", pick);
         return 0;
     }
 
     const auto& chosen = games[pick];
     std::string jar_path = rmexe::resolve_entry_path(chosen.jar_rel, search_dir, base_dir);
     std::string sp_path = rmexe::resolve_entry_path(chosen.sp_rel, search_dir, base_dir);
+    SDL_Log("RMEXE launching %s (jar=%s, sp=%s)", chosen.id, jar_path.c_str(), sp_path.c_str());
 
     rmexe::DojaRuntime rt;
+    if (shared_win && shared_ren) {
+        rt.attach_external_sdl(shared_win, shared_ren);
+    }
     if (!data_dir.empty()) rt.set_data_dir(data_dir);
     if (!asset_dir.empty()) rt.set_asset_dir(asset_dir);
     rt.set_touch_controls(touch_mode);
@@ -395,6 +423,7 @@ int main(int argc, char** argv) {
     rt.set_game_module(chosen.mod);
 
     if (!rt.init(jar_path, sp_path, "", scale, chosen.title)) {
+        SDL_Log("RMEXE DojaRuntime::init FAILED for %s", chosen.id);
         return 1;
     }
 
@@ -403,9 +432,11 @@ int main(int argc, char** argv) {
         rmexe::Ref app = chosen.mod->create_app_main(rt);
         chosen.mod->start_app(rt, app);
     } catch (const rmexe::JavaException& ex) {
+        SDL_Log("RMEXE Uncaught JavaException ref=%d", ex.exc_ref);
         std::cerr << "[Uncaught JavaException] ref=" << ex.exc_ref << "\n";
         return 2;
     } catch (const std::exception& ex) {
+        SDL_Log("RMEXE Fatal Error: %s", ex.what());
         std::cerr << "[Fatal Error] " << ex.what() << "\n";
         return 3;
     }

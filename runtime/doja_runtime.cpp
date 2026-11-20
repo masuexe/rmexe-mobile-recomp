@@ -5903,11 +5903,10 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
     std::string base_dir = get_exe_base_dir();
 #ifdef __ANDROID__
     if (data_dir_.empty()) {
-        const char* ext = SDL_AndroidGetExternalStoragePath();
-        if (ext && *ext) {
-            data_dir_ = ext;
-        } else if (const char* intr = SDL_AndroidGetInternalStoragePath(); intr && *intr) {
+        if (const char* intr = SDL_AndroidGetInternalStoragePath(); intr && *intr) {
             data_dir_ = intr;
+        } else if (const char* ext = SDL_AndroidGetExternalStoragePath(); ext && *ext) {
+            data_dir_ = ext;
         }
     }
     if (asset_dir_.empty() && !data_dir_.empty()) {
@@ -6014,9 +6013,13 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
         SDL_SetHint(SDL_HINT_TIMER_RESOLUTION, "1");
 #endif
         SDL_SetHint(SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE, "1");
-        if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
+        const uint32_t want_sdl = SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER;
+        const uint32_t missing_sdl = want_sdl & ~SDL_WasInit(want_sdl);
+        if (missing_sdl != 0 && SDL_InitSubSystem(missing_sdl) != 0) {
+            SDL_Log("SDL_InitSubSystem warning: %s", SDL_GetError());
             std::cerr << "SDL_Init warning: " << SDL_GetError() << "\n";
-        } else {
+        }
+        if ((SDL_WasInit(SDL_INIT_VIDEO) & SDL_INIT_VIDEO) != 0) {
 #if defined(__linux__) && !defined(__ANDROID__)
             prctl(PR_SET_PDEATHSIG, SIGHUP);
 #endif
@@ -6032,31 +6035,43 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
             g_ui.open_controllers();
             int init_h = g_ui.show_softkey_bar ? 260 : 240;
             const char* wtitle = window_title.empty() ? "Rockman EXE Mobile Recomp (PoN / LoN)" : window_title.c_str();
+            SDL_Window* win = static_cast<SDL_Window*>(sdl_window_);
+            if (win) {
+                SDL_SetWindowTitle(win, wtitle);
+            } else {
 #if defined(__ANDROID__) || defined(__IPHONEOS__)
-            uint32_t win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+                uint32_t win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 #else
-            uint32_t win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
+                uint32_t win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
 #endif
-            SDL_Window* win = SDL_CreateWindow(
-                wtitle,
-                SDL_WINDOWPOS_CENTERED,
-                SDL_WINDOWPOS_CENTERED,
-                240 * window_scale_,
-                init_h * window_scale_,
-                win_flags
-            );
+                win = SDL_CreateWindow(
+                    wtitle,
+                    SDL_WINDOWPOS_CENTERED,
+                    SDL_WINDOWPOS_CENTERED,
+                    240 * window_scale_,
+                    init_h * window_scale_,
+                    win_flags
+                );
+            }
             if (win) {
                 sdl_window_ = win;
                 // Disable SDL2's default text-input mode during gameplay so Chinese IME never intercepts WASD/ZX/F1/Esc
                 SDL_StopTextInput();
-                SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+                SDL_Renderer* ren = static_cast<SDL_Renderer*>(sdl_renderer_);
                 if (!ren) {
-                    ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
+                    ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+                    if (!ren) {
+                        ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
+                    }
                 }
                 sdl_renderer_ = ren;
                 if (ren) {
-                    int init_s = g_ui.hd_font_mode ? hd_scale_ : 1;
-                    SDL_RenderSetLogicalSize(ren, 240 * init_s, init_h * init_s);
+                    if (!g_ui.touch.enabled()) {
+                        int init_s = g_ui.hd_font_mode ? hd_scale_ : 1;
+                        SDL_RenderSetLogicalSize(ren, 240 * init_s, init_h * init_s);
+                    } else {
+                        SDL_RenderSetLogicalSize(ren, 0, 0);
+                    }
                     sdl_texture_ = SDL_CreateTexture(
                         ren,
                         SDL_PIXELFORMAT_ARGB8888,
