@@ -299,7 +299,7 @@ def extract_game_json(
     if game == "pon":
         sp_fixed_specs.extend(
             [
-                (9, "mail_titles", 18, 1),
+                (9, "mail_titles", 30, 1),
                 (10, "mail_bodies", 30, 3),
             ]
         )
