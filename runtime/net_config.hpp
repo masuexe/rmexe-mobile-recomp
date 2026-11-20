@@ -27,4 +27,18 @@ void set_cli_translation_path(const std::string& path);
 void set_cli_font_mode(int mode);
 void set_cli_font_paths(const std::string& pixel_font, const std::string& hd_font);
 
+// CLI overrides for Assist / QoL Cheat settings (all persisted values remain intact unless overridden)
+void set_cli_assist_buster_mult(int32_t mult);
+void set_cli_assist_damage_pct(int32_t pct);
+void set_cli_assist_encounter_pct(int32_t pct);
+void set_cli_assist_wild_boss_only(bool en);
+void set_cli_assist_show_ex_boss(int32_t mode);
+void set_cli_assist_ex_boss_tier(int32_t tier);
+void set_cli_assist_zenny_pct(int32_t pct);
+void set_cli_assist_run_speed_pct(int32_t pct);
+void set_cli_assist_auto_full_hp(bool en);
+void set_cli_assist_always_escape(bool en);
+void set_cli_assist_custom_gauge_pct(int32_t pct);
+void set_cli_assist_drop_rank_mode(int32_t mode);
+
 } // namespace rmexe

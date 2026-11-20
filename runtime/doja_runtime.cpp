@@ -2636,6 +2636,23 @@ struct UiInputManager {
     uint32_t cli_pvp_room_id = 0;
     int cli_pvp_join_retries = 0;
 
+    AssistConfig assist_cfg;
+    AssistConfig cli_assist_cfg;
+    bool has_cli_assist_buster = false;
+    bool has_cli_assist_damage = false;
+    bool has_cli_assist_encounter = false;
+    bool has_cli_assist_wild_boss = false;
+    bool has_cli_assist_show_ex_boss = false;
+    bool has_cli_assist_ex_boss_tier = false;
+    bool has_cli_assist_zenny = false;
+    bool has_cli_assist_run_speed = false;
+    bool has_cli_assist_auto_full_hp = false;
+    bool has_cli_assist_always_escape = false;
+    bool has_cli_assist_custom_gauge = false;
+    bool has_cli_assist_drop_rank = false;
+    bool assist_hold_down = false;
+    AssistHudStatus assist_hud;
+
     std::string toast_text;
     int toast_frames = 0;
 
@@ -2668,6 +2685,7 @@ struct UiInputManager {
     }
 
     void clear_held_states() {
+        assist_hold_down = false;
         for (int i = 0; i < ACT_COUNT; ++i) {
             binds[i].key_down[0] = false;
             binds[i].key_down[1] = false;
@@ -2850,6 +2868,20 @@ struct UiInputManager {
         if (!cli_player_uid.empty()) player_uid = cli_player_uid;
         if (!cli_player_name.empty()) player_name = cli_player_name;
         g_pvp.set_preferred_format(pvp_bo3_mode ? pvp::PVP_FORMAT_TRIPLE : pvp::PVP_FORMAT_SINGLE);
+
+        if (has_cli_assist_buster) assist_cfg.buster_mult = cli_assist_cfg.buster_mult;
+        if (has_cli_assist_damage) assist_cfg.damage_taken_pct = cli_assist_cfg.damage_taken_pct;
+        if (has_cli_assist_encounter) assist_cfg.encounter_rate_pct = cli_assist_cfg.encounter_rate_pct;
+        if (has_cli_assist_wild_boss) assist_cfg.wild_boss_only = cli_assist_cfg.wild_boss_only;
+        if (has_cli_assist_show_ex_boss) assist_cfg.show_ex_boss = cli_assist_cfg.show_ex_boss;
+        if (has_cli_assist_ex_boss_tier) assist_cfg.ex_boss_tier = cli_assist_cfg.ex_boss_tier;
+        if (has_cli_assist_zenny) assist_cfg.zenny_rate_pct = cli_assist_cfg.zenny_rate_pct;
+        if (has_cli_assist_run_speed) assist_cfg.run_speed_pct = cli_assist_cfg.run_speed_pct;
+        if (has_cli_assist_auto_full_hp) assist_cfg.auto_full_hp = cli_assist_cfg.auto_full_hp;
+        if (has_cli_assist_always_escape) assist_cfg.always_escape = cli_assist_cfg.always_escape;
+        if (has_cli_assist_custom_gauge) assist_cfg.custom_gauge_pct = cli_assist_cfg.custom_gauge_pct;
+        if (has_cli_assist_drop_rank) assist_cfg.drop_rank_mode = cli_assist_cfg.drop_rank_mode;
+        assist_cfg.sanitize();
     }
 
     void load_config() {
@@ -2893,6 +2925,38 @@ struct UiInputManager {
                 pvp_bo3_mode = (std::atoi(val.c_str()) != 0);
             } else if (key == "language_mode") {
                 lang_mode = parse_lang_cfg(val);
+            } else if (key == "assist_master") {
+                assist_cfg.master_enabled = (std::atoi(val.c_str()) != 0);
+            } else if (key == "assist_hotkey_mode") {
+                assist_cfg.hotkey_mode = std::atoi(val.c_str());
+            } else if (key == "assist_buster_mult") {
+                assist_cfg.buster_mult = std::atoi(val.c_str());
+            } else if (key == "assist_last_buster_mult") {
+                assist_cfg.last_nonzero_buster_mult = std::atoi(val.c_str());
+            } else if (key == "assist_damage_pct") {
+                assist_cfg.damage_taken_pct = std::atoi(val.c_str());
+            } else if (key == "assist_encounter_pct") {
+                assist_cfg.encounter_rate_pct = std::atoi(val.c_str());
+            } else if (key == "assist_wild_boss_only") {
+                assist_cfg.wild_boss_only = (std::atoi(val.c_str()) != 0);
+            } else if (key == "assist_show_ex_boss") {
+                assist_cfg.show_ex_boss = std::atoi(val.c_str());
+            } else if (key == "assist_ex_boss_tier") {
+                assist_cfg.ex_boss_tier = std::atoi(val.c_str());
+            } else if (key == "assist_zenny_pct") {
+                assist_cfg.zenny_rate_pct = std::atoi(val.c_str());
+            } else if (key == "assist_run_speed_pct") {
+                assist_cfg.run_speed_pct = std::atoi(val.c_str());
+            } else if (key == "assist_auto_full_hp") {
+                assist_cfg.auto_full_hp = (std::atoi(val.c_str()) != 0);
+            } else if (key == "assist_always_escape") {
+                assist_cfg.always_escape = (std::atoi(val.c_str()) != 0);
+            } else if (key == "assist_custom_gauge_pct") {
+                assist_cfg.custom_gauge_pct = std::atoi(val.c_str());
+            } else if (key == "assist_drop_rank_mode") {
+                assist_cfg.drop_rank_mode = std::atoi(val.c_str());
+            } else if (key == "assist_show_hud") {
+                assist_cfg.show_assist_hud = (std::atoi(val.c_str()) != 0);
             } else {
                 for (int i = 0; i < ACT_COUNT; ++i) {
                     std::string pfx = std::string(binds[i].cfg_id) + "_";
@@ -2947,7 +3011,23 @@ struct UiInputManager {
         out << "player_uid=" << player_uid << "\n";
         out << "player_name=" << player_name << "\n";
         out << "pvp_bo3_mode=" << (pvp_bo3_mode ? 1 : 0) << "\n";
-        out << "language_mode=" << format_lang_cfg(lang_mode) << "\n\n";
+        out << "language_mode=" << format_lang_cfg(lang_mode) << "\n";
+        out << "assist_master=" << (assist_cfg.master_enabled ? 1 : 0) << "\n";
+        out << "assist_hotkey_mode=" << assist_cfg.hotkey_mode << "\n";
+        out << "assist_buster_mult=" << assist_cfg.buster_mult << "\n";
+        out << "assist_last_buster_mult=" << assist_cfg.last_nonzero_buster_mult << "\n";
+        out << "assist_damage_pct=" << assist_cfg.damage_taken_pct << "\n";
+        out << "assist_encounter_pct=" << assist_cfg.encounter_rate_pct << "\n";
+        out << "assist_wild_boss_only=" << (assist_cfg.wild_boss_only ? 1 : 0) << "\n";
+        out << "assist_show_ex_boss=" << assist_cfg.show_ex_boss << "\n";
+        out << "assist_ex_boss_tier=" << assist_cfg.ex_boss_tier << "\n";
+        out << "assist_zenny_pct=" << assist_cfg.zenny_rate_pct << "\n";
+        out << "assist_run_speed_pct=" << assist_cfg.run_speed_pct << "\n";
+        out << "assist_auto_full_hp=" << (assist_cfg.auto_full_hp ? 1 : 0) << "\n";
+        out << "assist_always_escape=" << (assist_cfg.always_escape ? 1 : 0) << "\n";
+        out << "assist_custom_gauge_pct=" << assist_cfg.custom_gauge_pct << "\n";
+        out << "assist_drop_rank_mode=" << assist_cfg.drop_rank_mode << "\n";
+        out << "assist_show_hud=" << (assist_cfg.show_assist_hud ? 1 : 0) << "\n\n";
         for (int i = 0; i < ACT_COUNT; ++i) {
             out << binds[i].cfg_id << "_key1=" << format_key_cfg(binds[i].keys[0]) << "\n";
             out << binds[i].cfg_id << "_key2=" << format_key_cfg(binds[i].keys[1]) << "\n";
@@ -3260,7 +3340,8 @@ struct UiInputManager {
                                 const uint32_t* game_hd_text,
                                 int cur_hd_scale,
                                 int32_t keypad_state,
-                                bool tick_toast = true) {
+                                bool tick_toast = true,
+                                bool hide_assist_hud = false) {
         hd_scale = std::clamp(cur_hd_scale, 2, 4);
         if (hd_font_mode) {
             int s = hd_scale;
@@ -3294,6 +3375,47 @@ struct UiInputManager {
         }
         if (show_softkey_bar) {
             render_softkey_bar(keypad_state);
+        }
+        if (!hide_assist_hud && !overlay_open) {
+            auto truncate_hud_text = [&](std::string txt, int max_px) {
+                while (measure_ui_text(txt) > max_px && txt.size() > 4) {
+                    pop_utf8_char(txt);
+                }
+                if (measure_ui_text(txt) > max_px) return std::string("...");
+                return txt;
+            };
+            if (!assist_hud.ranking_warning_banner.empty()) {
+                std::string rtxt = truncate_hud_text(assist_hud.ranking_warning_banner, 224);
+                int rtw = measure_ui_text(rtxt);
+                int rw = std::min(234, rtw + 10);
+                int rx = (240 - rw) / 2;
+                ui_fill_rect(rx, 2, rw, 15, 0xDC480A14u);
+                ui_draw_border(rx, 2, rw, 15, 0xFFFF5A5Au);
+                ui_draw_text(rtxt, rx + (rw - rtw) / 2, 13, 0xFFFFEA88u);
+            }
+            if (!assist_hud.ex_boss_banner.empty()) {
+                int ey = assist_hud.ranking_warning_banner.empty() ? 2 : 19;
+                std::string etxt = truncate_hud_text(assist_hud.ex_boss_banner, 224);
+                int ew = std::min(234, measure_ui_text(etxt) + 8);
+                ui_fill_rect(3, ey, ew, 14, 0xB80A1224u);
+                ui_draw_border(3, ey, ew, 14, assist_hud.ex_boss_color);
+                ui_draw_text(etxt, 7, ey + 11, assist_hud.ex_boss_color);
+            }
+            if (assist_cfg.show_assist_hud) {
+                std::string summary = assist_cfg.build_hud_summary(assist_hold_down, assist_hud.en_native_bas_max);
+                if (!summary.empty()) {
+                    if (measure_ui_text(summary) > 224) {
+                        while (measure_ui_text(summary + "..") > 224 && summary.size() > 3) {
+                            pop_utf8_char(summary);
+                        }
+                        summary += "..";
+                    }
+                    int sw = std::min(234, measure_ui_text(summary) + 8);
+                    ui_fill_rect(3, 224, sw, 14, 0xB00C162Au);
+                    ui_draw_border(3, 224, sw, 14, 0xFF4F88D8u);
+                    ui_draw_text(summary, 7, 235, 0xFF88FFAAu);
+                }
+            }
         }
         if (overlay_open) {
             render_overlay_onto_display_buf();
@@ -3429,24 +3551,34 @@ struct UiInputManager {
     // 7: 字体模式 (高清平滑 HD / 原版像素 12px)
     // 8: 底部软键栏
     // 9: 语言/汉化 (简体中文 / 原版 JP/EN)
-    // 10..21: Keybindings (ACT_COUNT = 12)
-    // 22: 恢复默认按键配置
-    // 23: 返回游戏 (Resume)
-    // 24: 保存进度并退出
-    static constexpr int BIND_START_ROW = 10;
-    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 22
-    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 25
+    // 10: 减负与作弊设置 (Submenu)
+    // 11..22: Keybindings (ACT_COUNT = 12)
+    // 23: 恢复默认按键配置
+    // 24: 返回游戏 (Resume)
+    // 25: 保存进度并退出
+    static constexpr int ASSIST_ROW_IDX = 10;
+    static constexpr int BIND_START_ROW = 11;
+    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 23
+    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 26
+    static constexpr int ASSIST_TOTAL_ROWS = 17;
     static constexpr int VISIBLE_ROWS = 9;
 
     bool overlay_open = false;
+    int overlay_page = 0; // 0 = Main/Keybindings, 1 = Assist/QoL Cheats
     int overlay_sel_row = 0;
     int overlay_sel_col = 0; // 0 = Key1, 1 = Key2, 2 = Pad
     int overlay_scroll_top = 0;
+    int overlay_main_sel_row = 0;
+    int overlay_main_scroll_top = 0;
     bool overlay_waiting_bind = false;
-    int overlay_text_edit_mode = 0; // 0 = none, 1 = server_url, 2 = player_name
+    int overlay_text_edit_mode = 0; // 0=none, 1=server_url, 2=player_name, 10..16=assist numeric
     std::string overlay_text_edit_buf;
     bool overlay_ignore_next_textinput = false;
     std::vector<pvp::PvpRoomInfo> overlay_open_rooms;
+
+    int current_total_rows() const {
+        return (overlay_page == 1) ? ASSIST_TOTAL_ROWS : TOTAL_ROWS;
+    }
 
     struct ProbeRequest {
         uint64_t seq = 0;
@@ -3741,13 +3873,103 @@ struct UiInputManager {
         }
     }
 
+    static void sanitize_numeric_append(std::string& dst, const char* src, bool allow_minus, size_t max_bytes) {
+        if (!src) return;
+        for (const unsigned char* p = reinterpret_cast<const unsigned char*>(src); *p; ++p) {
+            if (dst.size() >= max_bytes) break;
+            if (*p >= '0' && *p <= '9') {
+                dst.push_back(static_cast<char>(*p));
+            } else if (allow_minus && *p == '-' && dst.empty()) {
+                dst.push_back('-');
+            }
+        }
+    }
+
+    static int32_t cycle_int_preset(int32_t cur, const int32_t* presets, int count, int dir) {
+        int idx = -1;
+        for (int i = 0; i < count; ++i) {
+            if (presets[i] == cur) { idx = i; break; }
+        }
+        if (idx < 0) {
+            if (dir >= 0) {
+                for (int i = 0; i < count; ++i) {
+                    if (presets[i] > cur) return presets[i];
+                }
+                return presets[0];
+            } else {
+                for (int i = count - 1; i >= 0; --i) {
+                    if (presets[i] < cur) return presets[i];
+                }
+                return presets[count - 1];
+            }
+        }
+        return presets[(idx + dir + count) % count];
+    }
+
+    void toggle_assist_master() {
+        if (assist_cfg.hotkey_mode == 1) {
+            assist_cfg.hotkey_mode = 0;
+            assist_cfg.master_enabled = true;
+        } else {
+            assist_cfg.master_enabled = !assist_cfg.master_enabled;
+        }
+        assist_cfg.sanitize();
+        save_config();
+        show_toast(assist_cfg.master_enabled ? "减负辅助总开关: 开启" : "减负辅助总开关: 关闭", 90);
+    }
+
+    void toggle_assist_buster_quick() {
+        if (assist_cfg.buster_mult > 1) {
+            assist_cfg.last_nonzero_buster_mult = assist_cfg.buster_mult;
+            assist_cfg.buster_mult = 1;
+            assist_cfg.sanitize();
+            save_config();
+            show_toast("洛克炮强化: ×1 (原版)", 90);
+        } else {
+            assist_cfg.buster_mult = std::clamp<int32_t>(assist_cfg.last_nonzero_buster_mult, 2, 9999);
+            assist_cfg.master_enabled = true;
+            assist_cfg.sanitize();
+            save_config();
+            show_toast("洛克炮强化: ×" + std::to_string(assist_cfg.buster_mult), 90);
+        }
+    }
+
+    void cycle_assist_encounter_quick() {
+        std::string msg;
+        if (assist_cfg.wild_boss_only) {
+            assist_cfg.wild_boss_only = false;
+            assist_cfg.encounter_rate_pct = 500;
+            assist_cfg.master_enabled = true;
+            msg = "遇敌模式: 500% 高遇敌";
+        } else if (assist_cfg.encounter_rate_pct >= 200) {
+            assist_cfg.encounter_rate_pct = 100;
+            msg = "遇敌模式: 100% 原版";
+        } else if (assist_cfg.encounter_rate_pct == 0) {
+            assist_cfg.wild_boss_only = true;
+            assist_cfg.encounter_rate_pct = 100;
+            assist_cfg.master_enabled = true;
+            msg = "遇敌模式: 仅遇野生Boss (潜行)";
+        } else {
+            assist_cfg.wild_boss_only = false;
+            assist_cfg.encounter_rate_pct = 0;
+            assist_cfg.master_enabled = true;
+            msg = "遇敌模式: 0% 不遇敌";
+        }
+        assist_cfg.sanitize();
+        save_config();
+        show_toast(msg, 90);
+    }
+
     void open_overlay(bool allow_room_probe) {
         // Ensure OS IME preedit composition is stopped so F1/Esc/Arrow/Enter are never swallowed
         SDL_StopTextInput();
         clear_held_states();
+        overlay_page = 0;
         overlay_sel_row = 0;
         overlay_sel_col = 0;
         overlay_scroll_top = 0;
+        overlay_main_sel_row = 0;
+        overlay_main_scroll_top = 0;
         overlay_waiting_bind = false;
         overlay_text_edit_mode = 0;
         overlay_text_edit_buf.clear();
@@ -3824,13 +4046,21 @@ struct UiInputManager {
             return;
         }
         if (overlay_text_edit_mode != 0) {
-            size_t max_len = (overlay_text_edit_mode == 1) ? 44 : 18;
-            bool no_space = (overlay_text_edit_mode == 1);
+            const bool is_numeric = (overlay_text_edit_mode >= 10);
+            const size_t max_len = (overlay_text_edit_mode == 1) ? 44 : (is_numeric ? 6 : 18);
+            const bool no_space = (overlay_text_edit_mode == 1 || is_numeric);
+            auto append_edit_chars = [&](const char* txt) {
+                if (is_numeric) {
+                    sanitize_numeric_append(overlay_text_edit_buf, txt, overlay_text_edit_mode == 13, max_len);
+                } else {
+                    sanitize_append(overlay_text_edit_buf, txt, no_space, max_len);
+                }
+            };
             if (ev.type == SDL_TEXTINPUT) {
                 if (overlay_ignore_next_textinput) {
                     overlay_ignore_next_textinput = false;
                 } else {
-                    sanitize_append(overlay_text_edit_buf, ev.text.text, no_space, max_len);
+                    append_edit_chars(ev.text.text);
                 }
             } else if (ev.type == SDL_KEYDOWN) {
                 overlay_ignore_next_textinput = false;
@@ -3854,12 +4084,62 @@ struct UiInputManager {
                             } else {
                                 show_toast("请先退出当前对战房间再修改地址", 90);
                             }
-                        } else {
+                        } else if (overlay_text_edit_mode == 2) {
                             player_name = trimmed;
                             save_config();
                             overlay_text_edit_mode = 0;
                             SDL_StopTextInput();
                             show_toast("玩家昵称已更新: " + player_name, 90);
+                        } else if (is_numeric && trimmed != "-") {
+                            int32_t val = static_cast<int32_t>(std::atoi(trimmed.c_str()));
+                            std::string msg;
+                            switch (overlay_text_edit_mode) {
+                                case 10:
+                                    assist_cfg.buster_mult = val;
+                                    assist_cfg.sanitize();
+                                    msg = "洛克炮倍率: ×" + std::to_string(assist_cfg.buster_mult);
+                                    break;
+                                case 11:
+                                    assist_cfg.damage_taken_pct = val;
+                                    assist_cfg.sanitize();
+                                    msg = "受伤倍率: " + std::to_string(assist_cfg.damage_taken_pct) + "%";
+                                    break;
+                                case 12:
+                                    assist_cfg.encounter_rate_pct = val;
+                                    assist_cfg.sanitize();
+                                    msg = "遇敌率: " + std::to_string(assist_cfg.encounter_rate_pct) + "%";
+                                    break;
+                                case 13:
+                                    assist_cfg.ex_boss_tier = val;
+                                    assist_cfg.sanitize();
+                                    msg = (assist_cfg.ex_boss_tier < 0)
+                                        ? "EX Boss形态: 自动"
+                                        : ("EX Boss形态: V" + std::to_string(assist_cfg.ex_boss_tier + 1));
+                                    break;
+                                case 14:
+                                    assist_cfg.zenny_rate_pct = val;
+                                    assist_cfg.sanitize();
+                                    msg = "金钱倍率: " + std::to_string(assist_cfg.zenny_rate_pct) + "%";
+                                    break;
+                                case 15:
+                                    assist_cfg.run_speed_pct = val;
+                                    assist_cfg.sanitize();
+                                    msg = "跑步速度: " + std::to_string(assist_cfg.run_speed_pct) + "%";
+                                    break;
+                                case 16:
+                                    assist_cfg.custom_gauge_pct = val;
+                                    assist_cfg.sanitize();
+                                    msg = "自定义槽速度: " + std::to_string(assist_cfg.custom_gauge_pct) + "%";
+                                    break;
+                                default: break;
+                            }
+                            save_config();
+                            overlay_text_edit_mode = 0;
+                            SDL_StopTextInput();
+                            if (!msg.empty()) show_toast(msg, 90);
+                        } else {
+                            overlay_text_edit_mode = 0;
+                            SDL_StopTextInput();
                         }
                     } else {
                         overlay_text_edit_mode = 0;
@@ -3874,7 +4154,7 @@ struct UiInputManager {
                     if (SDL_HasClipboardText()) {
                         char* clip = SDL_GetClipboardText();
                         if (clip) {
-                            sanitize_append(overlay_text_edit_buf, clip, no_space, max_len);
+                            append_edit_chars(clip);
                             SDL_free(clip);
                         }
                     }
@@ -3919,7 +4199,115 @@ struct UiInputManager {
                 overlay_waiting_bind = false;
             }
         } else {
+            auto enter_assist_page = [&]() {
+                overlay_main_sel_row = overlay_sel_row;
+                overlay_main_scroll_top = overlay_scroll_top;
+                overlay_page = 1;
+                overlay_sel_row = 0;
+                overlay_scroll_top = 0;
+            };
+            auto exit_assist_page = [&]() {
+                overlay_page = 0;
+                overlay_sel_row = overlay_main_sel_row;
+                overlay_scroll_top = overlay_main_scroll_top;
+            };
+            auto start_num_edit = [&](int mode, int32_t init_val) {
+                overlay_text_edit_mode = mode;
+                overlay_text_edit_buf = std::to_string(init_val);
+                overlay_ignore_next_textinput = true;
+                SDL_StartTextInput();
+            };
+
+            auto adjust_assist_lr = [&](int dir) {
+                static constexpr int32_t kBusterPresets[] = {1, 2, 3, 5, 10, 50, 100};
+                static constexpr int32_t kDmgPresets[] = {100, 80, 60, 40, 20, 0};
+                static constexpr int32_t kEncPresets[] = {0, 50, 100, 200, 500, 10000};
+                static constexpr int32_t kTierPresets[] = {-1, 0, 1, 2, 3};
+                static constexpr int32_t kZennyPresets[] = {100, 200, 300, 400, 500, 1000};
+                static constexpr int32_t kSpeedPresets[] = {100, 125, 150, 200, 250, 300};
+                static constexpr int32_t kCusPresets[] = {100, 200, 300, 500, 1000};
+                switch (overlay_sel_row) {
+                    case 0:
+                        assist_cfg.master_enabled = !assist_cfg.master_enabled;
+                        break;
+                    case 1:
+                        assist_cfg.hotkey_mode = (assist_cfg.hotkey_mode + dir + 2) % 2;
+                        break;
+                    case 2:
+                        assist_cfg.buster_mult = cycle_int_preset(assist_cfg.buster_mult, kBusterPresets, 7, dir);
+                        break;
+                    case 3:
+                        assist_cfg.damage_taken_pct = cycle_int_preset(assist_cfg.damage_taken_pct, kDmgPresets, 6, dir);
+                        break;
+                    case 4:
+                        assist_cfg.encounter_rate_pct = cycle_int_preset(assist_cfg.encounter_rate_pct, kEncPresets, 6, dir);
+                        break;
+                    case 5:
+                        assist_cfg.wild_boss_only = !assist_cfg.wild_boss_only;
+                        break;
+                    case 6:
+                        assist_cfg.show_ex_boss = (assist_cfg.show_ex_boss + dir + 3) % 3;
+                        break;
+                    case 7:
+                        assist_cfg.ex_boss_tier = cycle_int_preset(assist_cfg.ex_boss_tier, kTierPresets, 5, dir);
+                        break;
+                    case 8:
+                        assist_cfg.zenny_rate_pct = cycle_int_preset(assist_cfg.zenny_rate_pct, kZennyPresets, 6, dir);
+                        break;
+                    case 9:
+                        assist_cfg.run_speed_pct = cycle_int_preset(assist_cfg.run_speed_pct, kSpeedPresets, 6, dir);
+                        break;
+                    case 10:
+                        assist_cfg.auto_full_hp = !assist_cfg.auto_full_hp;
+                        break;
+                    case 11:
+                        assist_cfg.always_escape = !assist_cfg.always_escape;
+                        break;
+                    case 12:
+                        assist_cfg.custom_gauge_pct = cycle_int_preset(assist_cfg.custom_gauge_pct, kCusPresets, 5, dir);
+                        break;
+                    case 13:
+                        assist_cfg.drop_rank_mode = (assist_cfg.drop_rank_mode + dir + 3) % 3;
+                        break;
+                    case 14:
+                        assist_cfg.show_assist_hud = !assist_cfg.show_assist_hud;
+                        break;
+                    default:
+                        return;
+                }
+                assist_cfg.sanitize();
+                save_config();
+            };
+
+            auto activate_assist_row = [&]() {
+                switch (overlay_sel_row) {
+                    case 0: case 1: case 5: case 6: case 10: case 11: case 13: case 14:
+                        adjust_assist_lr(1);
+                        break;
+                    case 2: start_num_edit(10, assist_cfg.buster_mult); break;
+                    case 3: start_num_edit(11, assist_cfg.damage_taken_pct); break;
+                    case 4: start_num_edit(12, assist_cfg.encounter_rate_pct); break;
+                    case 7: start_num_edit(13, assist_cfg.ex_boss_tier); break;
+                    case 8: start_num_edit(14, assist_cfg.zenny_rate_pct); break;
+                    case 9: start_num_edit(15, assist_cfg.run_speed_pct); break;
+                    case 12: start_num_edit(16, assist_cfg.custom_gauge_pct); break;
+                    case 15:
+                        assist_cfg.reset_to_vanilla();
+                        save_config();
+                        show_toast("已将全部减负辅助恢复原版默认", 90);
+                        break;
+                    case 16:
+                        exit_assist_page();
+                        break;
+                    default: break;
+                }
+            };
+
             auto adjust_row_lr = [&](int dir) {
+                if (overlay_page == 1) {
+                    adjust_assist_lr(dir);
+                    return;
+                }
                 if (overlay_sel_row == 0 && !g_pvp.active()) {
                     if (online_mode && !is_probe_inflight()) {
                         uint64_t now = pvp::steady_millis();
@@ -3952,11 +4340,17 @@ struct UiInputManager {
                     save_config();
                 } else if (overlay_sel_row == 9) {
                     toggle_language_mode();
+                } else if (overlay_sel_row == ASSIST_ROW_IDX) {
+                    enter_assist_page();
                 } else if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
                     overlay_sel_col = (overlay_sel_col + dir + 3) % 3;
                 }
             };
             auto activate_row = [&]() {
+                if (overlay_page == 1) {
+                    activate_assist_row();
+                    return;
+                }
                 if (overlay_sel_row == 0) {
                     exec_pvp_action();
                 } else if (overlay_sel_row == 1) {
@@ -3993,6 +4387,8 @@ struct UiInputManager {
                     save_config();
                 } else if (overlay_sel_row == 9) {
                     toggle_language_mode();
+                } else if (overlay_sel_row == ASSIST_ROW_IDX) {
+                    enter_assist_page();
                 } else if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
                     overlay_waiting_bind = true;
                 } else if (overlay_sel_row == BIND_END_ROW) {
@@ -4012,21 +4408,33 @@ struct UiInputManager {
                        (binds[act_idx].keys[1] != SDLK_UNKNOWN && binds[act_idx].keys[1] == k);
             };
 
+            const int cur_total = current_total_rows();
             if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
                 SDL_Keycode k = ev.key.keysym.sym;
-                bool in_bind_rows = (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW);
-                if (k == SDLK_F1 || k == SDLK_ESCAPE || (!in_bind_rows && matches_act(ACT_CANCEL, k))) {
+                bool in_bind_rows = (overlay_page == 0 && overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW);
+                if (k == SDLK_F1) {
                     close_overlay();
+                } else if (k == SDLK_ESCAPE || (!in_bind_rows && matches_act(ACT_CANCEL, k))) {
+                    if (overlay_page == 1) exit_assist_page();
+                    else close_overlay();
+                } else if (k == SDLK_BACKSPACE && overlay_page == 1) {
+                    exit_assist_page();
                 } else if (k == SDLK_F3) {
                     toggle_fps_mode();
                 } else if (k == SDLK_F4) {
                     toggle_language_mode();
                 } else if (k == SDLK_F5) {
                     toggle_font_mode();
+                } else if (k == SDLK_F6) {
+                    toggle_assist_master();
+                } else if (k == SDLK_F7) {
+                    toggle_assist_buster_quick();
+                } else if (k == SDLK_F8) {
+                    cycle_assist_encounter_quick();
                 } else if (k == SDLK_UP || matches_act(ACT_UP, k)) {
-                    overlay_sel_row = (overlay_sel_row - 1 + TOTAL_ROWS) % TOTAL_ROWS;
+                    overlay_sel_row = (overlay_sel_row - 1 + cur_total) % cur_total;
                 } else if (k == SDLK_DOWN || matches_act(ACT_DOWN, k)) {
-                    overlay_sel_row = (overlay_sel_row + 1) % TOTAL_ROWS;
+                    overlay_sel_row = (overlay_sel_row + 1) % cur_total;
                 } else if (k == SDLK_LEFT || matches_act(ACT_LEFT, k)) {
                     adjust_row_lr(-1);
                 } else if (k == SDLK_RIGHT || matches_act(ACT_RIGHT, k)) {
@@ -4045,9 +4453,9 @@ struct UiInputManager {
             } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
                 switch (ev.cbutton.button) {
                     case SDL_CONTROLLER_BUTTON_DPAD_UP:
-                        overlay_sel_row = (overlay_sel_row - 1 + TOTAL_ROWS) % TOTAL_ROWS; break;
+                        overlay_sel_row = (overlay_sel_row - 1 + cur_total) % cur_total; break;
                     case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-                        overlay_sel_row = (overlay_sel_row + 1) % TOTAL_ROWS; break;
+                        overlay_sel_row = (overlay_sel_row + 1) % cur_total; break;
                     case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
                         adjust_row_lr(-1); break;
                     case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
@@ -4055,6 +4463,9 @@ struct UiInputManager {
                     case SDL_CONTROLLER_BUTTON_A:
                         activate_row(); break;
                     case SDL_CONTROLLER_BUTTON_B:
+                        if (overlay_page == 1) exit_assist_page();
+                        else close_overlay();
+                        break;
                     case SDL_CONTROLLER_BUTTON_START:
                         close_overlay(); break;
                     default: break;
@@ -4073,32 +4484,158 @@ struct UiInputManager {
         // Title bar
         ui_fill_rect(4, 4, 232, 18, live_pvp ? 0xFF14362Au : 0xFF1A284Au);
         ui_draw_border(4, 4, 232, 18, live_pvp ? 0xFF4CC88Au : 0xFF4F78C8u);
-        std::string title = live_pvp
-            ? (g_pvp.match_started() ? "联机菜单 — 对战后台运行中 (F1关闭)" : "联机菜单 — 房间等待中 (F1关闭)")
-            : "联机对战与模拟器设置 (F1 / Esc)";
+        std::string title;
+        if (overlay_page == 1) {
+            title = live_pvp ? "减负设置 (联机PvP期间自动禁用)" : "减负与作弊设置 (Enter手输 / ←→切)";
+        } else {
+            title = live_pvp
+                ? (g_pvp.match_started() ? "联机菜单 — 对战后台运行中 (F1关闭)" : "联机菜单 — 房间等待中 (F1关闭)")
+                : "联机对战与模拟器设置 (F1 / Esc)";
+        }
         ui_draw_text(title, 120 - measure_ui_text(title) / 2, 17, 0xFFFFFFFFu);
 
         // Dynamic section header
-        if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
+        if (overlay_page == 0 && overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
             ui_draw_text("动作",  8,   34, 0xFF8EB0E8u);
             ui_draw_text("键位1", 80,  34, 0xFF8EB0E8u);
             ui_draw_text("键位2", 136, 34, 0xFF8EB0E8u);
             ui_draw_text("手柄",  192, 34, 0xFF8EB0E8u);
+        } else if (overlay_page == 1) {
+            ui_draw_text("减负项目", 8, 34, 0xFF8EB0E8u);
+            ui_draw_text("当前倍率/状态 (Enter手输)", 84, 34, 0xFF8EB0E8u);
         } else {
             ui_draw_text("功能选项", 8, 34, 0xFF8EB0E8u);
             ui_draw_text("当前设置 (Enter / ←→)", 84, 34, 0xFF8EB0E8u);
         }
         ui_fill_rect(6, 37, 228, 1, 0xFF324672u);
 
+        const int cur_total = current_total_rows();
         // Rows viewport (y = 40 .. 193, 9 rows * 17px)
         for (int vi = 0; vi < VISIBLE_ROWS; ++vi) {
             int r = overlay_scroll_top + vi;
-            if (r >= TOTAL_ROWS) break;
+            if (r >= cur_total) break;
             int ry = 40 + vi * 17;
             bool is_sel = (r == overlay_sel_row);
             if (is_sel) {
                 ui_fill_rect(5, ry, 226, 16, 0xFF223A6Au);
                 ui_draw_border(5, ry, 226, 16, 0xFF5A8AE0u);
+            }
+
+            if (overlay_page == 1) {
+                std::string label;
+                std::string val_str;
+                uint32_t vcol = 0xFFD0DCF0u;
+                bool centered = false;
+                switch (r) {
+                    case 0:
+                        label = "辅助总开关";
+                        if (assist_cfg.hotkey_mode == 1) {
+                            val_str = assist_hold_down ? "< 按住F6生效中 >" : "< 待命(按住F6) >";
+                            vcol = assist_hold_down ? 0xFF88FFAAu : 0xFFFFD874u;
+                        } else {
+                            val_str = assist_cfg.master_enabled ? "< 开启 >" : "< 关闭 >";
+                            vcol = assist_cfg.master_enabled ? 0xFF88FFAAu : 0xFFFF8888u;
+                        }
+                        break;
+                    case 1:
+                        label = "F6热键模式";
+                        val_str = (assist_cfg.hotkey_mode == 1) ? "< 按住生效(Hold) >" : "< 点按切换(Trigger) >";
+                        vcol = (assist_cfg.hotkey_mode == 1) ? 0xFF74D8FFu : 0xFF88FFAAu;
+                        break;
+                    case 2:
+                        label = "洛克炮倍率";
+                        if (assist_cfg.buster_mult == 1) { val_str = "< ×1 (原版) >"; vcol = 0xFF98A8C0u; }
+                        else if (assist_cfg.buster_mult == 100) { val_str = "< ×100 (百倍炮) >"; vcol = 0xFFFFD874u; }
+                        else { val_str = "< ×" + std::to_string(assist_cfg.buster_mult) + " >"; vcol = 0xFFFFD874u; }
+                        break;
+                    case 3:
+                        label = "受伤倍率";
+                        if (assist_cfg.damage_taken_pct == 100) { val_str = "< 100% (原版) >"; vcol = 0xFF98A8C0u; }
+                        else if (assist_cfg.damage_taken_pct == 0) { val_str = "< 0% (无伤) >"; vcol = 0xFF88FFAAu; }
+                        else { val_str = "< " + std::to_string(assist_cfg.damage_taken_pct) + "% >"; vcol = (assist_cfg.damage_taken_pct < 100) ? 0xFF88FFAAu : 0xFFFF9874u; }
+                        break;
+                    case 4:
+                        label = "遇敌率倍率";
+                        if (assist_cfg.encounter_rate_pct == 100) { val_str = "< 100% (原版) >"; vcol = 0xFF98A8C0u; }
+                        else if (assist_cfg.encounter_rate_pct == 0) { val_str = "< 0% (不遇敌) >"; vcol = 0xFF74D8FFu; }
+                        else if (assist_cfg.encounter_rate_pct >= 10000) { val_str = "< 10000% (步步遇) >"; vcol = 0xFFFFD874u; }
+                        else { val_str = "< " + std::to_string(assist_cfg.encounter_rate_pct) + "% >"; vcol = 0xFFFFD874u; }
+                        break;
+                    case 5:
+                        label = "仅遇野生Boss";
+                        val_str = assist_cfg.wild_boss_only ? "< 开启 (潜行锁定) >" : "< 关闭 >";
+                        vcol = assist_cfg.wild_boss_only ? 0xFF88FFAAu : 0xFF98A8C0u;
+                        break;
+                    case 6:
+                        label = "隐藏EX Boss";
+                        if (assist_cfg.show_ex_boss == 0) { val_str = "< 关闭 >"; vcol = 0xFF98A8C0u; }
+                        else if (assist_cfg.show_ex_boss == 1) { val_str = "< 雷达提示 >"; vcol = 0xFF74D8FFu; }
+                        else { val_str = "< 雷达+无视剧情解锁 >"; vcol = 0xFFFFD874u; }
+                        break;
+                    case 7:
+                        label = "EX Boss形态";
+                        if (assist_cfg.ex_boss_tier < 0) { val_str = "< 自动 (按存档) >"; vcol = 0xFF98A8C0u; }
+                        else {
+                            static const char* kTierNames[4] = {"V1 (初遇)", "V2 (强化)", "V3 (EX)", "SP (最强)"};
+                            val_str = std::string("< ") + kTierNames[std::clamp(assist_cfg.ex_boss_tier, 0, 3)] + " >";
+                            vcol = 0xFFFFD874u;
+                        }
+                        break;
+                    case 8:
+                        label = "金钱倍率";
+                        val_str = (assist_cfg.zenny_rate_pct == 100) ? "< 100% (原版) >" : ("< " + std::to_string(assist_cfg.zenny_rate_pct) + "% >");
+                        vcol = (assist_cfg.zenny_rate_pct == 100) ? 0xFF98A8C0u : 0xFFFFD874u;
+                        break;
+                    case 9:
+                        label = "跑步速度";
+                        val_str = (assist_cfg.run_speed_pct == 100) ? "< 100% (原版) >" : ("< " + std::to_string(assist_cfg.run_speed_pct) + "% >");
+                        vcol = (assist_cfg.run_speed_pct == 100) ? 0xFF98A8C0u : 0xFF88FFAAu;
+                        break;
+                    case 10:
+                        label = "战后自动满血";
+                        val_str = assist_cfg.auto_full_hp ? "< 开启 >" : "< 关闭 >";
+                        vcol = assist_cfg.auto_full_hp ? 0xFF88FFAAu : 0xFF98A8C0u;
+                        break;
+                    case 11:
+                        label = "必定逃跑成功";
+                        val_str = assist_cfg.always_escape ? "< 开启 >" : "< 关闭 >";
+                        vcol = assist_cfg.always_escape ? 0xFF88FFAAu : 0xFF98A8C0u;
+                        break;
+                    case 12:
+                        label = "自定义槽加速";
+                        val_str = (assist_cfg.custom_gauge_pct == 100) ? "< 100% (原版) >" : ("< " + std::to_string(assist_cfg.custom_gauge_pct) + "% >");
+                        vcol = (assist_cfg.custom_gauge_pct == 100) ? 0xFF98A8C0u : 0xFF74D8FFu;
+                        break;
+                    case 13:
+                        label = "芯片掉率/评价";
+                        if (assist_cfg.drop_rank_mode == 0) { val_str = "< 原版 >"; vcol = 0xFF98A8C0u; }
+                        else if (assist_cfg.drop_rank_mode == 1) { val_str = "< 必掉芯片 >"; vcol = 0xFF88FFAAu; }
+                        else { val_str = "< 强制S级+必掉 >"; vcol = 0xFFFFD874u; }
+                        break;
+                    case 14:
+                        label = "辅助角标提示";
+                        val_str = assist_cfg.show_assist_hud ? "< 开启 >" : "< 关闭 >";
+                        vcol = assist_cfg.show_assist_hud ? 0xFF88FFAAu : 0xFF98A8C0u;
+                        break;
+                    case 15:
+                        val_str = "[ 全部恢复原版默认 ]";
+                        vcol = is_sel ? 0xFFFFD866u : 0xFFC8D8F8u;
+                        centered = true;
+                        break;
+                    case 16:
+                        val_str = "[ 返回主设置菜单 ]";
+                        vcol = is_sel ? 0xFF88FFAAu : 0xFFC8D8F8u;
+                        centered = true;
+                        break;
+                }
+                if (centered) {
+                    ui_draw_text(val_str, 120 - measure_ui_text(val_str) / 2, ry + 12, vcol);
+                } else {
+                    ui_draw_text(label, 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                    int vx = std::max(84, std::min(92, 228 - measure_ui_text(val_str)));
+                    ui_draw_text(val_str, vx, ry + 12, vcol);
+                }
+                continue;
             }
 
             if (r == 0) {
@@ -4189,6 +4726,14 @@ struct UiInputManager {
                     lcol = 0xFFFFD874u;
                 }
                 ui_draw_text(lstr, 84, ry + 12, lcol);
+            } else if (r == ASSIST_ROW_IDX) {
+                ui_draw_text("减负辅助", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFFFE484u);
+                int cnt = assist_cfg.active_cheat_count();
+                std::string astr = (cnt > 0)
+                    ? ("[ 进入设置 (已开" + std::to_string(cnt) + "项) > ]")
+                    : "[ 进入减负与作弊设置 > ]";
+                uint32_t acol = (cnt > 0) ? 0xFFFFD874u : 0xFF74D8FFu;
+                ui_draw_text(astr, 84, ry + 12, acol);
             } else if (r >= BIND_START_ROW && r < BIND_END_ROW) {
                 int bi = r - BIND_START_ROW;
                 ui_draw_text(binds[bi].label_zh, 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
@@ -4223,40 +4768,64 @@ struct UiInputManager {
 
         // Scrollbar track on right edge
         ui_fill_rect(233, 40, 3, VISIBLE_ROWS * 17, 0xFF182238u);
-        int sb_h = std::max(14, (VISIBLE_ROWS * 17 * VISIBLE_ROWS) / TOTAL_ROWS);
-        int sb_y = 40 + ((VISIBLE_ROWS * 17 - sb_h) * overlay_scroll_top) / std::max(1, TOTAL_ROWS - VISIBLE_ROWS);
+        int sb_h = std::max(14, (VISIBLE_ROWS * 17 * VISIBLE_ROWS) / cur_total);
+        int sb_y = 40 + ((VISIBLE_ROWS * 17 - sb_h) * overlay_scroll_top) / std::max(1, cur_total - VISIBLE_ROWS);
         ui_fill_rect(233, sb_y, 3, sb_h, 0xFF6894E0u);
 
         // Footer instructions
         ui_fill_rect(6, 196, 228, 1, 0xFF324672u);
-        if (overlay_sel_row == 1) {
-            if (live_pvp) {
-                ui_draw_text("当前房间赛制已锁定 (退出房间后可修改)", 6, 211, 0xFF88FFAAu);
+        if (overlay_page == 1) {
+            if (overlay_sel_row == 2 || overlay_sel_row == 3) {
+                ui_draw_text("Enter:手输数值  ←→:预设  (影响排行记录)", 6, 211, 0xFFFFB060u);
+            } else if (overlay_sel_row == 4 || overlay_sel_row == 7 || overlay_sel_row == 8 ||
+                       overlay_sel_row == 9 || overlay_sel_row == 12) {
+                ui_draw_text("Enter:手动输入数值  ←→:预设档位切换", 10, 211, 0xFF88EEFFu);
             } else {
-                ui_draw_text("←→/Enter:切换 一回战 / 三回战(BO3)", 12, 211, 0xFFFFD874u);
+                ui_draw_text("Enter/←→:切换开关  Esc/取消:返回主菜单", 8, 211, 0xFFA4BCE4u);
             }
-        } else if (overlay_sel_row == 2) {
-            ui_draw_text("Enter:手动输入/粘贴地址  ←→:预设切换", 6, 211, 0xFF88EEFFu);
-        } else if (overlay_sel_row == 3) {
-            ui_draw_text("Enter:输入/粘贴昵称 (自动保存)", 14, 211, 0xFFFFEC88u);
-        } else if (overlay_sel_row == 0) {
-            if (live_pvp) {
-                ui_draw_text("Enter:立即退出房间   F1/Esc:继续对战", 10, 211, 0xFF88FFAAu);
-            } else {
-                ui_draw_text("←→:建房/快速配对/选房  Enter:出发!", 12, 211, 0xFFFFE484u);
-            }
+            ui_draw_text("联机PvP自动禁用 | F6总开关 F7炮 F8遇敌", 4, 227, 0xFF849AC0u);
         } else {
-            ui_draw_text("↑↓:选择  ←→:切换  Enter:确认/改键", 9, 211, 0xFFA4BCE4u);
+            if (overlay_sel_row == 1) {
+                if (live_pvp) {
+                    ui_draw_text("当前房间赛制已锁定 (退出房间后可修改)", 6, 211, 0xFF88FFAAu);
+                } else {
+                    ui_draw_text("←→/Enter:切换 一回战 / 三回战(BO3)", 12, 211, 0xFFFFD874u);
+                }
+            } else if (overlay_sel_row == 2) {
+                ui_draw_text("Enter:手动输入/粘贴地址  ←→:预设切换", 6, 211, 0xFF88EEFFu);
+            } else if (overlay_sel_row == 3) {
+                ui_draw_text("Enter:输入/粘贴昵称 (自动保存)", 14, 211, 0xFFFFEC88u);
+            } else if (overlay_sel_row == ASSIST_ROW_IDX) {
+                ui_draw_text("Enter:进入百倍炮/减伤/Boss潜行等设置", 8, 211, 0xFFFFD874u);
+            } else if (overlay_sel_row == 0) {
+                if (live_pvp) {
+                    ui_draw_text("Enter:立即退出房间   F1/Esc:继续对战", 10, 211, 0xFF88FFAAu);
+                } else {
+                    ui_draw_text("←→:建房/快速配对/选房  Enter:出发!", 12, 211, 0xFFFFE484u);
+                }
+            } else {
+                ui_draw_text("↑↓:选择  ←→:切换  Enter:确认/改键", 9, 211, 0xFFA4BCE4u);
+            }
+            ui_draw_text("F3帧 F4汉 F5字 F6辅 F7炮 F8遇 F11全屏", 3, 227, 0xFF849AC0u);
         }
-        ui_draw_text("↓改键 | F3帧 F4汉 F5字 F11全屏 F12截图", 3, 227, 0xFF849AC0u);
 
-        // Text input modal popup (Server URL / Player Nickname)
+        // Text / numeric input modal popup
         if (overlay_text_edit_mode != 0) {
             ui_fill_rect(8, 62, 224, 106, 0xF60C162Cu);
             ui_draw_border(8, 62, 224, 106, 0xFF68B8FFu);
-            std::string hdr = (overlay_text_edit_mode == 1)
-                ? "输入服务器地址 (IP:端口)"
-                : "输入联机玩家昵称";
+            std::string hdr;
+            switch (overlay_text_edit_mode) {
+                case 1:  hdr = "输入服务器地址 (IP:端口)"; break;
+                case 2:  hdr = "输入联机玩家昵称"; break;
+                case 10: hdr = "输入洛克炮倍率 (1 ~ 9999)"; break;
+                case 11: hdr = "输入受伤倍率% (0无伤 ~ 500)"; break;
+                case 12: hdr = "输入遇敌率% (0~10000)"; break;
+                case 13: hdr = "输入EX Boss形态 (-1自动 / 0~3)"; break;
+                case 14: hdr = "输入金钱倍率% (0 ~ 10000)"; break;
+                case 15: hdr = "输入跑步速度% (50 ~ 500)"; break;
+                case 16: hdr = "输入自定义槽速度% (50 ~ 10000)"; break;
+                default: hdr = "输入数值"; break;
+            }
             ui_draw_text(hdr, 120 - measure_ui_text(hdr) / 2, 82, 0xFFFFE070u);
 
             ui_fill_rect(16, 94, 208, 24, 0xFF060B18u);
@@ -4267,14 +4836,17 @@ struct UiInputManager {
             }
             ui_draw_text(cursor_txt, 22, 111, 0xFFFFFFFFu);
 
-            std::string h1 = "支持直接打字或 Ctrl+V 粘贴剪贴板";
+            std::string h1 = (overlay_text_edit_mode >= 10)
+                ? "请直接输入数字 (支持 Ctrl+V 粘贴)"
+                : "支持直接打字或 Ctrl+V 粘贴剪贴板";
             std::string h2 = "Enter:保存  Bksp:退格  Esc:取消";
             ui_draw_text(h1, 120 - measure_ui_text(h1) / 2, 136, 0xFF88CCFFu);
             ui_draw_text(h2, 120 - measure_ui_text(h2) / 2, 155, 0xFFA0B8E0u);
         }
 
         // Waiting for key modal popup
-        if (overlay_waiting_bind && overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
+        if (overlay_waiting_bind && overlay_page == 0 &&
+            overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
             int bi = overlay_sel_row - BIND_START_ROW;
             ui_fill_rect(12, 72, 216, 86, 0xF4101830u);
             ui_draw_border(12, 72, 216, 86, 0xFFFFD24Cu);
@@ -5038,6 +5610,31 @@ void set_cli_pvp_bo3(bool v) {
     }
 }
 
+void set_cli_assist_buster_mult(int32_t mult) { g_ui.has_cli_assist_buster = true; g_ui.cli_assist_cfg.buster_mult = mult; }
+void set_cli_assist_damage_pct(int32_t pct) { g_ui.has_cli_assist_damage = true; g_ui.cli_assist_cfg.damage_taken_pct = pct; }
+void set_cli_assist_encounter_pct(int32_t pct) { g_ui.has_cli_assist_encounter = true; g_ui.cli_assist_cfg.encounter_rate_pct = pct; }
+void set_cli_assist_wild_boss_only(bool en) { g_ui.has_cli_assist_wild_boss = true; g_ui.cli_assist_cfg.wild_boss_only = en; }
+void set_cli_assist_show_ex_boss(int32_t mode) { g_ui.has_cli_assist_show_ex_boss = true; g_ui.cli_assist_cfg.show_ex_boss = mode; }
+void set_cli_assist_ex_boss_tier(int32_t tier) { g_ui.has_cli_assist_ex_boss_tier = true; g_ui.cli_assist_cfg.ex_boss_tier = tier; }
+void set_cli_assist_zenny_pct(int32_t pct) { g_ui.has_cli_assist_zenny = true; g_ui.cli_assist_cfg.zenny_rate_pct = pct; }
+void set_cli_assist_run_speed_pct(int32_t pct) { g_ui.has_cli_assist_run_speed = true; g_ui.cli_assist_cfg.run_speed_pct = pct; }
+void set_cli_assist_auto_full_hp(bool en) { g_ui.has_cli_assist_auto_full_hp = true; g_ui.cli_assist_cfg.auto_full_hp = en; }
+void set_cli_assist_always_escape(bool en) { g_ui.has_cli_assist_always_escape = true; g_ui.cli_assist_cfg.always_escape = en; }
+void set_cli_assist_custom_gauge_pct(int32_t pct) { g_ui.has_cli_assist_custom_gauge = true; g_ui.cli_assist_cfg.custom_gauge_pct = pct; }
+void set_cli_assist_drop_rank_mode(int32_t mode) { g_ui.has_cli_assist_drop_rank = true; g_ui.cli_assist_cfg.drop_rank_mode = mode; }
+
+const AssistConfig& DojaRuntime::assist_config() const { return g_ui.assist_cfg; }
+AssistConfig& DojaRuntime::mutable_assist_config() { return g_ui.assist_cfg; }
+bool DojaRuntime::assist_hold_key_down() const { return g_ui.assist_hold_down; }
+void DojaRuntime::set_assist_hud_status(const AssistHudStatus& st) { g_ui.assist_hud = st; }
+std::string DojaRuntime::decode_game_bytes_to_utf8(const uint8_t* data, size_t len) const {
+    if (!data || len == 0) return "";
+    if (g_loc.has_loaded_pack()) {
+        return g_loc.decode_bytes_to_utf8(data, len, cp932_to_utf8);
+    }
+    return cp932_to_utf8(data, len);
+}
+
 pvp::PvpClientSession& DojaRuntime::pvp_session() {
     return g_pvp;
 }
@@ -5799,12 +6396,25 @@ void DojaRuntime::poll_events() {
         if (ev.type == SDL_QUIT ||
             (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_CLOSE)) {
             clean_exit_runtime(*this, true, 0);
+        } else if (ev.type == SDL_WINDOWEVENT &&
+                   (ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
+                    ev.window.event == SDL_WINDOWEVENT_MINIMIZED)) {
+            g_ui.assist_hold_down = false;
         } else if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED) {
             g_ui.open_controllers();
         } else if (ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP) {
             if (ev.key.repeat) continue;
             bool pressed = (ev.type == SDL_KEYDOWN);
             SDL_Keycode sym = ev.key.keysym.sym;
+
+            if (sym == SDLK_F6) {
+                if (g_ui.assist_cfg.hotkey_mode == 1) {
+                    g_ui.assist_hold_down = pressed;
+                } else if (pressed) {
+                    g_ui.toggle_assist_master();
+                }
+                continue;
+            }
 
             // Emulator hotkeys on key-down
             if (pressed) {
@@ -5836,6 +6446,14 @@ void DojaRuntime::poll_events() {
                 }
                 if (sym == SDLK_F5) {
                     g_ui.toggle_font_mode();
+                    continue;
+                }
+                if (sym == SDLK_F7) {
+                    g_ui.toggle_assist_buster_quick();
+                    continue;
+                }
+                if (sym == SDLK_F8) {
+                    g_ui.cycle_assist_encounter_quick();
                     continue;
                 }
                 if (sym == SDLK_F11 || (sym == SDLK_RETURN && (ev.key.keysym.mod & KMOD_ALT))) {
@@ -6031,7 +6649,8 @@ void DojaRuntime::present_screen() {
                 present_pix_text = g_interp.interp_pix_text;
                 present_hd_text = g_interp.interp_hd_text.data();
             }
-            g_ui.compose_display_buffer(present_fb, present_pix_text, present_hd_text, hd_scale_, keypad_state_, true);
+            g_ui.compose_display_buffer(present_fb, present_pix_text, present_hd_text, hd_scale_, keypad_state_, true,
+                                        pvp_match_active_ || pvp_self_test_);
             g_ui.present_sdl_frame(ren, tex_pix, tex_hd);
         } else if (g_ui.toast_frames > 0) {
             --g_ui.toast_frames;
@@ -6055,7 +6674,8 @@ void DojaRuntime::present_screen() {
     }
     if (max_frames_ > 0 && frame_count_ >= max_frames_) {
         if (!dump_ppm_path_.empty()) {
-            g_ui.compose_display_buffer(framebuffer_, fb_pix_text_, fb_hd_text_.data(), hd_scale_, keypad_state_, false);
+            g_ui.compose_display_buffer(framebuffer_, fb_pix_text_, fb_hd_text_.data(), hd_scale_, keypad_state_, false,
+                                        pvp_match_active_ || pvp_self_test_);
             int dump_h = g_ui.show_softkey_bar ? 260 : 240;
             std::ofstream ppm(dump_ppm_path_, std::ios::binary | std::ios::trunc);
             if (ppm) {
@@ -6179,7 +6799,8 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
                         sub_pix_text = g_interp.interp_pix_text;
                         sub_hd_text = g_interp.interp_hd_text.data();
                     }
-                    g_ui.compose_display_buffer(sub_fb, sub_pix_text, sub_hd_text, hd_scale_, keypad_state_, false);
+                    g_ui.compose_display_buffer(sub_fb, sub_pix_text, sub_hd_text, hd_scale_, keypad_state_, false,
+                                                pvp_match_active_ || pvp_self_test_);
                     g_ui.present_sdl_frame(
                         static_cast<SDL_Renderer*>(sdl_renderer_),
                         static_cast<SDL_Texture*>(sdl_texture_),

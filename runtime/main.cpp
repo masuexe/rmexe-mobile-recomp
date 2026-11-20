@@ -81,6 +81,34 @@ int main(int argc, char** argv) {
             rt.set_pvp_self_test(true);
         } else if (arg == "--pvp-auto-bot") {
             rt.set_pvp_auto_bot(true);
+        } else if (arg == "--assist-self-test") {
+            headless = true;
+            fast_forward = true;
+            rt.set_assist_self_test(true);
+        } else if (arg == "--buster-mult" && i + 1 < argc) {
+            rmexe::set_cli_assist_buster_mult(std::atoi(argv[++i]));
+        } else if (arg == "--damage-pct" && i + 1 < argc) {
+            rmexe::set_cli_assist_damage_pct(std::atoi(argv[++i]));
+        } else if (arg == "--encounter-pct" && i + 1 < argc) {
+            rmexe::set_cli_assist_encounter_pct(std::atoi(argv[++i]));
+        } else if (arg == "--wild-boss-only") {
+            rmexe::set_cli_assist_wild_boss_only(true);
+        } else if (arg == "--show-ex-boss" && i + 1 < argc) {
+            rmexe::set_cli_assist_show_ex_boss(std::atoi(argv[++i]));
+        } else if (arg == "--ex-boss-tier" && i + 1 < argc) {
+            rmexe::set_cli_assist_ex_boss_tier(std::atoi(argv[++i]));
+        } else if (arg == "--zenny-pct" && i + 1 < argc) {
+            rmexe::set_cli_assist_zenny_pct(std::atoi(argv[++i]));
+        } else if (arg == "--run-speed-pct" && i + 1 < argc) {
+            rmexe::set_cli_assist_run_speed_pct(std::atoi(argv[++i]));
+        } else if (arg == "--auto-full-hp") {
+            rmexe::set_cli_assist_auto_full_hp(true);
+        } else if (arg == "--always-escape") {
+            rmexe::set_cli_assist_always_escape(true);
+        } else if (arg == "--custom-gauge-pct" && i + 1 < argc) {
+            rmexe::set_cli_assist_custom_gauge_pct(std::atoi(argv[++i]));
+        } else if (arg == "--drop-rank-mode" && i + 1 < argc) {
+            rmexe::set_cli_assist_drop_rank_mode(std::atoi(argv[++i]));
         } else if (arg == "--uid" && i + 1 < argc) {
             rmexe::set_player_identity(argv[++i], "");
         } else if (arg == "--name" && i + 1 < argc) {
@@ -147,6 +175,19 @@ int main(int argc, char** argv) {
                       << "  --pvp-join <room_id>  Auto-join PvP room <room_id> (0 = quick match)\n"
                       << "  --pvp-self-test       Run headless 213-chip PvP symmetry & GGPO rollback suite\n"
                       << "  --pvp-auto-bot        Drive automated PvP inputs in --pvp-create/--pvp-join\n"
+                      << "  --assist-self-test    Run headless Assist/QoL cheat & PvP isolation suite\n"
+                      << "  --buster-mult <N>     Buster damage multiplier (1..9999)\n"
+                      << "  --damage-pct <N>      Incoming damage percentage (0..500)\n"
+                      << "  --encounter-pct <N>   Encounter rate percentage (0..10000)\n"
+                      << "  --wild-boss-only      Enable Wild Boss Only Stealth\n"
+                      << "  --show-ex-boss <0..2> 0=Off, 1=Radar HUD, 2=Radar + Force Unlock\n"
+                      << "  --ex-boss-tier <-1..3> -1=Auto, 0..3=Force V1..SP tier\n"
+                      << "  --zenny-pct <N>       Zenny reward percentage (0..10000)\n"
+                      << "  --run-speed-pct <N>   Overworld run speed percentage (50..500)\n"
+                      << "  --auto-full-hp        Restore full HP after battle win/escape\n"
+                      << "  --always-escape       100% escape success in escapable battles\n"
+                      << "  --custom-gauge-pct <N> Custom gauge fill speed percentage (50..10000)\n"
+                      << "  --drop-rank-mode <0..2> 0=Off, 1=Always Drop, 2=S-Rank + Always Drop\n"
                       << "  --offline             Use built-in offline Capcom i-mode simulation\n"
                       << "  --uid <id>            Override subscriber UID for cloud saves/rankings\n"
                       << "  --name <nick>         Override player nickname   (up to 12 ASCII chars)\n"

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "assist_config.hpp"
+
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -240,6 +242,13 @@ public:
     bool pvp_self_test() const { return pvp_self_test_; }
     void set_pvp_auto_bot(bool en) { pvp_auto_bot_ = en; }
     bool pvp_auto_bot() const { return pvp_auto_bot_; }
+    void set_assist_self_test(bool en) { assist_self_test_ = en; }
+    bool assist_self_test() const { return assist_self_test_; }
+    const AssistConfig& assist_config() const;
+    AssistConfig& mutable_assist_config();
+    bool assist_hold_key_down() const;
+    void set_assist_hud_status(const AssistHudStatus& st);
+    std::string decode_game_bytes_to_utf8(const uint8_t* data, size_t len) const;
     void set_suppress_av(bool sup) { suppress_av_ = sup; }
     bool suppress_av() const { return suppress_av_; }
     void set_keypad_override(bool enabled, int32_t mask) {
@@ -312,6 +321,7 @@ private:
     bool pvp_match_active_ = false;
     bool pvp_self_test_ = false;
     bool pvp_auto_bot_ = false;
+    bool assist_self_test_ = false;
     bool suppress_av_ = false;
     bool keypad_override_enabled_ = false;
     int32_t keypad_override_mask_ = 0;

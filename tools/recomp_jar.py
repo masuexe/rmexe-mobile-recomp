@@ -277,6 +277,10 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
         lines.append(f"static {c_type} {c_var} = 0;")
     if "sf_app_CpCanvas_bas_max_flg" in static_fields.values():
         lines.append("#define HAS_SF_app_CpCanvas_bas_max_flg 1")
+    if "sf_app_CpCanvas_rank_flg" in static_fields.values():
+        lines.append("#define HAS_SF_app_CpCanvas_rank_flg 1")
+    if "sf_app_CpCanvas_bas_up" in static_fields.values():
+        lines.append("#define HAS_SF_app_CpCanvas_bas_up 1")
     if "sf_app_CpCanvas_imgMap2" in static_fields.values():
         lines.append("#define HAS_SF_app_CpCanvas_imgMap2 1")
     if ("app/CpCanvas", "PalSetBG", "()V") in defined_methods:
@@ -381,15 +385,36 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
     pvp_prefix = "pvp_pon" if is_pon_pvp else "pvp_lon"
     pvp_inl = "pvp_pon_engine.inl" if is_pon_pvp else "pvp_lon_engine.inl"
     if is_pvp:
+        game_macro = "#define RMEXE_IS_PON_GAME 1" if is_pon_pvp else "#define RMEXE_IS_LON_GAME 1"
         lines.extend(
             [
                 "",
+                game_macro,
                 f"// Online PvP NetBattle hooks (implemented in {pvp_inl})",
                 f"static bool {pvp_prefix}_tick_override(DojaRuntime& rt, Ref cp);",
                 f"static int32_t {pvp_prefix}_intercept_ene_hit(DojaRuntime& rt, Ref ene_thiz, int32_t a0, int32_t a1, int32_t a2);",
                 f"static bool {pvp_prefix}_intercept_ene_draw(DojaRuntime& rt, Ref ene_thiz, int32_t a0);",
                 "static bool g_pvp_in_ene_hit_passthrough = false;",
                 "static int32_t g_pvp_rock_flip_override = -1;",
+                "",
+                "// Assist / QoL hooks (implemented in assist_engine.inl)",
+                "static void assist_on_frame_tick(DojaRuntime& rt);",
+                "static bool assist_should_bypass_en_bas_max(DojaRuntime& rt);",
+                "static void assist_adjust_buster_damage(DojaRuntime& rt, Ref attack_obj, int32_t attack_id, int32_t owner_side);",
+                "static int32_t assist_scale_rock_damage(DojaRuntime& rt, int32_t dmg);",
+                "static bool assist_eval_field_encounter(DojaRuntime& rt, int32_t raw_encount, int32_t move_cnt);",
+                "static void assist_override_wild_boss_encounter(DojaRuntime& rt, int32_t& ghost_loc3, int32_t boss_roll_loc4);",
+                "static int32_t assist_filter_ene_get(DojaRuntime& rt, int32_t mode, int32_t raw_val);",
+                "static int32_t assist_scale_zenny_getitem(DojaRuntime& rt, int32_t item_type, int32_t op_mode, int32_t amount);",
+                "static int32_t assist_move_check_intercept(DojaRuntime& rt, Ref cp, int32_t a0, int32_t a1);",
+                "static void assist_on_battle_end_hp(DojaRuntime& rt);",
+                "static bool assist_should_always_escape(DojaRuntime& rt);",
+                "static int32_t assist_custom_gauge_step(DojaRuntime& rt, int32_t base_sp);",
+                "static bool assist_should_always_drop_chip(DojaRuntime& rt);",
+                "static bool assist_should_force_s_rank(DojaRuntime& rt);",
+                "static bool assist_should_block_ranking_record(DojaRuntime& rt);",
+                "static bool assist_should_block_ranking_upload(DojaRuntime& rt);",
+                "static void assist_run_self_test(DojaRuntime& rt, Ref cp);",
             ]
         )
 
@@ -410,6 +435,24 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
     matched_rock_draw = False
     matched_ene_hit = False
     matched_ene_draw = False
+    assist_hooks = {
+        "attack_set_buster": 0,
+        "attack_pow_bas_max": 0,
+        "rock_hit": 0,
+        "field_enc_cmp": 0,
+        "field_btset": 0,
+        "move_chack": 0,
+        "esc_ch": 0,
+        "bas_lv": 0,
+        "ene_get_drop": 0,
+        "ene_get_ret": 0,
+        "get_item": 0,
+        "battle_cus_sp": 0,
+        "battle_end_hp": 0,
+        "rank_record": 0,
+        "rank_up_entry": 0,
+        "rank_up_call": 0,
+    }
 
     # Emit each method implementation
     for cls_name, cls in classes.items():
@@ -469,12 +512,42 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
             if is_pvp and (cls_name, m.name, m.descriptor) == ("app/Ene", "Draw", "(I)V"):
                 matched_ene_draw = True
                 lines.append(f"    if ({pvp_prefix}_intercept_ene_draw(rt, thiz, a0)) return;")
+            if is_pvp and (cls_name, m.name, m.descriptor) == ("app/Rock", "Hit", "(III)Z"):
+                assist_hooks["rock_hit"] += 1
+                lines.append("    loc[2].i = assist_scale_rock_damage(rt, loc[2].i);")
+            if is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "MoveChack", "(II)I"):
+                assist_hooks["move_chack"] += 1
+                lines.append("    { int32_t am = assist_move_check_intercept(rt, thiz, a0, a1); if (am >= 0) return am; }")
+            if is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "EscCh", "()Z"):
+                assist_hooks["esc_ch"] += 1
+                lines.append("    if (assist_should_always_escape(rt)) return 1;")
+            if is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "BasLv", "()I"):
+                assist_hooks["bas_lv"] += 1
+                lines.append("    if (assist_should_force_s_rank(rt)) return 11;")
+            if is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "GetItem", "(III)I"):
+                assist_hooks["get_item"] += 1
+                lines.append("    loc[3].i = assist_scale_zenny_getitem(rt, loc[1].i, loc[2].i, loc[3].i);")
+            if is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "RankUp", "()I"):
+                assist_hooks["rank_up_entry"] += 1
+                lines.append("    if (assist_should_block_ranking_upload(rt)) return -999;")
 
             is_cp_exe = is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "exe", "()V")
             is_rock_draw = is_pvp and (cls_name, m.name, m.descriptor) == ("app/Rock", "Draw", "(I)V")
+            is_attack_set = is_pvp and (cls_name, m.name, m.descriptor) == ("app/Attack", "Set", "(IIIII)I")
+            is_pow_bas_max = is_pvp and cls_name == "app/Attack" and m.name == "powBasMax"
+            is_field_main = is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "FieldMain", "()V")
+            is_ene_get = is_pvp and (cls_name, m.name, m.descriptor) == ("app/Ene", "Get", "(II)I")
+            is_battle_main = is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "BattleMain", "()V")
+            is_battle_tip = is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "BattleTip", "()V")
+            is_ranking = is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "Ranking", "()V")
             seen_exe_gfx_lock = False
             emitted_exe_join = False
             rock_flip_hook_count = 0
+            last_push_static = None
+            prev_static_1 = None
+            prev_static_2 = None
+            seen_skill_kouka_in_ene_get = False
+            rank_dat54_cmp_count = 0
 
             has_exc = len(m.exceptions) > 0
             if has_exc:
@@ -660,7 +733,11 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                     offset = struct.unpack_from(">h", code, pc + 1)[0]
                     target = pc + offset
                     cmp_op = {0x99: "==", 0x9A: "!=", 0x9B: "<", 0x9C: ">=", 0x9D: ">", 0x9E: "<="}[op]
-                    lines.append(f"        if (pop_i() {cmp_op} 0) goto L_{target};")
+                    if is_ene_get and op == 0x99 and seen_skill_kouka_in_ene_get and assist_hooks["ene_get_drop"] == 0:
+                        assist_hooks["ene_get_drop"] += 1
+                        lines.append(f"        {{ int32_t sk = pop_i(); if (sk == 0 && !assist_should_always_drop_chip(rt)) goto L_{target}; }}")
+                    else:
+                        lines.append(f"        if (pop_i() {cmp_op} 0) goto L_{target};")
                     pc += 3
                 elif 0x9F <= op <= 0xA6:  # if_icmp* / if_acmp*
                     offset = struct.unpack_from(">h", code, pc + 1)[0]
@@ -669,7 +746,31 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                         0x9F: "==", 0xA0: "!=", 0xA1: "<", 0xA2: ">=",
                         0xA3: ">", 0xA4: "<=", 0xA5: "==", 0xA6: "!=",
                     }[op]
-                    lines.append(f"        {{ int32_t b = pop_i(); int32_t a = pop_i(); if (a {cmp_op} b) goto L_{target}; }}")
+                    if (
+                        is_field_main
+                        and op == 0xA2
+                        and prev_static_2 == ("app/CpCanvas", "encount", "I")
+                        and prev_static_1 == ("app/CpCanvas", "move_cnt", "I")
+                    ):
+                        assist_hooks["field_enc_cmp"] += 1
+                        lines.append(
+                            f"        {{ int32_t b = pop_i(); int32_t a = pop_i(); if (!assist_eval_field_encounter(rt, a, b)) goto L_{target}; }}"
+                        )
+                    elif (
+                        is_ranking
+                        and op == 0xA2
+                        and prev_static_1 == ("app/CpCanvas", "score", "I")
+                    ):
+                        rank_dat54_cmp_count += 1
+                        if rank_dat54_cmp_count == 2:
+                            assist_hooks["rank_record"] += 1
+                            lines.append(
+                                f"        {{ int32_t b = pop_i(); int32_t a = pop_i(); if (a >= b || assist_should_block_ranking_record(rt)) goto L_{target}; }}"
+                            )
+                        else:
+                            lines.append(f"        {{ int32_t b = pop_i(); int32_t a = pop_i(); if (a {cmp_op} b) goto L_{target}; }}")
+                    else:
+                        lines.append(f"        {{ int32_t b = pop_i(); int32_t a = pop_i(); if (a {cmp_op} b) goto L_{target}; }}")
                     pc += 3
                 elif op == 0xA7:  # goto
                     offset = struct.unpack_from(">h", code, pc + 1)[0]
@@ -677,21 +778,36 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                     lines.append(f"        goto L_{target};")
                     pc += 3
                 elif op in (0xAC, 0xB0):  # ireturn, areturn
-                    lines.append("        return pop_i();")
+                    if is_ene_get and op == 0xAC:
+                        assist_hooks["ene_get_ret"] += 1
+                        lines.append("        return assist_filter_ene_get(rt, loc[1].i, pop_i());")
+                    else:
+                        lines.append("        return pop_i();")
                     pc += 1
                 elif op == 0xB1:  # return
                     lines.append("        return;")
                     pc += 1
                 elif op == 0xB2:  # getstatic
                     ref = resolve_ref(struct.unpack_from(">H", code, pc + 1)[0])
+                    if is_pow_bas_max and ref == ("app/CpCanvas", "bas_max_flg", "I"):
+                        assist_hooks["attack_pow_bas_max"] += 1
+                        lines.append("        if (assist_should_bypass_en_bas_max(rt)) return loc[1].i;")
+                    if is_ene_get and ref == ("app/CpCanvas", "skill_kouka", "[I"):
+                        seen_skill_kouka_in_ene_get = True
                     if ref in static_fields:
                         c_var = static_fields[ref]
                         if ref[2] in ("J", "D"):
                             lines.append(f"        push_j({c_var});")
                         else:
-                            lines.append(f"        push_i({c_var});")
+                            if is_battle_main and ref == ("app/CpCanvas", "cus_sp", "I"):
+                                assist_hooks["battle_cus_sp"] += 1
+                                lines.append(f"        push_i(assist_custom_gauge_step(rt, {c_var}));")
+                            else:
+                                lines.append(f"        push_i({c_var});")
                     else:
                         lines.append("        push_i(1);")  # System.out
+                    prev_static_2, prev_static_1 = prev_static_1, ref
+                    last_push_static = ref
                     pc += 3
                 elif op == 0xB3:  # putstatic
                     ref = resolve_ref(struct.unpack_from(">H", code, pc + 1)[0])
@@ -700,6 +816,13 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                         lines.append(f"        {c_var} = pop_j();")
                     else:
                         lines.append(f"        {c_var} = pop_i();")
+                    if (
+                        (is_battle_main or is_battle_tip)
+                        and ref == ("app/CpCanvas", "now_hp", "I")
+                        and last_push_static == ("app/Rock", "hp", "I")
+                    ):
+                        assist_hooks["battle_end_hp"] += 1
+                        lines.append("        assist_on_battle_end_hp(rt);")
                     pc += 3
                 elif op == 0xB4:  # getfield
                     ref = resolve_ref(struct.unpack_from(">H", code, pc + 1)[0])
@@ -726,6 +849,10 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                     m_args, m_ret = parse_method_descriptor(t_desc)
                     if ref in defined_methods:
                         callee_fn, callee_static = defined_methods[ref]
+                        if is_field_main and ref == ("app/CpCanvas", "BtSet", "(I)V"):
+                            assist_hooks["field_btset"] += 1
+                            lines.append("        assist_override_wild_boss_encounter(rt, loc[3].i, loc[4].i);")
+                            lines.append("        stk[sp - 1].i = sf_app_CpCanvas_teki_pt;")
                         lines.append("        {")
                         for a_i in range(len(m_args) - 1, -1, -1):
                             if m_args[a_i] == "J":
@@ -743,6 +870,9 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                         if not callee_static:
                             lines.append("            Ref call_thiz = pop_i();")
                             call_args.append("call_thiz")
+                        if is_attack_set and ref == ("app/Attack", "WazaSet", "()V"):
+                            assist_hooks["attack_set_buster"] += 1
+                            lines.append("            assist_adjust_buster_damage(rt, call_thiz, loc[1].i, loc[5].i);")
                         for a_i in range(len(m_args)):
                             call_args.append(f"call_a{a_i}")
                         call_expr = f"{callee_fn}({', '.join(call_args)})"
@@ -752,6 +882,9 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                             lines.append(f"            push_j({call_expr});")
                         else:
                             lines.append(f"            push_i({call_expr});")
+                            if is_ranking and ref == ("app/CpCanvas", "RankUp", "()I"):
+                                assist_hooks["rank_up_call"] += 1
+                                lines.append("            if (stk[sp - 1].i == -999) { --sp; sf_app_CpCanvas_rank_no = 0; sf_app_CpCanvas_mes_flg = 0; sf_app_CpCanvas_yes_no_flg = 0; sf_app_CpCanvas_key = 0; return; }")
                         lines.append("        }")
                     else:
                         is_static_call = op == 0xB8
@@ -776,7 +909,9 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
                         lines.append("        }")
                         if is_cp_exe and not seen_exe_gfx_lock and t_cls == "com/nttdocomo/ui/Graphics" and t_name == "lock":
                             seen_exe_gfx_lock = True
+                            lines.append("        if (rt.assist_self_test()) assist_run_self_test(rt, loc[0].r);")
                             lines.append(f"        if ({pvp_prefix}_tick_override(rt, loc[0].r)) goto pvp_exe_frame_join;")
+                            lines.append("        assist_on_frame_tick(rt);")
                     pc += 5 if op == 0xB9 else 3
                 elif op == 0xBB:  # new
                     c_idx = struct.unpack_from(">H", code, pc + 1)[0]
@@ -879,8 +1014,27 @@ def generate_cpp(jar_path: Path, out_cpp: Path) -> None:
             f"cp_exe={matched_cp_exe}, rock_draw={matched_rock_draw}, "
             f"ene_hit={matched_ene_hit}, ene_draw={matched_ene_draw}"
         )
+        assert assist_hooks["attack_set_buster"] >= 1, f"Assist hook attack_set_buster mismatch: {assist_hooks}"
+        assert assist_hooks["rock_hit"] == 1, f"Assist hook rock_hit mismatch: {assist_hooks}"
+        assert assist_hooks["field_enc_cmp"] == 1, f"Assist hook field_enc_cmp mismatch: {assist_hooks}"
+        assert assist_hooks["field_btset"] == 1, f"Assist hook field_btset mismatch: {assist_hooks}"
+        assert assist_hooks["move_chack"] == 1, f"Assist hook move_chack mismatch: {assist_hooks}"
+        assert assist_hooks["esc_ch"] == 1, f"Assist hook esc_ch mismatch: {assist_hooks}"
+        assert assist_hooks["bas_lv"] == 1, f"Assist hook bas_lv mismatch: {assist_hooks}"
+        assert assist_hooks["ene_get_drop"] == 1, f"Assist hook ene_get_drop mismatch: {assist_hooks}"
+        assert assist_hooks["ene_get_ret"] >= 1, f"Assist hook ene_get_ret mismatch: {assist_hooks}"
+        assert assist_hooks["get_item"] == 1, f"Assist hook get_item mismatch: {assist_hooks}"
+        assert assist_hooks["battle_cus_sp"] == 1, f"Assist hook battle_cus_sp mismatch: {assist_hooks}"
+        assert assist_hooks["battle_end_hp"] == 4, f"Assist hook battle_end_hp mismatch: {assist_hooks}"
+        if "sf_app_CpCanvas_bas_max_flg" in static_fields.values():
+            assert assist_hooks["attack_pow_bas_max"] == 1, f"Assist hook attack_pow_bas_max mismatch: {assist_hooks}"
+        if is_pon_pvp:
+            assert assist_hooks["rank_record"] == 1, f"Assist hook rank_record mismatch: {assist_hooks}"
+            assert assist_hooks["rank_up_entry"] == 1, f"Assist hook rank_up_entry mismatch: {assist_hooks}"
+            assert assist_hooks["rank_up_call"] == 1, f"Assist hook rank_up_call mismatch: {assist_hooks}"
         lines.extend(
             [
+                '#include "assist_engine.inl"',
                 f'#include "{pvp_inl}"',
                 "",
             ]
