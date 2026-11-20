@@ -4,11 +4,13 @@
 // Included at the bottom of build/lon_{jp,en}_recomp_gen.cpp inside namespace rmexe
 // ============================================================================
 
+#ifndef RMEXE_GAME_NAMESPACE
 } // namespace rmexe
 
 #include "pvp_common.hpp"
 
 namespace rmexe {
+#endif
 
 static bool pvp_lon_tick_override_impl(DojaRuntime& rt, Ref cp);
 
@@ -16,7 +18,7 @@ static bool pvp_lon_tick_override_impl(DojaRuntime& rt, Ref cp);
 
 namespace pvp_lon {
 
-using namespace rmexe::pvp_common;
+using namespace pvp_common;
 
 static constexpr int32_t kNumFolders = 30;
 static constexpr int32_t kMaxAttacks = 30;

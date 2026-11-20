@@ -147,6 +147,8 @@ int main(int argc, char** argv) {
             headless = true;
         } else if (arg == "--fast-forward") {
             fast_forward = true;
+        } else if (arg == "--touch") {
+            rt.set_touch_controls(true);
         } else if (arg == "--inject-key" && i + 1 < argc) {
             std::string kv = argv[++i];
             auto colon = kv.find(':');
@@ -217,6 +219,14 @@ int main(int argc, char** argv) {
     if (max_frames > 0) {
         rt.set_max_frames(max_frames, dump_ppm_path);
     }
+
+    static const rmexe::GameModule kSingleGameModule{
+        rmexe::generated_static_init,
+        rmexe::generated_create_app_main,
+        rmexe::generated_start_app,
+        rmexe::generated_process_event
+    };
+    rt.set_game_module(&kSingleGameModule);
 
     if (!rt.init(jar_path, sp_path, "", scale, DEFAULT_WINDOW_TITLE)) {
         return 1;

@@ -69,6 +69,7 @@ else()
     target_link_libraries(doja_runtime PUBLIC ${CMAKE_DL_LIBS})
 endif()
 
+if(NOT ANDROID AND NOT IOS)
 # Unified Capcom i-mode + PvP NetBattle Server (TCP HTTP/1.1 + UDP Relay on single port)
 add_executable(rmexe_server
     server/rmexe_server.cpp
@@ -152,3 +153,66 @@ add_doja_recomp_target(
     "assets/LoN/sp/LoN.sp"
     "MegaMan Battle Network: Legend of Network (EN Recomp)"
 )
+endif() # NOT ANDROID AND NOT IOS
+
+# Unified All-in-One Collection target (Android libmain.so / iOS / Desktop launcher)
+if(ANDROID OR IOS)
+    set(RMEXE_COLLECTION_DEFAULT ON)
+else()
+    set(RMEXE_COLLECTION_DEFAULT OFF)
+endif()
+option(RMEXE_BUILD_COLLECTION "Build unified all-in-one PoN+LoN collection target" ${RMEXE_COLLECTION_DEFAULT})
+
+if(RMEXE_BUILD_COLLECTION)
+    set(COLLECTION_GEN_SRCS "")
+    set(COLLECTION_DEFS "")
+
+    macro(add_collection_game_unit GAME_NS DEF_MACRO JAR_REL_PATH)
+        set(_JAR_ABS "${CMAKE_CURRENT_SOURCE_DIR}/${JAR_REL_PATH}")
+        set(_GEN_CPP "${CMAKE_CURRENT_BINARY_DIR}/col_${GAME_NS}_gen.cpp")
+        if(EXISTS "${_JAR_ABS}")
+            add_custom_command(
+                OUTPUT "${_GEN_CPP}"
+                COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/recomp_jar.py"
+                        "${_JAR_ABS}" -o "${_GEN_CPP}" --namespace "${GAME_NS}"
+                DEPENDS "${_JAR_ABS}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/recomp_jar.py"
+                COMMENT "Statically recompiling ${JAR_REL_PATH} (namespace ${GAME_NS}) -> col_${GAME_NS}_gen.cpp"
+                VERBATIM
+            )
+            if(MSVC)
+                set_source_files_properties("${_GEN_CPP}" PROPERTIES COMPILE_FLAGS "/O1 /utf-8 /bigobj")
+            else()
+                set_source_files_properties("${_GEN_CPP}" PROPERTIES COMPILE_FLAGS "-O1")
+            endif()
+            list(APPEND COLLECTION_GEN_SRCS "${_GEN_CPP}")
+            list(APPEND COLLECTION_DEFS "${DEF_MACRO}=1")
+        endif()
+    endmacro()
+
+    add_collection_game_unit(game_pon_jp RMEXE_HAVE_PON_JP "assets/PoN_jp/bin/PoN.jar")
+    add_collection_game_unit(game_pon_en RMEXE_HAVE_PON_EN "assets/PoN/bin/PoN.jar")
+    add_collection_game_unit(game_lon_jp RMEXE_HAVE_LON_JP "assets/LoN_jp/bin/LoN.jar")
+    add_collection_game_unit(game_lon_en RMEXE_HAVE_LON_EN "assets/LoN/bin/LoN.jar")
+
+    if(COLLECTION_GEN_SRCS)
+        if(ANDROID)
+            add_library(main SHARED
+                ${COLLECTION_GEN_SRCS}
+                runtime/collection_main.cpp
+            )
+            target_compile_definitions(main PRIVATE ${COLLECTION_DEFS})
+            target_link_libraries(main PRIVATE doja_runtime log android)
+            message(STATUS "Enabled Android unified collection library: libmain.so (${COLLECTION_DEFS})")
+        else()
+            add_executable(rmexe_collection
+                ${COLLECTION_GEN_SRCS}
+                runtime/collection_main.cpp
+            )
+            target_compile_definitions(rmexe_collection PRIVATE ${COLLECTION_DEFS})
+            target_link_libraries(rmexe_collection PRIVATE doja_runtime)
+            message(STATUS "Enabled unified collection target: rmexe_collection (${COLLECTION_DEFS})")
+        endif()
+    else()
+        message(WARNING "RMEXE_BUILD_COLLECTION=ON but no .jar assets found under assets/")
+    endif()
+endif()

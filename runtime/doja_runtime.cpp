@@ -1,6 +1,10 @@
+#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
 #define SDL_MAIN_HANDLED
+#endif
 #include "doja_runtime.hpp"
 #include "net_config.hpp"
+#include "touch_controls.hpp"
+#include "../common/cp932_table.hpp"
 #include "../common/localization.hpp"
 #include "../common/pvp_protocol.hpp"
 #include "../common/ymu762_fm.hpp"
@@ -10,10 +14,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <iconv.h>
 #include <unistd.h>
 #endif
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
 #include <sys/prctl.h>
 #endif
 
@@ -641,7 +644,7 @@ struct StbFontEngine {
         return true;
     }
 
-    void init(const std::string& base_dir) {
+    void init(const std::string& base_dir, const std::string& extra_asset_dir = "") {
         if (initialized) return;
         initialized = true;
         pixel_faces.clear();
@@ -652,6 +655,10 @@ struct StbFontEngine {
         hd_cache.clear();
 
         std::vector<std::string> asset_dirs;
+        if (!extra_asset_dir.empty()) {
+            asset_dirs.push_back((std::filesystem::path(extra_asset_dir) / "fonts").string());
+            asset_dirs.push_back((std::filesystem::path(extra_asset_dir) / "assets" / "fonts").string());
+        }
         if (!base_dir.empty()) {
             asset_dirs.push_back((std::filesystem::path(base_dir) / "assets" / "fonts").string());
         }
@@ -722,6 +729,10 @@ struct StbFontEngine {
         cjk_fallbacks.push_back(wfonts + "msyh.ttc");
         cjk_fallbacks.push_back(wfonts + "YuGothR.ttc");
         cjk_fallbacks.push_back(wfonts + "meiryo.ttc");
+#elif defined(__ANDROID__)
+        cjk_fallbacks.push_back("/system/fonts/NotoSansCJK-Regular.ttc");
+        cjk_fallbacks.push_back("/system/fonts/NotoSerifCJK-Regular.ttc");
+        cjk_fallbacks.push_back("/system/fonts/DroidSansFallback.ttf");
 #else
         cjk_fallbacks.push_back("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc");
         cjk_fallbacks.push_back("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc");
@@ -736,6 +747,9 @@ struct StbFontEngine {
             const char* fallback_paths[] = {
 #ifdef _WIN32
                 "C:\\Windows\\Fonts\\arial.ttf",
+#elif defined(__ANDROID__)
+                "/system/fonts/Roboto-Regular.ttf",
+                "/system/fonts/DroidSans.ttf",
 #else
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                 "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
@@ -775,6 +789,9 @@ struct StbFontEngine {
         hd_sys_fallbacks.push_back(wfonts + "Deng.ttf");
         hd_sys_fallbacks.push_back(wfonts + "YuGothM.ttc");
         hd_sys_fallbacks.push_back(wfonts + "meiryo.ttc");
+#elif defined(__ANDROID__)
+        hd_sys_fallbacks.push_back("/system/fonts/NotoSansCJK-Regular.ttc");
+        hd_sys_fallbacks.push_back("/system/fonts/DroidSansFallback.ttf");
 #else
         hd_sys_fallbacks.push_back("/mnt/c/Windows/Fonts/msyh.ttc");
         hd_sys_fallbacks.push_back("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
@@ -968,77 +985,12 @@ static loc::LocalizationManager g_loc;
 
 // Convert Shift-JIS (CP932) bytes to UTF-8 string
 std::string cp932_to_utf8(const uint8_t* data, size_t len) {
-    if (len == 0) return "";
-    // Strip trailing NULs if present
-    size_t actual_len = 0;
-    while (actual_len < len && data[actual_len] != 0) {
-        actual_len++;
-    }
-    if (actual_len == 0) return "";
-
-#ifdef _WIN32
-    int wlen = MultiByteToWideChar(932, 0, reinterpret_cast<const char*>(data), static_cast<int>(actual_len), nullptr, 0);
-    if (wlen <= 0) {
-        return std::string(reinterpret_cast<const char*>(data), actual_len);
-    }
-    std::wstring wstr(static_cast<size_t>(wlen), L'\0');
-    MultiByteToWideChar(932, 0, reinterpret_cast<const char*>(data), static_cast<int>(actual_len), wstr.data(), wlen);
-    int ulen = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), wlen, nullptr, 0, nullptr, nullptr);
-    if (ulen <= 0) {
-        return std::string(reinterpret_cast<const char*>(data), actual_len);
-    }
-    std::string out(static_cast<size_t>(ulen), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wstr.data(), wlen, out.data(), ulen, nullptr, nullptr);
-    return out;
-#else
-    iconv_t cd = iconv_open("UTF-8", "CP932");
-    if (cd == reinterpret_cast<iconv_t>(-1)) {
-        return std::string(reinterpret_cast<const char*>(data), actual_len);
-    }
-    std::string out(actual_len * 4 + 4, '\0');
-    char* inbuf = const_cast<char*>(reinterpret_cast<const char*>(data));
-    size_t inbytes = actual_len;
-    char* outbuf = out.data();
-    size_t outbytes = out.size();
-    iconv(cd, &inbuf, &inbytes, &outbuf, &outbytes);
-    iconv_close(cd);
-    out.resize(out.size() - outbytes);
-    return out;
-#endif
+    return cp932::decode_to_utf8(data, len);
 }
 
 // Convert UTF-8 string back to CP932 bytes
 std::vector<uint8_t> utf8_to_cp932(const std::string& utf8) {
-    if (utf8.empty()) return {};
-#ifdef _WIN32
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
-    if (wlen <= 0) {
-        return std::vector<uint8_t>(utf8.begin(), utf8.end());
-    }
-    std::wstring wstr(static_cast<size_t>(wlen), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), wstr.data(), wlen);
-    int clen = WideCharToMultiByte(932, 0, wstr.data(), wlen, nullptr, 0, nullptr, nullptr);
-    if (clen <= 0) {
-        return std::vector<uint8_t>(utf8.begin(), utf8.end());
-    }
-    std::vector<uint8_t> out(static_cast<size_t>(clen), 0);
-    WideCharToMultiByte(932, 0, wstr.data(), wlen, reinterpret_cast<char*>(out.data()), clen, nullptr, nullptr);
-    return out;
-#else
-    iconv_t cd = iconv_open("CP932", "UTF-8");
-    if (cd == reinterpret_cast<iconv_t>(-1)) {
-        return std::vector<uint8_t>(utf8.begin(), utf8.end());
-    }
-    std::vector<uint8_t> out(utf8.size() * 2 + 4, 0);
-    char* inbuf = const_cast<char*>(utf8.data());
-    size_t inbytes = utf8.size();
-    char* outbuf = reinterpret_cast<char*>(out.data());
-    size_t outbytes = out.size();
-    iconv(cd, &inbuf, &inbytes, &outbuf, &outbytes);
-    iconv_close(cd);
-    out.resize(out.size() - outbytes);
-    return out;
-#endif
+    return cp932::encode_from_utf8(utf8);
 }
 
 // Decode UTF-8 into Unicode codepoints (UTF-32) for accurate Java char indexing
@@ -2537,6 +2489,7 @@ struct ActionBinding {
     bool key_down[2] = {false, false};
     bool pad_down = false;
     bool axis_down = false;
+    bool touch_down = false;
     bool effective_down = false;
 };
 
@@ -2594,6 +2547,8 @@ static std::string generate_pvp_session_nonce() {
 
 struct UiInputManager {
     std::string config_path = "controls.cfg";
+    std::string asset_dir;
+    std::string data_dir;
     bool show_softkey_bar = true;
     bool high_fps_mode = true; // true = 60 FPS smooth interpolation, false = 15 FPS original flip-phone rate
     bool hd_font_mode = true;  // true = native window-resolution HD smooth font (default), false = 12px pixel font
@@ -2660,6 +2615,7 @@ struct UiInputManager {
     int64_t turbo_bonus_ms = 0;
 
     ActionBinding binds[ACT_COUNT];
+    TouchOverlayController touch;
     std::vector<SDL_GameController*> controllers;
     uint32_t display_buf[240 * 260] = {0};
     int hd_scale = 3;
@@ -2691,8 +2647,10 @@ struct UiInputManager {
             binds[i].key_down[1] = false;
             binds[i].pad_down = false;
             binds[i].axis_down = false;
+            binds[i].touch_down = false;
             binds[i].effective_down = false;
         }
+        touch.clear_all_fingers();
     }
 
     bool is_turbo_held() const {
@@ -2829,6 +2787,10 @@ struct UiInputManager {
             candidates.push_back(resolve_runtime_path(cli_translation_path, exe_base_dir));
         } else {
             const char* fname = is_lon_game ? "lon_zh.json" : "pon_zh.json";
+            if (!asset_dir.empty()) {
+                candidates.push_back((std::filesystem::path(asset_dir) / "translations" / fname).string());
+                candidates.push_back((std::filesystem::path(asset_dir) / "assets" / "translations" / fname).string());
+            }
             if (!exe_base_dir.empty()) {
                 candidates.push_back((std::filesystem::path(exe_base_dir) / "assets" / "translations" / fname).string());
             }
@@ -3432,40 +3394,63 @@ struct UiInputManager {
         }
     }
 
-    void present_sdl_frame(SDL_Renderer* ren, SDL_Texture* tex_pix, SDL_Texture* tex_hd) const {
+    void present_sdl_frame(SDL_Renderer* ren, SDL_Texture* tex_pix, SDL_Texture* tex_hd) {
         if (!ren) return;
         int logical_h = show_softkey_bar ? 260 : 240;
-        if (hd_font_mode && tex_hd && !display_buf_hd.empty()) {
+        const bool use_hd = (hd_font_mode && tex_hd && !display_buf_hd.empty());
+        SDL_Texture* active_tex = use_hd ? tex_hd : tex_pix;
+        if (!active_tex) return;
+
+        int src_w = 240;
+        int src_h = logical_h;
+        if (use_hd) {
             int s = std::clamp(hd_scale, 2, 4);
-            int bw = 240 * s;
-            int bh = logical_h * s;
-            int cur_lw = 0, cur_lh = 0;
-            SDL_RenderGetLogicalSize(ren, &cur_lw, &cur_lh);
-            if (cur_lw != bw || cur_lh != bh) {
-                SDL_RenderSetLogicalSize(ren, bw, bh);
-            }
-            SDL_Rect src_rect{0, 0, bw, bh};
-            SDL_UpdateTexture(tex_hd, nullptr, display_buf_hd.data(), bw * static_cast<int>(sizeof(uint32_t)));
-            SDL_RenderClear(ren);
-            SDL_RenderCopy(ren, tex_hd, &src_rect, nullptr);
-            SDL_RenderPresent(ren);
-        } else if (tex_pix) {
-            int cur_lw = 0, cur_lh = 0;
-            SDL_RenderGetLogicalSize(ren, &cur_lw, &cur_lh);
-            if (cur_lw != 240 || cur_lh != logical_h) {
-                SDL_RenderSetLogicalSize(ren, 240, logical_h);
-            }
-            SDL_Rect src_rect{0, 0, 240, logical_h};
+            src_w = 240 * s;
+            src_h = logical_h * s;
+            SDL_UpdateTexture(tex_hd, nullptr, display_buf_hd.data(), src_w * static_cast<int>(sizeof(uint32_t)));
+        } else {
             SDL_UpdateTexture(tex_pix, nullptr, display_buf, 240 * static_cast<int>(sizeof(uint32_t)));
-            SDL_RenderClear(ren);
-            SDL_RenderCopy(ren, tex_pix, &src_rect, nullptr);
-            SDL_RenderPresent(ren);
         }
+        SDL_Rect src_rect{0, 0, src_w, src_h};
+
+        if (touch.enabled()) {
+            int cur_lw = 0, cur_lh = 0;
+            SDL_RenderGetLogicalSize(ren, &cur_lw, &cur_lh);
+            if (cur_lw != 0 || cur_lh != 0) {
+                SDL_RenderSetLogicalSize(ren, 0, 0);
+            }
+            int out_w = 0, out_h = 0;
+            SDL_GetRendererOutputSize(ren, &out_w, &out_h);
+            touch.update_layout(out_w, out_h, logical_h);
+            SDL_Rect dst_rect = touch.game_rect();
+            SDL_SetRenderDrawColor(ren, 8, 12, 24, 255);
+            SDL_RenderClear(ren);
+            SDL_RenderCopy(ren, active_tex, &src_rect, &dst_rect);
+            touch.render(ren);
+            SDL_RenderPresent(ren);
+            return;
+        }
+
+        int cur_lw = 0, cur_lh = 0;
+        SDL_RenderGetLogicalSize(ren, &cur_lw, &cur_lh);
+        if (cur_lw != src_w || cur_lh != src_h) {
+            SDL_RenderSetLogicalSize(ren, src_w, src_h);
+        }
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+        SDL_RenderClear(ren);
+        SDL_RenderCopy(ren, active_tex, &src_rect, nullptr);
+        SDL_RenderPresent(ren);
     }
 
     void apply_softbar_geometry(SDL_Window* win, SDL_Renderer* ren, int scale) {
         if (!ren) return;
         int logical_h = show_softkey_bar ? 260 : 240;
+        if (touch.enabled()) {
+            int out_w = 0, out_h = 0;
+            SDL_GetRendererOutputSize(ren, &out_w, &out_h);
+            touch.update_layout(out_w, out_h, logical_h);
+            return;
+        }
         int s = hd_font_mode ? std::clamp(hd_scale, 2, 4) : 1;
         SDL_RenderSetLogicalSize(ren, 240 * s, logical_h * s);
         if (win && !is_fullscreen && scale > 0) {
@@ -3514,7 +3499,10 @@ struct UiInputManager {
         std::time_t t = std::time(nullptr);
         char fname[64];
         std::snprintf(fname, sizeof(fname), "screenshot_%lld.bmp", static_cast<long long>(t));
-        if (SDL_SaveBMP(surf, fname) == 0) {
+        std::string out_path = data_dir.empty()
+            ? std::string(fname)
+            : (std::filesystem::path(data_dir) / fname).string();
+        if (SDL_SaveBMP(surf, out_path.c_str()) == 0) {
             show_toast(std::string("已保存截图: ") + fname);
         }
         SDL_FreeSurface(surf);
@@ -4036,14 +4024,41 @@ struct UiInputManager {
 
     void handle_overlay_event(const SDL_Event& ev, SDL_Window* win, SDL_Renderer* ren, int scale, bool& quit_game) {
         if (ev.type == SDL_QUIT ||
+            ev.type == SDL_APP_TERMINATING ||
             (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_CLOSE)) {
             quit_game = true;
             close_overlay();
             return;
         }
+        if (ev.type == SDL_APP_WILLENTERBACKGROUND) {
+            save_config();
+            if (g_runtime) g_runtime->save_sav_overlay_public();
+            if (g_audio.dev_id != 0) SDL_PauseAudioDevice(g_audio.dev_id, 1);
+            return;
+        }
+        if (ev.type == SDL_APP_DIDENTERFOREGROUND) {
+            if (g_audio.dev_id != 0 && g_pvp.active()) SDL_PauseAudioDevice(g_audio.dev_id, 0);
+            return;
+        }
         if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED) {
             open_controllers();
             return;
+        }
+        if (touch.enabled() && ren) {
+            int out_w = 0, out_h = 0;
+            SDL_GetRendererOutputSize(ren, &out_w, &out_h);
+            touch.update_layout(out_w, out_h, show_softkey_bar ? 260 : 240);
+            TouchActionDelta td;
+            if (touch.handle_event(ev, out_w, out_h, true, td)) {
+                for (SDL_Keycode k : td.overlay_keys) {
+                    SDL_Event synth{};
+                    synth.type = SDL_KEYDOWN;
+                    synth.key.keysym.sym = k;
+                    handle_overlay_event(synth, win, ren, scale, quit_game);
+                    if (!overlay_open) break;
+                }
+                return;
+            }
         }
         if (overlay_text_edit_mode != 0) {
             const bool is_numeric = (overlay_text_edit_mode >= 10);
@@ -4066,7 +4081,7 @@ struct UiInputManager {
                 overlay_ignore_next_textinput = false;
                 SDL_Keycode k = ev.key.keysym.sym;
                 uint16_t mod = ev.key.keysym.mod;
-                if (k == SDLK_ESCAPE || k == SDLK_F1) {
+                if (k == SDLK_ESCAPE || k == SDLK_F1 || k == SDLK_AC_BACK) {
                     overlay_text_edit_mode = 0;
                     SDL_StopTextInput();
                 } else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
@@ -5873,14 +5888,55 @@ void DojaRuntime::set_config_path(const std::string& path) {
     }
 }
 
+void DojaRuntime::set_touch_controls(bool enabled) {
+    g_ui.touch.set_enabled(enabled);
+}
+
 bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, const std::string& /*jam_path*/, int scale, const std::string& window_title) {
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    g_ui.touch.set_enabled(true);
+#endif
     std::string base_dir = get_exe_base_dir();
+#ifdef __ANDROID__
+    if (data_dir_.empty()) {
+        const char* ext = SDL_AndroidGetExternalStoragePath();
+        if (ext && *ext) {
+            data_dir_ = ext;
+        } else if (const char* intr = SDL_AndroidGetInternalStoragePath(); intr && *intr) {
+            data_dir_ = intr;
+        }
+    }
+    if (asset_dir_.empty() && !data_dir_.empty()) {
+        asset_dir_ = data_dir_;
+    }
+#elif defined(__IPHONEOS__)
+    if (data_dir_.empty()) {
+        if (char* pref = SDL_GetPrefPath("rmexe", "recomp")) {
+            data_dir_ = pref;
+            SDL_free(pref);
+        }
+    }
+#endif
+    std::string search_base = !asset_dir_.empty() ? asset_dir_ : base_dir;
     g_ui.exe_base_dir = base_dir;
-    jar_path_ = resolve_runtime_path(jar_path, base_dir);
-    sp_path_ = resolve_runtime_path(sp_path, base_dir);
-    sav_path_ = g_ui.custom_sav_path.empty() ? (sp_path_ + ".sav") : g_ui.custom_sav_path;
-    if (g_ui.config_path == "controls.cfg" && !std::filesystem::exists(g_ui.config_path) && !base_dir.empty()) {
-        g_ui.config_path = (std::filesystem::path(base_dir) / "controls.cfg").string();
+    g_ui.asset_dir = asset_dir_;
+    g_ui.data_dir = data_dir_;
+    jar_path_ = resolve_runtime_path(jar_path, search_base);
+    sp_path_ = resolve_runtime_path(sp_path, search_base);
+    if (!g_ui.custom_sav_path.empty()) {
+        sav_path_ = g_ui.custom_sav_path;
+    } else if (!data_dir_.empty()) {
+        std::filesystem::path sp_p(sp_path_);
+        sav_path_ = (std::filesystem::path(data_dir_) / (sp_p.filename().string() + ".sav")).string();
+    } else {
+        sav_path_ = sp_path_ + ".sav";
+    }
+    if (g_ui.config_path == "controls.cfg") {
+        if (!data_dir_.empty()) {
+            g_ui.config_path = (std::filesystem::path(data_dir_) / "controls.cfg").string();
+        } else if (!std::filesystem::exists(g_ui.config_path) && !base_dir.empty()) {
+            g_ui.config_path = (std::filesystem::path(base_dir) / "controls.cfg").string();
+        }
     }
     window_scale_ = std::max(1, scale);
     hd_scale_ = (scale >= 2) ? std::clamp(scale, 2, 4) : 3;
@@ -5888,7 +5944,7 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
     fb_hd_text_.assign(static_cast<size_t>(240 * hd_scale_) * static_cast<size_t>(240 * hd_scale_), 0u);
     std::fill(std::begin(fb_pix_text_), std::end(fb_pix_text_), 0u);
 
-    g_ft.init(base_dir);
+    g_ft.init(base_dir, asset_dir_);
 
     // Load ScratchPad (.sp) in memory (Copy-on-Write)
     std::ifstream sp_file(sp_path_, std::ios::binary);
@@ -5908,7 +5964,9 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
     }
     g_ui.is_lon_game = is_lon;
     std::string db_path = "capcom_local.db";
-    if (!std::filesystem::exists(db_path) && !base_dir.empty()) {
+    if (!data_dir_.empty()) {
+        db_path = (std::filesystem::path(data_dir_) / "capcom_local.db").string();
+    } else if (!std::filesystem::exists(db_path) && !base_dir.empty()) {
         db_path = (std::filesystem::path(base_dir) / "capcom_local.db").string();
     }
     g_capcom_local.set_db_path(db_path);
@@ -5923,7 +5981,7 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
     load_sav_overlay();
     g_ui.load_config();
     g_ui.discover_and_load_translation();
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
     prctl(PR_SET_PDEATHSIG, SIGHUP);
 #endif
     std::signal(SIGINT, on_termination_signal);
@@ -5955,7 +6013,7 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
         if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
             std::cerr << "SDL_Init warning: " << SDL_GetError() << "\n";
         } else {
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
             prctl(PR_SET_PDEATHSIG, SIGHUP);
 #endif
             std::signal(SIGINT, on_termination_signal);
@@ -5970,13 +6028,18 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
             g_ui.open_controllers();
             int init_h = g_ui.show_softkey_bar ? 260 : 240;
             const char* wtitle = window_title.empty() ? "Rockman EXE Mobile Recomp (PoN / LoN)" : window_title.c_str();
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+            uint32_t win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+#else
+            uint32_t win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
+#endif
             SDL_Window* win = SDL_CreateWindow(
                 wtitle,
                 SDL_WINDOWPOS_CENTERED,
                 SDL_WINDOWPOS_CENTERED,
                 240 * window_scale_,
                 init_h * window_scale_,
-                SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+                win_flags
             );
             if (win) {
                 sdl_window_ = win;
@@ -6308,19 +6371,19 @@ void DojaRuntime::poll_events() {
 
     auto sync_action_edge = [&](int act_idx) {
         ActionBinding& ab = g_ui.binds[act_idx];
-        bool now_down = ab.key_down[0] || ab.key_down[1] || ab.pad_down || ab.axis_down;
+        bool now_down = ab.key_down[0] || ab.key_down[1] || ab.pad_down || ab.axis_down || ab.touch_down;
         if (now_down == ab.effective_down) return;
         ab.effective_down = now_down;
         if (ab.doja_key >= 0) {
             if (now_down) {
                 keypad_state_ |= (1 << ab.doja_key);
                 if (current_canvas_ref_ > 0 && !pvp_match_active_) {
-                    generated_process_event(*this, current_canvas_ref_, 0, ab.doja_key);
+                    dispatch_process_event(current_canvas_ref_, 0, ab.doja_key);
                 }
             } else {
                 keypad_state_ &= ~(1 << ab.doja_key);
                 if (current_canvas_ref_ > 0 && !pvp_match_active_) {
-                    generated_process_event(*this, current_canvas_ref_, 1, ab.doja_key);
+                    dispatch_process_event(current_canvas_ref_, 1, ab.doja_key);
                 }
             }
         }
@@ -6334,12 +6397,12 @@ void DojaRuntime::poll_events() {
         if (pressed) {
             keypad_state_ |= mask;
             if (current_canvas_ref_ > 0 && !pvp_match_active_) {
-                generated_process_event(*this, current_canvas_ref_, 0, doja_key);
+                dispatch_process_event(current_canvas_ref_, 0, doja_key);
             }
         } else {
             keypad_state_ &= ~mask;
             if (current_canvas_ref_ > 0 && !pvp_match_active_) {
-                generated_process_event(*this, current_canvas_ref_, 1, doja_key);
+                dispatch_process_event(current_canvas_ref_, 1, doja_key);
             }
         }
     };
@@ -6393,9 +6456,38 @@ void DojaRuntime::poll_events() {
             }
             continue;
         }
+        if (g_ui.touch.enabled() && sdl_renderer_) {
+            SDL_Renderer* ren = static_cast<SDL_Renderer*>(sdl_renderer_);
+            int out_w = 0, out_h = 0;
+            SDL_GetRendererOutputSize(ren, &out_w, &out_h);
+            g_ui.touch.update_layout(out_w, out_h, g_ui.show_softkey_bar ? 260 : 240);
+            TouchActionDelta td;
+            if (g_ui.touch.handle_event(ev, out_w, out_h, false, td)) {
+                for (int i = 0; i < ACT_COUNT; ++i) {
+                    if (g_ui.binds[i].doja_key >= 0) {
+                        g_ui.binds[i].touch_down = ((td.doja_mask & (1u << g_ui.binds[i].doja_key)) != 0u);
+                    } else if (i == ACT_TURBO) {
+                        g_ui.binds[i].touch_down = td.turbo_down;
+                    }
+                    sync_action_edge(i);
+                }
+                if (td.menu_triggered) {
+                    if (open_pause_or_overlay()) return;
+                }
+                continue;
+            }
+        }
         if (ev.type == SDL_QUIT ||
+            ev.type == SDL_APP_TERMINATING ||
             (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_CLOSE)) {
             clean_exit_runtime(*this, true, 0);
+        } else if (ev.type == SDL_APP_WILLENTERBACKGROUND) {
+            save_sav_overlay();
+            g_ui.save_config();
+            if (g_audio.dev_id != 0) SDL_PauseAudioDevice(g_audio.dev_id, 1);
+            g_ui.assist_hold_down = false;
+        } else if (ev.type == SDL_APP_DIDENTERFOREGROUND) {
+            if (g_audio.dev_id != 0) SDL_PauseAudioDevice(g_audio.dev_id, 0);
         } else if (ev.type == SDL_WINDOWEVENT &&
                    (ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
                     ev.window.event == SDL_WINDOWEVENT_MINIMIZED)) {
@@ -6418,7 +6510,7 @@ void DojaRuntime::poll_events() {
 
             // Emulator hotkeys on key-down
             if (pressed) {
-                if (sym == SDLK_F1 || sym == SDLK_ESCAPE) {
+                if (sym == SDLK_F1 || sym == SDLK_ESCAPE || sym == SDLK_AC_BACK) {
                     if (open_pause_or_overlay()) return;
                     continue;
                 }
@@ -6608,12 +6700,12 @@ void DojaRuntime::present_screen() {
             if (kv.start_frame == frame_count_) {
                 keypad_state_ |= (1 << kv.doja_key);
                 if (current_canvas_ref_ > 0) {
-                    generated_process_event(*this, current_canvas_ref_, 0, kv.doja_key);
+                    dispatch_process_event(current_canvas_ref_, 0, kv.doja_key);
                 }
             } else if (kv.end_frame + 1 == frame_count_) {
                 keypad_state_ &= ~(1 << kv.doja_key);
                 if (current_canvas_ref_ > 0) {
-                    generated_process_event(*this, current_canvas_ref_, 1, kv.doja_key);
+                    dispatch_process_event(current_canvas_ref_, 1, kv.doja_key);
                 }
             }
         }

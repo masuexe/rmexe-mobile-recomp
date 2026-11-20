@@ -14,6 +14,10 @@
 
 namespace pvp_common {
 
+#ifdef RMEXE_GAME_NAMESPACE
+using namespace ::rmexe::pvp_common;
+#endif
+
 inline HostRuntimeState capture_host_runtime_state(DojaRuntime& rt) {
     HostRuntimeState h{};
     h.mill = sf_app_CpCanvas_mill;

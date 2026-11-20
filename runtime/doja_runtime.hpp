@@ -147,6 +147,15 @@ struct InjectedKeySpan {
     int doja_key = 0;
 };
 
+class DojaRuntime;
+
+struct GameModule {
+    void (*static_init)(DojaRuntime& rt) = nullptr;
+    Ref (*create_app_main)(DojaRuntime& rt) = nullptr;
+    void (*start_app)(DojaRuntime& rt, Ref app_ref) = nullptr;
+    void (*process_event)(DojaRuntime& rt, Ref canvas_ref, int32_t type, int32_t param) = nullptr;
+};
+
 // Runtime host interface implemented in doja_runtime.cpp
 class DojaRuntime {
 public:
@@ -155,6 +164,7 @@ public:
 
     bool init(const std::string& jar_path, const std::string& sp_path, const std::string& jam_path, int scale = 3, const std::string& window_title = "");
     void shutdown();
+    void save_sav_overlay_public() { save_sav_overlay(); }
 
     // Arena / Object allocation
     Ref alloc_object(uint16_t class_id, size_t num_i32_fields, size_t num_i64_fields = 0);
@@ -219,6 +229,18 @@ public:
         return pvp_self_test_ || (headless_ && dump_ppm_path_.empty());
     }
     void set_config_path(const std::string& path);
+    void set_touch_controls(bool enabled);
+    void set_data_dir(const std::string& dir) { data_dir_ = dir; }
+    void set_asset_dir(const std::string& dir) { asset_dir_ = dir; }
+    const std::string& data_dir() const { return data_dir_; }
+    const std::string& asset_dir() const { return asset_dir_; }
+    void set_game_module(const GameModule* mod) { game_module_ = mod; }
+    const GameModule* game_module() const { return game_module_; }
+    void dispatch_process_event(Ref canvas_ref, int32_t type, int32_t param) {
+        if (game_module_ && game_module_->process_event) {
+            game_module_->process_event(*this, canvas_ref, type, param);
+        }
+    }
     void inject_key_at_frame(int frame, int doja_key) {
         injected_keys_.push_back({frame, frame, doja_key});
     }
@@ -298,6 +320,9 @@ private:
     std::string jar_path_;
     std::string sp_path_;
     std::string sav_path_;
+    std::string data_dir_;
+    std::string asset_dir_;
+    const GameModule* game_module_ = nullptr;
     std::vector<uint8_t> sp_data_;
     size_t sp_header_offset_ = 0;
 

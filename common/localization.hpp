@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cp932_table.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -12,22 +14,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#ifndef WC_NO_BEST_FIT_CHARS
-#define WC_NO_BEST_FIT_CHARS 0x00000400
-#endif
-#else
-#include <cerrno>
-#include <iconv.h>
-#endif
 
 namespace rmexe::loc {
 
@@ -707,46 +693,14 @@ private:
             return true;
         }
 
-        uint8_t tmp[4] = {0, 0, 0, 0};
+        uint8_t tb0 = 0, tb1 = 0;
         int conv_len = 0;
-#ifdef _WIN32
-        std::string u8;
-        append_cp_utf8(u8, cp);
-        wchar_t wbuf[4] = {0};
-        int wlen = MultiByteToWideChar(CP_UTF8, 0, u8.data(), static_cast<int>(u8.size()), wbuf, 4);
-        if (wlen > 0) {
-            BOOL used_def = FALSE;
-            int clen = WideCharToMultiByte(
-                932, WC_NO_BEST_FIT_CHARS, wbuf, wlen,
-                reinterpret_cast<char*>(tmp), 4, nullptr, &used_def);
-            if (clen == 2 && !used_def) {
-                conv_len = 2;
-            }
-        }
-#else
-        std::string u8;
-        append_cp_utf8(u8, cp);
-        iconv_t cd = iconv_open("CP932", "UTF-8");
-        if (cd != reinterpret_cast<iconv_t>(-1)) {
-            char* inbuf = const_cast<char*>(u8.data());
-            size_t inbytes = u8.size();
-            char* outbuf = reinterpret_cast<char*>(tmp);
-            size_t outbytes = sizeof(tmp);
-            size_t rc = iconv(cd, &inbuf, &inbytes, &outbuf, &outbytes);
-            iconv_close(cd);
-            if (rc != static_cast<size_t>(-1) && inbytes == 0) {
-                size_t written = sizeof(tmp) - outbytes;
-                if (written == 2) {
-                    conv_len = 2;
-                }
-            }
-        }
-#endif
-        if (conv_len == 2 &&
-            is_sjis_lead(tmp[0]) &&
-            tmp[1] >= 0x40u && tmp[1] != 0x7Fu && tmp[1] <= 0xFCu) {
-            b0 = tmp[0];
-            b1 = tmp[1];
+        if (rmexe::cp932::encode_codepoint(cp, tb0, tb1, conv_len) &&
+            conv_len == 2 &&
+            is_sjis_lead(tb0) &&
+            tb1 >= 0x40u && tb1 != 0x7Fu && tb1 <= 0xFCu) {
+            b0 = tb0;
+            b1 = tb1;
             out_len = 2;
             cp932_cache_[cp] = (static_cast<uint32_t>(b0) << 8) | static_cast<uint32_t>(b1);
             return true;

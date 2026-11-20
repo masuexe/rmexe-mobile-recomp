@@ -4,18 +4,20 @@
 // Included inside namespace rmexe at the bottom of *_gen.cpp when is_pon_pvp.
 // ============================================================================
 
+#ifndef RMEXE_GAME_NAMESPACE
 } // namespace rmexe
 
 #include "pvp_common.hpp"
 
 namespace rmexe {
+#endif
 static bool pvp_pon_tick_override_impl(DojaRuntime& rt, Ref cp);
 
 #include "pvp_common.inl"
 
 namespace pvp_pon {
 
-using namespace rmexe::pvp_common;
+using namespace pvp_common;
 
 struct SideContext {
     Ref rock_ref = 0;
