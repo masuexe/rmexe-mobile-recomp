@@ -9,7 +9,11 @@
 #include "../common/pvp_protocol.hpp"
 #include "../common/ymu762_fm.hpp"
 
+#if __has_include(<SDL2/SDL.h>)
 #include <SDL2/SDL.h>
+#else
+#include <SDL.h>
+#endif
 #include <zlib.h>
 #ifdef _WIN32
 #include <windows.h>

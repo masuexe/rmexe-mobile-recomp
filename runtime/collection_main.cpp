@@ -14,7 +14,11 @@
 #include "doja_runtime.hpp"
 #include "net_config.hpp"
 
+#if __has_include(<SDL2/SDL.h>)
 #include <SDL2/SDL.h>
+#else
+#include <SDL.h>
+#endif
 
 #include <algorithm>
 #include <cstdint>

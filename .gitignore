@@ -26,3 +26,15 @@ capcom_local.db
 *.db
 server_data/
 screenshot_*.bmp
+
+# Mobile third-party SDKs, generated Android assets, and build artifacts
+third_party/
+android/.gradle/
+android/build/
+android/local.properties
+android/app/build/
+android/app/.cxx/
+android/app/src/main/assets/
+*.apk
+*.aab
+*.ipa

@@ -1,0 +1,92 @@
+plugins {
+    id("com.android.application")
+}
+
+def repoRoot = rootProject.projectDir.parentFile
+def sdlJavaDir = new File(repoRoot, "third_party/SDL2/android-project/app/src/main/java")
+def bundleUserRoms = project.hasProperty("bundleUserRoms") && project.property("bundleUserRoms").toString().toBoolean()
+
+android {
+    namespace "com.rmexe.recomp"
+    compileSdk 34
+    ndkVersion "26.3.11579264"
+
+    defaultConfig {
+        applicationId "com.rmexe.recomp"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "0.5.0-zh"
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_shared", "-DRMEXE_BUILD_COLLECTION=ON"
+                abiFilters "arm64-v8a"
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+        debug {
+            debuggable true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            if (sdlJavaDir.exists()) {
+                java.srcDirs += sdlJavaDir
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+}
+
+tasks.register("syncRmexeAssets", Copy) {
+    def dstAssets = file("src/main/assets")
+    into(dstAssets)
+
+    from(new File(repoRoot, "assets/fonts")) {
+        include "*.ttf", "*.ttc", "*.otf"
+        into "fonts"
+    }
+    from(new File(repoRoot, "assets/translations")) {
+        include "pon_zh.json", "lon_zh.json"
+        into "translations"
+    }
+
+    if (bundleUserRoms) {
+        ["PoN_jp", "PoN", "LoN_jp", "LoN"].each { dirName ->
+            def srcDir = new File(repoRoot, "assets/${dirName}")
+            if (srcDir.exists()) {
+                from(srcDir) {
+                    include "bin/*.jar", "sp/*.sp"
+                    exclude "sp/*.orig.sp"
+                    into dirName
+                }
+            }
+        }
+    }
+}
+
+preBuild.dependsOn("syncRmexeAssets")
