@@ -108,6 +108,42 @@ inline bool looks_like_pixel_font_path(const std::string& path) {
            fn == "msgothic.ttc" || fn == "simsun.ttc" || fn == "mingliu.ttc";
 }
 
+inline std::string friendly_font_display_name(const std::string& path_or_name) {
+    std::filesystem::path p(path_or_name);
+    std::string fn = to_lower_ascii(p.filename().string());
+    if (fn.find("notosanssc") != std::string::npos || fn.find("noto_sans_sc") != std::string::npos ||
+        fn.find("sourcehansans") != std::string::npos) {
+        return "思源黑体";
+    }
+    if (fn.find("sarasa") != std::string::npos) return "更纱黑体";
+    if (fn.find("chillduan") != std::string::npos) return "寒蝉端黑体";
+    if (fn.find("wqy-microhei") != std::string::npos || fn.find("wqymicrohei") != std::string::npos) {
+        return "文泉驿微米黑";
+    }
+    if (fn.find("wqy-zenhei") != std::string::npos || fn.find("wqyzenhei") != std::string::npos) {
+        return "文泉驿正黑";
+    }
+    if (fn.find("fusion-pixel") != std::string::npos || fn.find("fusion_pixel") != std::string::npos) {
+        return "缝合像素";
+    }
+    if (fn.find("zpix") != std::string::npos) return "Zpix像素";
+    if (fn.find("cubic_11") != std::string::npos || fn.find("cubic-11") != std::string::npos ||
+        fn.find("cubic11") != std::string::npos) {
+        return "俐方体11号";
+    }
+    if (fn.find("unifont") != std::string::npos) return "Unifont点阵";
+    if (fn.find("msgothic") != std::string::npos) return "MS Gothic";
+    if (fn.find("simsun") != std::string::npos) return "宋体(点阵)";
+    if (fn.find("mingliu") != std::string::npos) return "细明体(点阵)";
+    if (fn.find("msyh") != std::string::npos) return "微软雅黑";
+    if (fn.find("notosanscjk") != std::string::npos) return "Noto CJK";
+
+    std::string stem = p.stem().string();
+    if (stem.empty()) stem = p.filename().string();
+    if (stem.size() > 14) stem = stem.substr(0, 12) + "..";
+    return stem.empty() ? "默认字体" : stem;
+}
+
 // Premultiplied ARGB8888 Porter-Duff OVER compositing helpers for decoupled text overlays
 inline void blend_pm_over(uint32_t& dst_pm, uint8_t sr, uint8_t sg, uint8_t sb, uint32_t sa) {
     if (sa == 0) return;
@@ -256,6 +292,9 @@ struct StbFontEngine {
     struct FontFace {
         std::shared_ptr<const std::vector<uint8_t>> font_bytes;
         stbtt_fontinfo info{};
+        std::string file_name;
+        std::string display_name;
+        bool user_selectable = false;
         float scale = 1.0f;
         float pixel_scale = 1.0f;
         bool has_cjk = false;
@@ -277,10 +316,85 @@ struct StbFontEngine {
     std::vector<FontFace> hd_faces;
     std::vector<std::string> pixel_loaded_keys;
     std::vector<std::string> hd_loaded_keys;
+    std::vector<size_t> selectable_pixel_indices;
+    std::vector<size_t> selectable_hd_indices;
+    size_t active_pixel_idx = 0;
+    size_t active_hd_idx = 0;
     bool loaded = false;
     bool initialized = false;
     std::unordered_map<uint32_t, CachedGlyph> pixel_cache;
     std::unordered_map<uint64_t, CachedGlyph> hd_cache;
+
+    size_t selectable_font_count(bool hd) const {
+        return hd ? selectable_hd_indices.size() : selectable_pixel_indices.size();
+    }
+
+    size_t current_selectable_pos(bool hd) const {
+        const auto& sel = hd ? selectable_hd_indices : selectable_pixel_indices;
+        size_t active = hd ? active_hd_idx : active_pixel_idx;
+        for (size_t i = 0; i < sel.size(); ++i) {
+            if (sel[i] == active) return i;
+        }
+        return 0;
+    }
+
+    std::string current_font_display_name(bool hd) const {
+        const auto& faces = hd ? hd_faces : pixel_faces;
+        size_t active = hd ? active_hd_idx : active_pixel_idx;
+        if (active < faces.size() && !faces[active].display_name.empty()) {
+            return faces[active].display_name;
+        }
+        return "默认";
+    }
+
+    std::string current_font_filename(bool hd) const {
+        const auto& faces = hd ? hd_faces : pixel_faces;
+        size_t active = hd ? active_hd_idx : active_pixel_idx;
+        if (active < faces.size()) return faces[active].file_name;
+        return "";
+    }
+
+    bool select_font_by_name(bool hd, const std::string& target_name) {
+        if (target_name.empty()) return false;
+        const auto& faces = hd ? hd_faces : pixel_faces;
+        const auto& sel = hd ? selectable_hd_indices : selectable_pixel_indices;
+        std::string want = to_lower_ascii(std::filesystem::path(target_name).filename().string());
+        for (size_t idx : sel) {
+            if (idx < faces.size() && to_lower_ascii(faces[idx].file_name) == want) {
+                if (hd) {
+                    if (active_hd_idx != idx) {
+                        active_hd_idx = idx;
+                        hd_cache.clear();
+                    }
+                } else {
+                    if (active_pixel_idx != idx) {
+                        active_pixel_idx = idx;
+                        pixel_cache.clear();
+                    }
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::string cycle_font(bool hd, int dir) {
+        const auto& sel = hd ? selectable_hd_indices : selectable_pixel_indices;
+        const auto& faces = hd ? hd_faces : pixel_faces;
+        if (sel.empty() || faces.empty()) return "";
+        size_t pos = current_selectable_pos(hd);
+        size_t n = sel.size();
+        size_t next_pos = (pos + n + (dir >= 0 ? 1u : (n - 1u))) % n;
+        size_t next_idx = sel[next_pos];
+        if (hd) {
+            active_hd_idx = next_idx;
+            hd_cache.clear();
+        } else {
+            active_pixel_idx = next_idx;
+            pixel_cache.clear();
+        }
+        return faces[next_idx].file_name;
+    }
 
     static std::string canonical_path_key(const std::string& path) {
         std::error_code ec;
@@ -586,7 +700,8 @@ struct StbFontEngine {
                             bool require_cjk,
                             bool require_eblc_only = false,
                             bool force_pixel_outline = false,
-                            bool prefer_sc_ttc = false) {
+                            bool prefer_sc_ttc = false,
+                            bool user_selectable = false) {
         std::error_code ec;
         if (!std::filesystem::is_regular_file(path, ec)) return false;
 
@@ -624,6 +739,10 @@ struct StbFontEngine {
         face.font_bytes = bytes_ptr;
         if (!stbtt_InitFont(&face.info, face.font_bytes->data(), offset)) return false;
 
+        face.file_name = std::filesystem::path(path).filename().string();
+        face.display_name = friendly_font_display_name(face.file_name);
+        face.user_selectable = user_selectable;
+
         face.has_cjk = (stbtt_FindGlyphIndex(&face.info, 0x3042) != 0 ||
                         stbtt_FindGlyphIndex(&face.info, 0x4E2D) != 0);
         if (require_cjk && !face.has_cjk) return false;
@@ -655,6 +774,10 @@ struct StbFontEngine {
         hd_faces.clear();
         pixel_loaded_keys.clear();
         hd_loaded_keys.clear();
+        selectable_pixel_indices.clear();
+        selectable_hd_indices.clear();
+        active_pixel_idx = 0;
+        active_hd_idx = 0;
         pixel_cache.clear();
         hd_cache.clear();
 
@@ -664,8 +787,10 @@ struct StbFontEngine {
             asset_dirs.push_back((std::filesystem::path(extra_asset_dir) / "assets" / "fonts").string());
         }
         if (!base_dir.empty()) {
+            asset_dirs.push_back((std::filesystem::path(base_dir) / "fonts").string());
             asset_dirs.push_back((std::filesystem::path(base_dir) / "assets" / "fonts").string());
         }
+        asset_dirs.push_back("fonts");
         asset_dirs.push_back("assets/fonts");
 
         std::vector<std::string> scanned_assets;
@@ -691,21 +816,21 @@ struct StbFontEngine {
         // ---- Chain 1: 12px Pixel Font Faces ----
         if (!cli_pixel_font_path.empty()) {
             std::string p = resolve_runtime_path(cli_pixel_font_path, base_dir);
-            try_load_face_into(pixel_faces, pixel_loaded_keys, p, false, false, true);
+            try_load_face_into(pixel_faces, pixel_loaded_keys, p, false, false, true, false, true);
         }
 
         const char* pixel_priority_names[] = {
-            "pixel12.ttf", "pixel12.ttc", "fusion-pixel.ttf", "zpix.ttf",
+            "pixel12.ttf", "pixel12.ttc", "fusion-pixel.ttf", "zpix.ttf", "Cubic_11_1.100_R.ttf",
             "msgothic.ttc", "simsun.ttc", "unifont.ttf"
         };
         for (const std::string& dir : asset_dirs) {
             for (const char* name : pixel_priority_names) {
-                try_load_face_into(pixel_faces, pixel_loaded_keys, (std::filesystem::path(dir) / name).string(), false);
+                try_load_face_into(pixel_faces, pixel_loaded_keys, (std::filesystem::path(dir) / name).string(), false, false, false, false, true);
             }
         }
         for (const std::string& p : scanned_assets) {
             if (looks_like_pixel_font_path(p)) {
-                try_load_face_into(pixel_faces, pixel_loaded_keys, p, false);
+                try_load_face_into(pixel_faces, pixel_loaded_keys, p, false, false, false, false, true);
             }
         }
 
@@ -767,7 +892,7 @@ struct StbFontEngine {
         // ---- Chain 2: HD Smooth Vector Font Faces ----
         if (!cli_hd_font_path.empty()) {
             std::string p = resolve_runtime_path(cli_hd_font_path, base_dir);
-            try_load_face_into(hd_faces, hd_loaded_keys, p, false, false, false, true);
+            try_load_face_into(hd_faces, hd_loaded_keys, p, false, false, false, true, true);
         }
 
         const char* hd_priority_names[] = {
@@ -777,12 +902,12 @@ struct StbFontEngine {
         };
         for (const std::string& dir : asset_dirs) {
             for (const char* name : hd_priority_names) {
-                try_load_face_into(hd_faces, hd_loaded_keys, (std::filesystem::path(dir) / name).string(), false, false, false, true);
+                try_load_face_into(hd_faces, hd_loaded_keys, (std::filesystem::path(dir) / name).string(), false, false, false, true, true);
             }
         }
         for (const std::string& p : scanned_assets) {
             if (!looks_like_pixel_font_path(p)) {
-                try_load_face_into(hd_faces, hd_loaded_keys, p, false, false, false, true);
+                try_load_face_into(hd_faces, hd_loaded_keys, p, false, false, false, true, true);
             }
         }
 
@@ -821,6 +946,22 @@ struct StbFontEngine {
             }
         }
 
+        for (size_t i = 0; i < pixel_faces.size(); ++i) {
+            if (pixel_faces[i].user_selectable) selectable_pixel_indices.push_back(i);
+        }
+        if (selectable_pixel_indices.empty() && !pixel_faces.empty()) {
+            selectable_pixel_indices.push_back(0);
+        }
+        active_pixel_idx = selectable_pixel_indices.empty() ? 0 : selectable_pixel_indices[0];
+
+        for (size_t i = 0; i < hd_faces.size(); ++i) {
+            if (hd_faces[i].user_selectable) selectable_hd_indices.push_back(i);
+        }
+        if (selectable_hd_indices.empty() && !hd_faces.empty()) {
+            selectable_hd_indices.push_back(0);
+        }
+        active_hd_idx = selectable_hd_indices.empty() ? 0 : selectable_hd_indices[0];
+
         loaded = !pixel_faces.empty() || !hd_faces.empty();
     }
 
@@ -832,8 +973,16 @@ struct StbFontEngine {
         }
 
         CachedGlyph cg{};
-        // Pass 1: Respect priority order across EBLC/EBDT strikes and dedicated pixel-outline fonts
-        for (const auto& face : pixel_faces) {
+        const size_t n_pix = pixel_faces.size();
+        const size_t pref_pix = (active_pixel_idx < n_pix) ? active_pixel_idx : 0;
+        auto pix_idx_at = [&](size_t step) -> size_t {
+            if (step == 0) return pref_pix;
+            return (step <= pref_pix) ? (step - 1) : step;
+        };
+
+        // Pass 1: Respect active selection then priority order across EBLC/EBDT strikes and dedicated pixel-outline fonts
+        for (size_t step = 0; step < n_pix; ++step) {
+            const auto& face = pixel_faces[pix_idx_at(step)];
             if (face.has_eblc_12) {
                 if (try_get_eblc_glyph(face, cp, cg)) {
                     auto [ins_it, _] = pixel_cache.emplace(cp, std::move(cg));
@@ -878,10 +1027,10 @@ struct StbFontEngine {
         }
 
         // Pass 2: Vector outline fallback via stb_truetype
-        for (size_t i = 0; i < pixel_faces.size(); ++i) {
-            const auto& face = pixel_faces[i];
+        for (size_t step = 0; step < n_pix; ++step) {
+            const auto& face = pixel_faces[pix_idx_at(step)];
             int gidx = stbtt_FindGlyphIndex(&face.info, static_cast<int>(cp));
-            if (gidx == 0 && !(cp <= 0x7Fu && i + 1 == pixel_faces.size())) {
+            if (gidx == 0 && !(cp <= 0x7Fu && step + 1 == n_pix)) {
                 continue;
             }
 
@@ -922,10 +1071,13 @@ struct StbFontEngine {
         }
 
         CachedGlyph cg{};
-        for (size_t i = 0; i < hd_faces.size(); ++i) {
+        const size_t n_hd = hd_faces.size();
+        const size_t pref_hd = (active_hd_idx < n_hd) ? active_hd_idx : 0;
+        for (size_t step = 0; step < n_hd; ++step) {
+            size_t i = (step == 0) ? pref_hd : ((step <= pref_hd) ? (step - 1) : step);
             auto& face = hd_faces[i];
             int gidx = stbtt_FindGlyphIndex(&face.info, static_cast<int>(cp));
-            if (gidx == 0 && !(cp <= 0x7Fu && i + 1 == hd_faces.size())) {
+            if (gidx == 0 && !(cp <= 0x7Fu && step + 1 == n_hd)) {
                 continue;
             }
 
@@ -2556,6 +2708,8 @@ struct UiInputManager {
     bool show_softkey_bar = true;
     bool high_fps_mode = true; // true = 60 FPS smooth interpolation, false = 15 FPS original flip-phone rate
     bool hd_font_mode = true;  // true = native window-resolution HD smooth font (default), false = 12px pixel font
+    std::string hd_font_name;
+    std::string pixel_font_name;
     bool is_fullscreen = false;
     std::string soft_label_left;
     std::string soft_label_right;
@@ -2824,6 +2978,14 @@ struct UiInputManager {
         if (has_cli_font_mode) {
             hd_font_mode = cli_hd_font_mode;
         }
+        if (g_ft.initialized) {
+            if (g_ft.cli_hd_font_path.empty() && !hd_font_name.empty()) {
+                g_ft.select_font_by_name(true, hd_font_name);
+            }
+            if (g_ft.cli_pixel_font_path.empty() && !pixel_font_name.empty()) {
+                g_ft.select_font_by_name(false, pixel_font_name);
+            }
+        }
         if (has_cli_pvp_bo3) {
             pvp_bo3_mode = cli_pvp_bo3;
         }
@@ -2879,6 +3041,10 @@ struct UiInputManager {
                 high_fps_mode = (std::atoi(val.c_str()) != 0);
             } else if (key == "hd_font_mode") {
                 hd_font_mode = (std::atoi(val.c_str()) != 0);
+            } else if (key == "hd_font" && !val.empty()) {
+                hd_font_name = val;
+            } else if (key == "pixel_font" && !val.empty()) {
+                pixel_font_name = val;
             } else if (key == "online_mode") {
                 online_mode = (std::atoi(val.c_str()) != 0);
             } else if (key == "server_url" && !val.empty()) {
@@ -2971,6 +3137,8 @@ struct UiInputManager {
         out << "muted=" << (is_muted ? 1 : 0) << "\n";
         out << "high_fps_mode=" << (high_fps_mode ? 1 : 0) << "\n";
         out << "hd_font_mode=" << (hd_font_mode ? 1 : 0) << "\n";
+        if (!hd_font_name.empty()) out << "hd_font=" << hd_font_name << "\n";
+        if (!pixel_font_name.empty()) out << "pixel_font=" << pixel_font_name << "\n";
         out << "show_softkey_bar=" << (show_softkey_bar ? 1 : 0) << "\n";
         out << "online_mode=" << (online_mode ? 1 : 0) << "\n";
         out << "server_url=" << server_url << "\n";
@@ -3548,10 +3716,10 @@ struct UiInputManager {
     // 23: 恢复默认按键配置
     // 24: 返回游戏 (Resume)
     // 25: 保存进度并退出
-    static constexpr int ASSIST_ROW_IDX = 10;
-    static constexpr int BIND_START_ROW = 11;
-    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 23
-    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 26
+    static constexpr int ASSIST_ROW_IDX = 11;
+    static constexpr int BIND_START_ROW = 12;
+    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 24
+    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 27
     static constexpr int ASSIST_TOTAL_ROWS = 17;
     static constexpr int VISIBLE_ROWS = 9;
 
@@ -3812,6 +3980,24 @@ struct UiInputManager {
         hd_font_mode = !hd_font_mode;
         save_config();
         show_toast(hd_font_mode ? "字体模式: 高清平滑 (HD)" : "字体模式: 原版像素 (12px)", 90);
+    }
+
+    void cycle_active_font(int dir) {
+        size_t cnt = g_ft.selectable_font_count(hd_font_mode);
+        if (cnt <= 1) {
+            show_toast("当前模式仅检测到 1 款字体 (可放 .ttf/.otf 到 fonts/)", 120);
+            return;
+        }
+        std::string fname = g_ft.cycle_font(hd_font_mode, dir);
+        if (!fname.empty()) {
+            if (hd_font_mode) hd_font_name = fname;
+            else pixel_font_name = fname;
+            save_config();
+        }
+        std::string dname = g_ft.current_font_display_name(hd_font_mode);
+        size_t pos = g_ft.current_selectable_pos(hd_font_mode) + 1;
+        std::string prefix = hd_font_mode ? "高清字体: " : "像素字体: ";
+        show_toast(prefix + dname + " (" + std::to_string(pos) + "/" + std::to_string(cnt) + ")", 90);
     }
 
     void toggle_language_mode() {
@@ -4354,10 +4540,12 @@ struct UiInputManager {
                 } else if (overlay_sel_row == 7) {
                     toggle_font_mode();
                 } else if (overlay_sel_row == 8) {
+                    cycle_active_font(dir);
+                } else if (overlay_sel_row == 9) {
                     show_softkey_bar = !show_softkey_bar;
                     apply_softbar_geometry(win, ren, scale);
                     save_config();
-                } else if (overlay_sel_row == 9) {
+                } else if (overlay_sel_row == 10) {
                     toggle_language_mode();
                 } else if (overlay_sel_row == ASSIST_ROW_IDX) {
                     enter_assist_page();
@@ -4401,10 +4589,12 @@ struct UiInputManager {
                 } else if (overlay_sel_row == 7) {
                     toggle_font_mode();
                 } else if (overlay_sel_row == 8) {
+                    cycle_active_font(1);
+                } else if (overlay_sel_row == 9) {
                     show_softkey_bar = !show_softkey_bar;
                     apply_softbar_geometry(win, ren, scale);
                     save_config();
-                } else if (overlay_sel_row == 9) {
+                } else if (overlay_sel_row == 10) {
                     toggle_language_mode();
                 } else if (overlay_sel_row == ASSIST_ROW_IDX) {
                     enter_assist_page();
@@ -4727,10 +4917,23 @@ struct UiInputManager {
                 std::string fmstr = hd_font_mode ? "< 高清平滑 (HD) >" : "< 原版像素 (12px) >";
                 ui_draw_text(fmstr, 84, ry + 12, hd_font_mode ? 0xFF74D8FFu : 0xFFFFD874u);
             } else if (r == 8) {
+                ui_draw_text("当前字体", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                size_t cnt = g_ft.selectable_font_count(hd_font_mode);
+                std::string dname = g_ft.current_font_display_name(hd_font_mode);
+                std::string fstr;
+                if (cnt > 1) {
+                    size_t pos = g_ft.current_selectable_pos(hd_font_mode) + 1;
+                    fstr = "< " + dname + " (" + std::to_string(pos) + "/" + std::to_string(cnt) + ") >";
+                } else {
+                    fstr = dname;
+                }
+                int fx = std::max(68, std::min(84, 228 - measure_ui_text(fstr)));
+                ui_draw_text(fstr, fx, ry + 12, hd_font_mode ? 0xFF88EEFFu : 0xFFFFE088u);
+            } else if (r == 9) {
                 ui_draw_text("底部软键栏", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string sstr = show_softkey_bar ? "< 开启 >" : "< 关闭 >";
                 ui_draw_text(sstr, 110, ry + 12, show_softkey_bar ? 0xFF88FFAAu : 0xFF98A8C0u);
-            } else if (r == 9) {
+            } else if (r == 10) {
                 ui_draw_text("语言/汉化", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
                 std::string lstr;
                 uint32_t lcol = 0xFF98A8C0u;
@@ -4814,6 +5017,8 @@ struct UiInputManager {
                 ui_draw_text("Enter:手动输入/粘贴地址  ←→:预设切换", 6, 211, 0xFF88EEFFu);
             } else if (overlay_sel_row == 3) {
                 ui_draw_text("Enter:输入/粘贴昵称 (自动保存)", 14, 211, 0xFFFFEC88u);
+            } else if (overlay_sel_row == 8) {
+                ui_draw_text("←→/Enter:切换当前模式字体 (即时生效)", 8, 211, 0xFF74D8FFu);
             } else if (overlay_sel_row == ASSIST_ROW_IDX) {
                 ui_draw_text("Enter:进入百倍炮/减伤/Boss潜行等设置", 8, 211, 0xFFFFD874u);
             } else if (overlay_sel_row == 0) {
