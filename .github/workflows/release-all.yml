@@ -137,7 +137,7 @@ jobs:
   # 3. macOS arm64
   # =========================================================================
   build-macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install SDL2 via Homebrew
@@ -241,7 +241,7 @@ jobs:
   # 5. iOS arm64 Collection IPA for AltStore (user supplies .jar/.sp via Files app)
   # =========================================================================
   build-ios:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Fetch compile-time assets (if RMEXE_ASSETS_URL secret is set)
