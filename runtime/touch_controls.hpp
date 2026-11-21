@@ -101,6 +101,17 @@ public:
         }
     }
 
+    bool buttons_hidden() const { return buttons_hidden_; }
+    void set_buttons_hidden(bool hidden) {
+        if (buttons_hidden_ == hidden) return;
+        buttons_hidden_ = hidden;
+        layout_dirty_ = true;
+        if (hidden) {
+            edit_mode_ = false;
+            clear_all_fingers();
+        }
+    }
+
     bool in_edit_mode() const { return edit_mode_; }
     void set_edit_mode(bool ed) {
         edit_mode_ = ed;
@@ -208,6 +219,19 @@ public:
         const float aspect = static_cast<float>(game_logical_h) / 240.0f;
         portrait_ = (out_h > static_cast<int>(out_w * 1.12f));
         const auto& ovs = portrait_ ? portrait_ov_ : landscape_ov_;
+
+        if (buttons_hidden_ && !edit_mode_) {
+            // Physical gamepad active: maximize 1:1 game viewport centered in full screen
+            int gw = out_w;
+            int gh = static_cast<int>(std::round(gw * aspect));
+            if (gh > out_h) {
+                gh = out_h;
+                gw = static_cast<int>(std::round(gh / aspect));
+            }
+            game_rect_ = SDL_Rect{(out_w - gw) / 2, (out_h - gh) / 2, gw, gh};
+            dpad_rect_ = SDL_Rect{0, 0, 0, 0};
+            return;
+        }
 
         auto apply_group_rect = [&](TouchGroupId g, SDL_Rect base) -> SDL_Rect {
             const auto& ov = ovs[static_cast<int>(g)];
@@ -406,6 +430,20 @@ public:
             return handle_edit_pointer(is_down, is_move, is_up, px, py, out_w, out_h, out_delta);
         }
 
+        // 1b) If virtual buttons are auto-hidden due to physical gamepad:
+        //     - Tapping inside game_rect_ still works for Saito-style Custom Screen chip selection
+        //     - Tapping outside game_rect_ (or while overlay is open) immediately restores virtual buttons
+        if (buttons_hidden_) {
+            if (is_down) {
+                if (!overlay_open && map_game_screen_tap(px, py, out_delta)) {
+                    return true;
+                }
+                set_buttons_hidden(false);
+                return true;
+            }
+            return false;
+        }
+
         // 2) When F1 overlay is open, tapping the floating "EDIT" button enters Layout Edit Mode
         if (overlay_open && is_down && pt_in_rect(px, py, overlay_edit_btn_, 6)) {
             set_edit_mode(true);
@@ -468,7 +506,7 @@ public:
     bool turbo_down() const { return (pressed_ctrl_mask_ & ctrl_bit(TouchControlId::BtnTurbo)) != 0u; }
 
     void render(SDL_Renderer* ren, bool overlay_open = false) const {
-        if (!enabled_ || !ren) return;
+        if (!enabled_ || !ren || (buttons_hidden_ && !edit_mode_)) return;
         SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
 
         // Subtle D-Pad center hub
@@ -534,6 +572,7 @@ public:
 
 private:
     bool enabled_ = false;
+    bool buttons_hidden_ = false;
     bool edit_mode_ = false;
     bool layout_dirty_ = true;
     bool portrait_ = true;

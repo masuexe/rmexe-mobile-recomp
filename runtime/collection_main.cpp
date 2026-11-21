@@ -192,8 +192,26 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games,
         if (games[i].assets_ready) { selected = i; break; }
     }
 
+    std::vector<SDL_GameController*> pads;
+    auto refresh_pads = [&]() {
+        for (SDL_GameController* gc : pads) {
+            if (gc) SDL_GameControllerClose(gc);
+        }
+        pads.clear();
+        int njoy = SDL_NumJoysticks();
+        for (int i = 0; i < njoy; ++i) {
+            if (SDL_IsGameController(i)) {
+                if (SDL_GameController* gc = SDL_GameControllerOpen(i)) {
+                    pads.push_back(gc);
+                }
+            }
+        }
+    };
+    refresh_pads();
+
     int chosen = -1;
     bool running = true;
+    int stick_dir = 0;
     std::vector<SDL_Rect> card_rects(games.size());
 
     while (running) {
@@ -224,6 +242,29 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games,
             if (ev.type == SDL_QUIT || ev.type == SDL_APP_TERMINATING) {
                 running = false;
                 chosen = -1;
+            } else if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+                refresh_pads();
+            } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
+                int b = ev.cbutton.button;
+                if (b == SDL_CONTROLLER_BUTTON_DPAD_UP) {
+                    selected = (selected + n - 1) % n;
+                } else if (b == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
+                    selected = (selected + 1) % n;
+                } else if (b == SDL_CONTROLLER_BUTTON_A || b == SDL_CONTROLLER_BUTTON_START) {
+                    if (games[selected].assets_ready) {
+                        chosen = selected;
+                        running = false;
+                    }
+                } else if (b == SDL_CONTROLLER_BUTTON_B || b == SDL_CONTROLLER_BUTTON_BACK) {
+                    running = false;
+                    chosen = -1;
+                }
+            } else if (ev.type == SDL_CONTROLLERAXISMOTION && ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+                int nd = (ev.caxis.value < -16000) ? -1 : ((ev.caxis.value > 16000) ? 1 : 0);
+                if (nd != 0 && nd != stick_dir) {
+                    selected = (selected + n + nd) % n;
+                }
+                stick_dir = nd;
             } else if (ev.type == SDL_KEYDOWN) {
                 SDL_Keycode k = ev.key.keysym.sym;
                 if (k == SDLK_ESCAPE || k == SDLK_AC_BACK) {
@@ -288,6 +329,11 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games,
         SDL_Delay(16);
     }
 
+    for (SDL_GameController* gc : pads) {
+        if (gc) SDL_GameControllerClose(gc);
+    }
+    pads.clear();
+
     if (chosen >= 0) {
         // Keep the existing SDL_Window and SDL_Renderer alive for DojaRuntime
         // (avoids tearing down Android Surface/GLES context between launcher and game).
@@ -343,7 +389,10 @@ int main(int argc, char** argv) {
     if (asset_dir.empty()) asset_dir = data_dir;
 #elif defined(__IPHONEOS__)
     if (data_dir.empty()) {
-        if (char* pref = SDL_GetPrefPath("rmexe", "recomp")) {
+        // Prefer ~/Documents so files are directly visible & importable via the iPhone Files app (UIFileSharingEnabled)
+        if (const char* home = std::getenv("HOME"); home && *home) {
+            data_dir = std::string(home) + "/Documents";
+        } else if (char* pref = SDL_GetPrefPath("rmexe", "recomp")) {
             data_dir = pref;
             SDL_free(pref);
         }

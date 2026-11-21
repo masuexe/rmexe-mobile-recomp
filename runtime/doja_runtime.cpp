@@ -3463,11 +3463,11 @@ struct UiInputManager {
             int cw = measure_ui_text(c_txt);
             ui_draw_text(c_txt, 120 - cw / 2, 254, g_pvp.match_started() ? 0xFF68FF9Au : 0xFF74C4FFu);
         } else if (online_mode) {
-            std::string c_txt = "在线:F1";
+            std::string c_txt = touch.enabled() ? "在线:MENU" : "在线:F1";
             int cw = measure_ui_text(c_txt);
             ui_draw_text(c_txt, 120 - cw / 2, 254, 0xFF74D8FFu);
         } else {
-            std::string c_txt = "F1:设置";
+            std::string c_txt = touch.enabled() ? "MENU:设置" : "F1:设置";
             int cw = measure_ui_text(c_txt);
             ui_draw_text(c_txt, 120 - cw / 2, 254, 0xFF8A9CC2u);
         }
@@ -6309,12 +6309,21 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
             }
             g_audio.init_sdl_audio();
             std::string fps_tag = g_ui.high_fps_mode ? "60FPS" : "15FPS";
-            g_ui.show_toast(
-                g_ui.online_mode
-                    ? ("在线 (" + g_ui.server_url + ") | " + fps_tag + " | F1:设置 F3:帧率")
-                    : ("当前: " + fps_tag + " | F1:设置  F3:切换60/15帧"),
-                120
-            );
+            if (g_ui.touch.enabled()) {
+                g_ui.show_toast(
+                    g_ui.online_mode
+                        ? ("在线 (" + g_ui.server_url + ") | " + fps_tag + " | MENU:设置")
+                        : ("当前: " + fps_tag + " | 点 MENU 打开设置/布局"),
+                    120
+                );
+            } else {
+                g_ui.show_toast(
+                    g_ui.online_mode
+                        ? ("在线 (" + g_ui.server_url + ") | " + fps_tag + " | F1:设置 F3:帧率")
+                        : ("当前: " + fps_tag + " | F1:设置  F3:切换60/15帧"),
+                    120
+                );
+            }
         }
     }
 
@@ -6854,6 +6863,9 @@ void DojaRuntime::poll_events() {
             }
         } else if (ev.type == SDL_CONTROLLERBUTTONDOWN || ev.type == SDL_CONTROLLERBUTTONUP) {
             bool pressed = (ev.type == SDL_CONTROLLERBUTTONDOWN);
+            if (pressed && g_ui.touch.enabled() && !g_ui.touch.buttons_hidden()) {
+                g_ui.touch.set_buttons_hidden(true);
+            }
             int btn = ev.cbutton.button;
             if (pressed && btn == SDL_CONTROLLER_BUTTON_START && !in_modal) {
                 if (open_pause_or_overlay()) return;

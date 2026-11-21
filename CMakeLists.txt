@@ -6,7 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-if(TARGET SDL2::SDL2)
+if(TARGET SDL2::SDL2-static AND IOS)
+    set(SDL2_INCLUDE_DIRS "")
+    set(SDL2_LIBRARIES SDL2::SDL2-static)
+elseif(TARGET SDL2::SDL2)
     set(SDL2_INCLUDE_DIRS "")
     set(SDL2_LIBRARIES SDL2::SDL2)
 elseif(SDL2_INCLUDE_DIR AND SDL2_LIBRARY)
@@ -206,6 +209,37 @@ if(RMEXE_BUILD_COLLECTION)
             target_compile_definitions(main PRIVATE ${COLLECTION_DEFS})
             target_link_libraries(main PRIVATE doja_runtime log android)
             message(STATUS "Enabled Android unified collection library: libmain.so (${COLLECTION_DEFS})")
+        elseif(IOS)
+            add_executable(RMEXECollection MACOSX_BUNDLE
+                ${COLLECTION_GEN_SRCS}
+                runtime/collection_main.cpp
+            )
+            target_compile_definitions(RMEXECollection PRIVATE ${COLLECTION_DEFS})
+            set_target_properties(RMEXECollection PROPERTIES
+                MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist"
+                XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.rmexe.recomp"
+                XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "13.0"
+                XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+                XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
+                XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO"
+                XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
+            )
+            target_link_libraries(RMEXECollection PRIVATE
+                doja_runtime
+                "-framework AudioToolbox"
+                "-framework AVFoundation"
+                "-framework CoreAudio"
+                "-framework CoreGraphics"
+                "-framework CoreHaptics"
+                "-framework CoreMotion"
+                "-framework Foundation"
+                "-framework GameController"
+                "-framework Metal"
+                "-framework OpenGLES"
+                "-framework QuartzCore"
+                "-framework UIKit"
+            )
+            message(STATUS "Enabled iOS unified collection bundle: RMEXECollection.app (${COLLECTION_DEFS})")
         else()
             add_executable(rmexe_collection
                 ${COLLECTION_GEN_SRCS}
