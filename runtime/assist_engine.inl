@@ -182,6 +182,19 @@ static void assist_on_frame_tick(DojaRuntime& rt) {
     AssistHudStatus st{};
     st.en_native_bas_max = en_nat;
 
+    // 0. Lock encounter step counter to 0 while encounters are suppressed so disabling assist later never triggers an instant encounter
+    if (sf_app_CpCanvas_scene == 3 && eff) {
+        bool suppress_enc = (cfg.encounter_rate_pct <= 0);
+        if (!suppress_enc && cfg.wild_boss_only) {
+            int32_t req_sina = 99;
+            int32_t navi_id = 0;
+            suppress_enc = !assist_lookup_wild_boss(sf_app_CpCanvas_map_no, req_sina, navi_id);
+        }
+        if (suppress_enc) {
+            sf_app_CpCanvas_move_cnt = 0;
+        }
+    }
+
     // 1. EX Boss Radar HUD (when Field scene == 3)
     if (sf_app_CpCanvas_scene == 3 && eff && (cfg.show_ex_boss > 0 || cfg.wild_boss_only)) {
         int32_t req_sina = 99;
@@ -278,12 +291,14 @@ static bool assist_eval_field_encounter(DojaRuntime& rt, int32_t raw_encount, in
     }
     const auto& cfg = rt.assist_config();
     if (cfg.encounter_rate_pct <= 0) {
+        sf_app_CpCanvas_move_cnt = 0;
         return false;
     }
     if (cfg.wild_boss_only) {
         int32_t req_sina = 99;
         int32_t navi_id = 0;
         if (!assist_lookup_wild_boss(sf_app_CpCanvas_map_no, req_sina, navi_id)) {
+            sf_app_CpCanvas_move_cnt = 0;
             return false; // Wild Boss Only Stealth suppresses normal virus encounters on non-boss maps
         }
     }
@@ -588,13 +603,20 @@ static void assist_run_self_test(DojaRuntime& rt, Ref cp) {
 
     // 3. Encounter rate, Wild Boss Only Stealth, EX Boss Radar
     cfg.encounter_rate_pct = 0;
-    check(!assist_eval_field_encounter(rt, 10, 999), "encounter_rate_pct=0 blocks encounters");
+    sf_app_CpCanvas_move_cnt = 999;
+    check(!assist_eval_field_encounter(rt, 10, sf_app_CpCanvas_move_cnt) && sf_app_CpCanvas_move_cnt == 0,
+          "encounter_rate_pct=0 blocks encounters and locks move_cnt to 0");
+    cfg.encounter_rate_pct = 100;
+    check(!assist_eval_field_encounter(rt, 10, sf_app_CpCanvas_move_cnt),
+          "disabling no-encounter does not immediately trigger encounter");
     cfg.encounter_rate_pct = 10000;
     check(assist_eval_field_encounter(rt, 800, 1), "encounter_rate_pct=10000 triggers on step 1");
     cfg.encounter_rate_pct = 100;
     cfg.wild_boss_only = true;
     sf_app_CpCanvas_map_no = 0; // non-boss map in both PoN & LoN
-    check(!assist_eval_field_encounter(rt, 10, 999), "wild_boss_only suppresses non-boss map encounters");
+    sf_app_CpCanvas_move_cnt = 999;
+    check(!assist_eval_field_encounter(rt, 10, sf_app_CpCanvas_move_cnt) && sf_app_CpCanvas_move_cnt == 0,
+          "wild_boss_only suppresses non-boss map encounters and locks move_cnt to 0");
     sf_app_CpCanvas_map_no = 1; // boss map (req_sina=2, navi_id=0) in both PoN & LoN
     check(assist_eval_field_encounter(rt, 10, 999), "wild_boss_only allows boss map encounters");
     int32_t ghost_loc3 = -1;
