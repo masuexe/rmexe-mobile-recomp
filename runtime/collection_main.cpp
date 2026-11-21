@@ -97,17 +97,25 @@ void bootstrap_android_assets(const std::string& data_dir) {
 }
 #endif
 
-std::string resolve_entry_path(const std::string& rel, const std::string& data_dir, const std::string& base_dir) {
+void ensure_user_rom_dirs(const std::string& root_dir) {
+    if (root_dir.empty()) return;
     std::error_code ec;
-    if (!data_dir.empty()) {
-        auto p1 = std::filesystem::path(data_dir) / rel;
-        if (std::filesystem::is_regular_file(p1, ec)) return p1.string();
+    std::filesystem::path root(root_dir);
+    static const char* kGames[] = {"PoN_jp", "PoN", "LoN_jp", "LoN"};
+    for (const char* g : kGames) {
+        std::filesystem::create_directories(root / "assets" / g / "bin", ec);
+        std::filesystem::create_directories(root / "assets" / g / "sp", ec);
+    }
+}
+
+std::string resolve_entry_path(const std::string& rel, const std::vector<std::string>& search_dirs) {
+    std::error_code ec;
+    for (const auto& dir : search_dirs) {
+        if (dir.empty()) continue;
+        auto p = std::filesystem::path(dir) / rel;
+        if (std::filesystem::is_regular_file(p, ec)) return p.string();
     }
     if (std::filesystem::is_regular_file(rel, ec)) return rel;
-    if (!base_dir.empty()) {
-        auto p2 = std::filesystem::path(base_dir) / rel;
-        if (std::filesystem::is_regular_file(p2, ec)) return p2.string();
-    }
     return rel;
 }
 
@@ -379,14 +387,22 @@ int main(int argc, char** argv) {
         else if (arg == "--lang" && i + 1 < argc) rmexe::set_cli_lang_mode(argv[++i]);
     }
 
+    std::vector<std::string> search_dirs;
 #ifdef __ANDROID__
+    std::string android_ext_dir;
+    if (const char* ext = SDL_AndroidGetExternalStoragePath(); ext && *ext) {
+        android_ext_dir = ext;
+        rmexe::ensure_user_rom_dirs(android_ext_dir);
+        search_dirs.push_back(android_ext_dir);
+    }
     if (data_dir.empty()) {
         if (const char* intr = SDL_AndroidGetInternalStoragePath(); intr && *intr) data_dir = intr;
-        else if (const char* ext = SDL_AndroidGetExternalStoragePath(); ext && *ext) data_dir = ext;
+        else if (!android_ext_dir.empty()) data_dir = android_ext_dir;
     }
-    SDL_Log("RMEXE Android data_dir=%s", data_dir.c_str());
+    SDL_Log("RMEXE Android data_dir=%s ext_dir=%s", data_dir.c_str(), android_ext_dir.c_str());
     rmexe::bootstrap_android_assets(data_dir);
     if (asset_dir.empty()) asset_dir = data_dir;
+    search_dirs.push_back(data_dir);
 #elif defined(__IPHONEOS__)
     if (data_dir.empty()) {
         // Prefer ~/Documents so files are directly visible & importable via the iPhone Files app (UIFileSharingEnabled)
@@ -397,7 +413,9 @@ int main(int argc, char** argv) {
             SDL_free(pref);
         }
     }
+    rmexe::ensure_user_rom_dirs(data_dir);
     if (asset_dir.empty()) asset_dir = data_dir;
+    search_dirs.push_back(data_dir);
 #endif
 
     std::string base_dir;
@@ -405,6 +423,8 @@ int main(int argc, char** argv) {
         base_dir = b;
         SDL_free(b);
     }
+    if (!asset_dir.empty()) search_dirs.push_back(asset_dir);
+    if (!base_dir.empty()) search_dirs.push_back(base_dir);
 
     std::vector<rmexe::CollectionGameEntry> games;
 #ifdef RMEXE_HAVE_PON_JP
@@ -425,10 +445,9 @@ int main(int argc, char** argv) {
 #endif
 
     std::error_code ec;
-    const std::string search_dir = !asset_dir.empty() ? asset_dir : data_dir;
     for (auto& g : games) {
-        std::string jp = rmexe::resolve_entry_path(g.jar_rel, search_dir, base_dir);
-        std::string sp = rmexe::resolve_entry_path(g.sp_rel, search_dir, base_dir);
+        std::string jp = rmexe::resolve_entry_path(g.jar_rel, search_dirs);
+        std::string sp = rmexe::resolve_entry_path(g.sp_rel, search_dirs);
         g.assets_ready = std::filesystem::is_regular_file(jp, ec) && std::filesystem::is_regular_file(sp, ec);
         SDL_Log("RMEXE game=%s ready=%d jar=%s sp=%s", g.id, g.assets_ready ? 1 : 0, jp.c_str(), sp.c_str());
     }
@@ -454,8 +473,8 @@ int main(int argc, char** argv) {
     }
 
     const auto& chosen = games[pick];
-    std::string jar_path = rmexe::resolve_entry_path(chosen.jar_rel, search_dir, base_dir);
-    std::string sp_path = rmexe::resolve_entry_path(chosen.sp_rel, search_dir, base_dir);
+    std::string jar_path = rmexe::resolve_entry_path(chosen.jar_rel, search_dirs);
+    std::string sp_path = rmexe::resolve_entry_path(chosen.sp_rel, search_dirs);
     SDL_Log("RMEXE launching %s (jar=%s, sp=%s)", chosen.id, jar_path.c_str(), sp_path.c_str());
 
     rmexe::DojaRuntime rt;
