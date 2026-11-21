@@ -398,6 +398,33 @@ static int32_t assist_move_check_intercept(DojaRuntime& rt, Ref cp, int32_t a0, 
         sf_app_CpCanvas_map_y += a1 * step;
         moved += step;
         if (sf_app_CpCanvas_mes_no > 0) break;
+
+        // Prevent high run_speed_pct from overshooting 13x13px warp trigger boxes or floor event tiles
+        if (sf_app_CpCanvas_m_data > 0) {
+            int32_t mx = sf_app_CpCanvas_map_x;
+            int32_t my = sf_app_CpCanvas_map_y;
+            if (mx >= 0 && (my + 5) >= 0) {
+                int32_t tidx = ((my + 5) / 30) * 24 + (mx / 30);
+                if (tidx >= 0 && tidx < rt.array_length(sf_app_CpCanvas_m_data)) {
+                    int32_t tile = rt.iaload(sf_app_CpCanvas_m_data, tidx);
+                    if ((tile & 128) != 0 && sf_app_CpCanvas_warp_cnt == 0) {
+                        break;
+                    }
+                    if (tile > 6 && tile < 11) {
+                        if (sf_app_CpCanvas_warp_flg == 0) {
+                            int32_t rx = mx % 30;
+                            int32_t ry = (my + 8) % 30;
+                            if (rx > 8 && rx < 22 && ry > 8 && ry < 22) {
+                                break;
+                            }
+                        }
+                    } else if (sf_app_CpCanvas_warp_flg != 0 && sf_app_CpCanvas_ivent_end == 0) {
+                        // Let FieldMain clear warp_flg on stepping off a warp tile so adjacent warps work
+                        break;
+                    }
+                }
+            }
+        }
     }
     return moved;
 }
@@ -648,7 +675,7 @@ static void assist_run_self_test(DojaRuntime& rt, Ref cp) {
     fn_app_CpCanvas_GetItem___III__I(rt, cp, 1, 0, 100);
     check(sf_app_CpCanvas_zenny == 1600, "GetItem does NOT double-scale Zenny inside BattleMain");
 
-    // 5. Overworld Run Speed (preserving map_x/map_y/map_sp)
+    // 5. Overworld Run Speed (preserving map_x/map_y/map_sp & not overshooting warp tiles)
     cfg.run_speed_pct = 200;
     int32_t saved_mx = sf_app_CpCanvas_map_x;
     int32_t saved_my = sf_app_CpCanvas_map_y;
@@ -657,6 +684,33 @@ static void assist_run_self_test(DojaRuntime& rt, Ref cp) {
     check(sf_app_CpCanvas_map_x == saved_mx && sf_app_CpCanvas_map_y == saved_my &&
           sf_app_CpCanvas_map_sp == saved_sp && !g_assist_state.in_movechack_passthrough,
           "MoveChack intercept restores map_x/map_y/map_sp and passthrough flag");
+
+    if (sf_app_CpCanvas_m_data > 0 && rt.array_length(sf_app_CpCanvas_m_data) > 2 * 24 + 3) {
+        int32_t t1 = rt.iaload(sf_app_CpCanvas_m_data, 2 * 24 + 1);
+        int32_t t2 = rt.iaload(sf_app_CpCanvas_m_data, 2 * 24 + 2);
+        int32_t t3 = rt.iaload(sf_app_CpCanvas_m_data, 2 * 24 + 3);
+        int32_t saved_wf = sf_app_CpCanvas_warp_flg;
+        rt.iaload(sf_app_CpCanvas_m_data, 2 * 24 + 1) = 1;
+        rt.iaload(sf_app_CpCanvas_m_data, 2 * 24 + 2) = 7; // warp tile
+        rt.iaload(sf_app_CpCanvas_m_data, 2 * 24 + 3) = 1;
+        sf_app_CpCanvas_warp_flg = 0;
+        sf_app_CpCanvas_map_x = 2 * 30 + 4; // 64 (outside 9..21 trigger window)
+        sf_app_CpCanvas_map_y = 2 * 30 + 7; // 67 -> (67+8)%30 == 15 (center Y)
+        sf_app_CpCanvas_map_sp = 5;
+        g_assist_state.run_accum = 0;
+        cfg.run_speed_pct = 500; // would leap 25px (64 -> 89) without warp-stop check
+        int32_t warp_moved = assist_move_check_intercept(rt, cp, 1, 0);
+        int32_t end_rx = (sf_app_CpCanvas_map_x + warp_moved) % 30;
+        check(warp_moved > 0 && warp_moved < 25 && end_rx > 8 && end_rx < 22,
+              "run_speed_pct=500 stops inside warp trigger zone instead of overshooting");
+        rt.iaload(sf_app_CpCanvas_m_data, 2 * 24 + 1) = t1;
+        rt.iaload(sf_app_CpCanvas_m_data, 2 * 24 + 2) = t2;
+        rt.iaload(sf_app_CpCanvas_m_data, 2 * 24 + 3) = t3;
+        sf_app_CpCanvas_warp_flg = saved_wf;
+        sf_app_CpCanvas_map_x = saved_mx;
+        sf_app_CpCanvas_map_y = saved_my;
+        sf_app_CpCanvas_map_sp = saved_sp;
+    }
 
     // 6. Auto Full HP, Always Escape, Custom Gauge Speed, Drop & S-Rank
     cfg.auto_full_hp = true;
