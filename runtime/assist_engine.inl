@@ -447,6 +447,67 @@ static bool assist_should_block_ranking_upload(DojaRuntime& rt) {
 #endif
 }
 
+// Saito-style Touchscreen Custom Screen Chip Selection (PoN & LoN, SP & Online PvP)
+static void assist_on_battle_tip_touch(DojaRuntime& rt) {
+    int gx = -1, gy = -1;
+    if (!rt.consume_game_touch_tap(gx, gy)) return;
+    if (sf_app_CpCanvas_cas_cnt != 0 || sf_app_CpCanvas_esc_flg != 0 ||
+        sf_app_CpCanvas_yes_no_flg != 0 || sf_app_CpCanvas_pa_start != 0) {
+        return;
+    }
+
+    // 1. Chip tray 5x2 grid: x = 7 + col*16 (w=16), y = 144 + row*24 (h=24)
+    if (gx >= 6 && gx < 88 && gy >= 143 && gy < 193) {
+        int col = std::clamp((gx - 7) / 16, 0, 4);
+        int row = (gy >= 168) ? 1 : 0;
+        int slot = row * 5 + col;
+        if (slot >= 0 && slot < sf_app_CpCanvas_max_sel) {
+            sf_app_CpCanvas_sel_cas_mode = 0;
+            sf_app_CpCanvas_sel_cas_tip = slot;
+            // Single-tap immediate selection if chip slot is currently selectable (cas_ok[slot] == 1)
+            if (sf_app_CpCanvas_cas_ok > 0 && slot < rt.array_length(sf_app_CpCanvas_cas_ok) &&
+                rt.iaload(sf_app_CpCanvas_cas_ok, slot) == 1) {
+                sf_app_CpCanvas_key |= 1048576; // KEY_SELECT (1 << 20)
+            }
+        }
+        return;
+    }
+
+    // 2. OK button: x in [88, 115), y in [155, 179)
+    if (gx >= 88 && gx < 115 && gy >= 155 && gy < 179) {
+        sf_app_CpCanvas_sel_cas_mode = 1;
+        sf_app_CpCanvas_key |= 1048576; // KEY_SELECT
+        return;
+    }
+
+    // 3. ADD / Shuffle / Arm button: x in [88, 115), y in [179, 202)
+    if (gx >= 88 && gx < 115 && gy >= 179 && gy < 202) {
+#ifdef RMEXE_IS_PON_GAME
+        if (sf_app_CpCanvas_sec_cha != 0 && sf_app_CpCanvas_sel_cnt == 0) {
+            sf_app_CpCanvas_sel_cas_mode = 2;
+            sf_app_CpCanvas_key |= 1048576;
+        }
+#else
+        if (sf_app_CpCanvas_arm_on != 0 && sf_app_CpCanvas_arm_mode == 0) {
+            sf_app_CpCanvas_sel_cas_mode = 2;
+            sf_app_CpCanvas_key |= 1048576;
+        } else if (sf_app_CpCanvas_sha_cnt != 0) {
+            sf_app_CpCanvas_sel_cas_mode = 3;
+            sf_app_CpCanvas_key |= 1048576;
+        }
+#endif
+        return;
+    }
+
+    // 4. Queued selected chips column: tap to undo last selected chip (KEY_SOFT1 = 1 << 21)
+    if (gx >= 94 && gx < 118 && gy >= 64 && gy < 148) {
+        if (sf_app_CpCanvas_sel_cnt > 0) {
+            sf_app_CpCanvas_key |= 2097152; // KEY_SOFT1
+        }
+        return;
+    }
+}
+
 static void assist_run_self_test(DojaRuntime& rt, Ref cp) {
     std::cout << "[AssistSelfTest] Running comprehensive QoL/Assist verification suite...\n";
     auto check = [](bool cond, const char* msg) {

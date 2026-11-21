@@ -3089,6 +3089,8 @@ struct UiInputManager {
                 assist_cfg.drop_rank_mode = std::atoi(val.c_str());
             } else if (key == "assist_show_hud") {
                 assist_cfg.show_assist_hud = (std::atoi(val.c_str()) != 0);
+            } else if (touch.parse_config_line(key, val)) {
+                // Touch layout / opacity parsed
             } else {
                 for (int i = 0; i < ACT_COUNT; ++i) {
                     std::string pfx = std::string(binds[i].cfg_id) + "_";
@@ -3161,7 +3163,9 @@ struct UiInputManager {
         out << "assist_always_escape=" << (assist_cfg.always_escape ? 1 : 0) << "\n";
         out << "assist_custom_gauge_pct=" << assist_cfg.custom_gauge_pct << "\n";
         out << "assist_drop_rank_mode=" << assist_cfg.drop_rank_mode << "\n";
-        out << "assist_show_hud=" << (assist_cfg.show_assist_hud ? 1 : 0) << "\n\n";
+        out << "assist_show_hud=" << (assist_cfg.show_assist_hud ? 1 : 0) << "\n";
+        touch.serialize_config(out);
+        out << "\n";
         for (int i = 0; i < ACT_COUNT; ++i) {
             out << binds[i].cfg_id << "_key1=" << format_key_cfg(binds[i].keys[0]) << "\n";
             out << binds[i].cfg_id << "_key2=" << format_key_cfg(binds[i].keys[1]) << "\n";
@@ -3598,7 +3602,7 @@ struct UiInputManager {
             SDL_SetRenderDrawColor(ren, 8, 12, 24, 255);
             SDL_RenderClear(ren);
             SDL_RenderCopy(ren, active_tex, &src_rect, &dst_rect);
-            touch.render(ren);
+            touch.render(ren, overlay_open);
             SDL_RenderPresent(ren);
             return;
         }
@@ -4240,6 +4244,10 @@ struct UiInputManager {
             touch.update_layout(out_w, out_h, show_softkey_bar ? 260 : 240);
             TouchActionDelta td;
             if (touch.handle_event(ev, out_w, out_h, true, td)) {
+                if (td.layout_saved) {
+                    save_config();
+                    show_toast("触控布局已保存", 90);
+                }
                 for (SDL_Keycode k : td.overlay_keys) {
                     SDL_Event synth{};
                     synth.type = SDL_KEYDOWN;
@@ -6687,6 +6695,13 @@ void DojaRuntime::poll_events() {
             g_ui.touch.update_layout(out_w, out_h, g_ui.show_softkey_bar ? 260 : 240);
             TouchActionDelta td;
             if (g_ui.touch.handle_event(ev, out_w, out_h, false, td)) {
+                if (td.layout_saved) {
+                    g_ui.save_config();
+                    g_ui.show_toast("触控布局已保存", 90);
+                }
+                if (td.has_game_tap) {
+                    queue_game_touch_tap(td.game_tap_x, td.game_tap_y);
+                }
                 for (int i = 0; i < ACT_COUNT; ++i) {
                     if (g_ui.binds[i].doja_key >= 0) {
                         g_ui.binds[i].touch_down = ((td.doja_mask & (1u << g_ui.binds[i].doja_key)) != 0u);
@@ -6879,6 +6894,7 @@ void DojaRuntime::poll_events() {
 
 void DojaRuntime::present_screen() {
     ++frame_count_;
+    if (pending_tap_ttl_ > 0) --pending_tap_ttl_;
     // Support deterministic synthetic UI hotkeys in --inject-key
     // (100=F1, 101=Enter, 102=Down, 103=Left, 104=Right, 105=Up)
     for (const auto& kv : injected_keys_) {

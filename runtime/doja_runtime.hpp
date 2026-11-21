@@ -230,6 +230,18 @@ public:
     }
     void set_config_path(const std::string& path);
     void set_touch_controls(bool enabled);
+    void queue_game_touch_tap(int x, int y) {
+        pending_tap_x_ = x;
+        pending_tap_y_ = y;
+        pending_tap_ttl_ = 2;
+    }
+    bool consume_game_touch_tap(int& out_x, int& out_y) {
+        if (pending_tap_ttl_ <= 0) return false;
+        out_x = pending_tap_x_;
+        out_y = pending_tap_y_;
+        pending_tap_ttl_ = 0;
+        return true;
+    }
     void attach_external_sdl(void* window, void* renderer) {
         sdl_window_ = window;
         sdl_renderer_ = renderer;
@@ -354,6 +366,9 @@ private:
     bool suppress_av_ = false;
     bool keypad_override_enabled_ = false;
     int32_t keypad_override_mask_ = 0;
+    int pending_tap_x_ = -1;
+    int pending_tap_y_ = -1;
+    int pending_tap_ttl_ = 0;
 
     // SDL handles (opaque pointers to avoid polluting generated code with SDL headers)
     void* sdl_window_ = nullptr;

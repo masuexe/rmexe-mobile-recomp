@@ -427,6 +427,7 @@ def generate_cpp(jar_path: Path, out_cpp: Path, game_namespace: str = "") -> Non
                 "static bool assist_should_force_s_rank(DojaRuntime& rt);",
                 "static bool assist_should_block_ranking_record(DojaRuntime& rt);",
                 "static bool assist_should_block_ranking_upload(DojaRuntime& rt);",
+                "static void assist_on_battle_tip_touch(DojaRuntime& rt);",
                 "static void assist_run_self_test(DojaRuntime& rt, Ref cp);",
             ]
         )
@@ -543,6 +544,8 @@ def generate_cpp(jar_path: Path, out_cpp: Path, game_namespace: str = "") -> Non
             if is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "RankUp", "()I"):
                 assist_hooks["rank_up_entry"] += 1
                 lines.append("    if (assist_should_block_ranking_upload(rt)) return -999;")
+            if is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "BattleTip", "()V"):
+                lines.append("    assist_on_battle_tip_touch(rt);")
 
             is_cp_exe = is_pvp and (cls_name, m.name, m.descriptor) == ("app/CpCanvas", "exe", "()V")
             is_rock_draw = is_pvp and (cls_name, m.name, m.descriptor) == ("app/Rock", "Draw", "(I)V")
