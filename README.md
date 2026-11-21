@@ -156,3 +156,11 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the complete engineering design.
 1. [ ] **Chinese Localization (简体/繁体中文汉化支持)**: External script extraction toolchain & non-destructive runtime UTF-8 Chinese translation overlay for both *PoN* and *LoN*.
 2. [ ] **Mobile Port (移动端 / Android 移植版)**: Native Android (`SDL2` + NDK) build with customizable on-screen virtual GBA / flip-phone touch controls.
 3. [ ] **60 Hz GBA-Feel Mode (60 FPS 模拟 GBA 原生手感模式)**: 60 Hz sub-tick input response (16.7 ms latency) and GBA-paced combat/movement mechanics beyond visual motion interpolation.
+
+---
+
+## License & Disclaimer
+
+- **License**: The original source code in this repository is licensed under the [MIT License](LICENSE).
+- **Third-Party Libraries**: Embedded [`common/stb_truetype.h`](common/stb_truetype.h) is dual-licensed under the MIT License / Public Domain. External dependencies (`SDL2`, `zlib`) retain their respective licenses.
+- **Disclaimer**: This project is an independent, clean-room static recompiler and runtime and is not affiliated with, endorsed by, or associated with Capcom Co., Ltd. *Rockman EXE* / *MegaMan Battle Network* is a trademark of Capcom Co., Ltd. This repository contains no copyrighted game code or assets; users must supply their own legally obtained files.
