@@ -499,12 +499,10 @@ static void assist_on_battle_tip_touch(DojaRuntime& rt) {
         return;
     }
 
-    // 4. Queued selected chips column: tap to undo last selected chip (KEY_SOFT1 = 1 << 21)
-    if (gx >= 94 && gx < 118 && gy >= 64 && gy < 148) {
-        if (sf_app_CpCanvas_sel_cnt > 0) {
-            sf_app_CpCanvas_key |= 2097152; // KEY_SOFT1
-        }
-        return;
+    // 4. Tap anywhere else on the Custom Screen (queued chips, battlefield, art box, etc.)
+    //    to undo the last selected chip (KEY_SOFT1 = 1 << 21) when at least 1 chip is queued.
+    if (sf_app_CpCanvas_sel_cnt > 0) {
+        sf_app_CpCanvas_key |= 2097152; // KEY_SOFT1
     }
 }
 
