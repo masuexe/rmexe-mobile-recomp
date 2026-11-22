@@ -46,15 +46,67 @@ namespace game_lon_en { const GameModule& get_game_module(); }
 
 namespace {
 
-struct CollectionGameEntry {
-    const char* id;
-    const char* title;
-    const char* subtitle;
-    const char* jar_rel;
-    const char* sp_rel;
-    const GameModule* mod;
+struct RomVariant {
+    bool compiled = false;
     bool assets_ready = false;
+    const char* jar_rel = "";
+    const char* sp_rel = "";
+    const GameModule* mod = nullptr;
 };
+
+struct CollectionTitle {
+    const char* id = "";
+    const char* jp_zh_title = "";
+    const char* en_title = "";
+    const char* subtitle = "";
+    const char* zh_pack_name = "";
+    bool zh_pack_ready = false;
+    RomVariant jp;
+    RomVariant en;
+};
+
+enum class LauncherLang : int {
+    Zh = 0,
+    Jp = 1,
+    En = 2,
+};
+
+std::string to_lower_ascii(std::string s) {
+    for (char& ch : s) {
+        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+    }
+    return s;
+}
+
+bool is_lang_ready(const CollectionTitle& t, LauncherLang lang) {
+    if (lang == LauncherLang::Zh) return t.jp.compiled && t.jp.assets_ready && t.zh_pack_ready;
+    if (lang == LauncherLang::Jp) return t.jp.compiled && t.jp.assets_ready;
+    return t.en.compiled && t.en.assets_ready;
+}
+
+const RomVariant& variant_for_lang(const CollectionTitle& t, LauncherLang lang) {
+    return (lang == LauncherLang::En) ? t.en : t.jp;
+}
+
+std::string title_for_lang(const CollectionTitle& t, LauncherLang lang) {
+    if (lang == LauncherLang::Zh) return std::string(t.jp_zh_title) + " (ZH)";
+    if (lang == LauncherLang::Jp) return std::string(t.jp_zh_title) + " (JP)";
+    return std::string(t.en_title) + " (EN)";
+}
+
+const char* status_for_lang(const CollectionTitle& t, LauncherLang lang) {
+    if (lang == LauncherLang::Zh) {
+        if (!t.jp.compiled || !t.jp.assets_ready) return "MISSING JP ROM IN ASSETS";
+        if (!t.zh_pack_ready) return "MISSING ZH PATCH IN ASSETS";
+        return "READY - JP ROM + ZH PATCH";
+    }
+    if (lang == LauncherLang::Jp) {
+        if (!t.jp.compiled || !t.jp.assets_ready) return "MISSING JP ROM IN ASSETS";
+        return "READY - OFFICIAL JP ROM";
+    }
+    if (!t.en.compiled || !t.en.assets_ready) return "MISSING EN ROM IN ASSETS";
+    return "READY - FAN EN ROM";
+}
 
 #ifdef __ANDROID__
 // On Android, unpack bundled read-only APK assets (fonts, translations, optional .jar/.sp)
@@ -119,6 +171,17 @@ std::string resolve_entry_path(const std::string& rel, const std::vector<std::st
     return rel;
 }
 
+bool is_translation_ready(const std::string& fname, const std::vector<std::string>& search_dirs) {
+    std::error_code ec;
+    const std::string rel_assets = "assets/translations/" + fname;
+    const std::string rel_plain = "translations/" + fname;
+    std::string p1 = resolve_entry_path(rel_assets, search_dirs);
+    if (std::filesystem::is_regular_file(p1, ec) && std::filesystem::file_size(p1, ec) > 0) return true;
+    std::string p2 = resolve_entry_path(rel_plain, search_dirs);
+    if (std::filesystem::is_regular_file(p2, ec) && std::filesystem::file_size(p2, ec) > 0) return true;
+    return false;
+}
+
 // Simple 5x7 ASCII bitmap text for the pure-SDL2 launcher (zero external font deps)
 void draw_launcher_char(SDL_Renderer* ren, char ch, int x, int y, int s) {
     if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 'a' + 'A');
@@ -138,6 +201,8 @@ void draw_launcher_char(SDL_Renderer* ren, char ch, int x, int y, int s) {
         {'-', 0b000000111000000}, {':', 0b000010000010000}, {'/', 0b001001010100100},
         {'.', 0b000000000000010}, {'(', 0b001010010010001}, {')', 0b100010010010100},
         {'[', 0b110100100100110}, {']', 0b011001001001011}, {'!', 0b010010010000010},
+        {',', 0b000000000010100}, {'+', 0b000010111010000}, {'<', 0b001010100010001},
+        {'>', 0b100010001010100},
     };
     uint16_t bits = 0;
     for (const auto& g : kFont) {
@@ -163,14 +228,24 @@ void draw_launcher_text(SDL_Renderer* ren, const std::string& txt, int x, int y,
     }
 }
 
-int run_collection_launcher(std::vector<CollectionGameEntry>& games,
-                            SDL_Window*& out_win, SDL_Renderer*& out_ren) {
+void draw_launcher_text_centered(SDL_Renderer* ren, const std::string& txt, const SDL_Rect& box, int y, int s,
+                                 uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
+    int tw = txt.empty() ? 0 : static_cast<int>(txt.size()) * (4 * s) - s;
+    int x = box.x + std::max(0, (box.w - tw) / 2);
+    draw_launcher_text(ren, txt, x, y, s, r, g, b, a);
+}
+
+bool run_collection_launcher(const std::vector<CollectionTitle>& titles,
+                             int& selected_title,
+                             LauncherLang& selected_lang,
+                             SDL_Window*& out_win,
+                             SDL_Renderer*& out_ren) {
     out_win = nullptr;
     out_ren = nullptr;
-    if (games.empty()) return -1;
+    if (titles.empty()) return false;
     if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         SDL_Log("RMEXE Launcher SDL_Init failed: %s", SDL_GetError());
-        return 0;
+        return false;
     }
 
 #if defined(__ANDROID__) || defined(__IPHONEOS__)
@@ -185,19 +260,14 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games,
                                        init_w, init_h, win_flags);
     if (!win) {
         SDL_Log("RMEXE Launcher SDL_CreateWindow failed: %s", SDL_GetError());
-        return 0;
+        return false;
     }
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
     if (!ren) {
         SDL_Log("RMEXE Launcher SDL_CreateRenderer failed: %s", SDL_GetError());
         SDL_DestroyWindow(win);
-        return 0;
-    }
-
-    int selected = 0;
-    for (int i = 0; i < static_cast<int>(games.size()); ++i) {
-        if (games[i].assets_ready) { selected = i; break; }
+        return false;
     }
 
     std::vector<SDL_GameController*> pads;
@@ -217,10 +287,18 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games,
     };
     refresh_pads();
 
-    int chosen = -1;
+    bool launched = false;
     bool running = true;
-    int stick_dir = 0;
-    std::vector<SDL_Rect> card_rects(games.size());
+    int stick_x_dir = 0;
+    int stick_y_dir = 0;
+    const int n = static_cast<int>(titles.size());
+    std::vector<SDL_Rect> card_rects(n);
+    SDL_Rect lang_rects[3]{};
+
+    auto step_lang = [&](int delta) {
+        int cur = (static_cast<int>(selected_lang) + delta + 3) % 3;
+        selected_lang = static_cast<LauncherLang>(cur);
+    };
 
     while (running) {
         int out_w = 0, out_h = 0;
@@ -231,75 +309,115 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games,
         if (out_w <= 0) out_w = 720;
         if (out_h <= 0) out_h = 1280;
 
-        const int pad = std::max(18, out_w / 18);
-        const int header_h = std::max(72, out_h / 9);
-        const int avail_h = std::max(200, out_h - header_h - pad * 2);
-        const int n = static_cast<int>(games.size());
-        const int gap = std::max(12, avail_h / 28);
-        const int card_h = std::clamp((avail_h - gap * (n - 1)) / std::max(1, n), 68, 160);
+        const int pad = std::max(14, out_w / 20);
         const int card_w = std::min(out_w - pad * 2, 760);
         const int card_x = (out_w - card_w) / 2;
-        const int start_y = header_h + pad / 2;
 
+        const int title_s = std::clamp(out_w / 140, 3, 6);
+        const int sub_s = std::max(2, title_s - 1);
+        const int title_y = std::max(18, out_h / 26);
+        const int sub_y = title_y + title_s * 6 + 4;
+
+        const int lang_y = sub_y + sub_s * 5 + std::max(14, out_h / 36);
+        const int lang_h = std::clamp(out_h / 11, 50, 82);
+        const int lang_gap = std::max(8, card_w / 40);
+        const int btn_w = (card_w - lang_gap * 2) / 3;
+        for (int k = 0; k < 3; ++k) {
+            lang_rects[k] = SDL_Rect{card_x + k * (btn_w + lang_gap), lang_y, btn_w, lang_h};
+        }
+
+        const int fs = std::clamp(card_w / 180, 2, 3);
+        const int footer_h = fs * 14 + std::max(18, out_h / 36);
+        const int games_top = lang_y + lang_h + std::max(14, out_h / 32);
+        const int games_avail = std::max(140, out_h - games_top - footer_h - pad);
+        const int gap = std::max(14, games_avail / 18);
+        const int card_h = std::clamp((games_avail - gap * std::max(0, n - 1)) / std::max(1, n), 76, 175);
         for (int i = 0; i < n; ++i) {
-            card_rects[i] = SDL_Rect{card_x, start_y + i * (card_h + gap), card_w, card_h};
+            card_rects[i] = SDL_Rect{card_x, games_top + i * (card_h + gap), card_w, card_h};
         }
 
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT || ev.type == SDL_APP_TERMINATING) {
                 running = false;
-                chosen = -1;
+                launched = false;
             } else if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED) {
                 refresh_pads();
             } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
                 int b = ev.cbutton.button;
                 if (b == SDL_CONTROLLER_BUTTON_DPAD_UP) {
-                    selected = (selected + n - 1) % n;
+                    selected_title = (selected_title + n - 1) % n;
                 } else if (b == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
-                    selected = (selected + 1) % n;
+                    selected_title = (selected_title + 1) % n;
+                } else if (b == SDL_CONTROLLER_BUTTON_DPAD_LEFT || b == SDL_CONTROLLER_BUTTON_LEFTSHOULDER) {
+                    step_lang(-1);
+                } else if (b == SDL_CONTROLLER_BUTTON_DPAD_RIGHT || b == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) {
+                    step_lang(1);
                 } else if (b == SDL_CONTROLLER_BUTTON_A || b == SDL_CONTROLLER_BUTTON_START) {
-                    if (games[selected].assets_ready) {
-                        chosen = selected;
+                    if (is_lang_ready(titles[selected_title], selected_lang)) {
+                        launched = true;
                         running = false;
                     }
                 } else if (b == SDL_CONTROLLER_BUTTON_B || b == SDL_CONTROLLER_BUTTON_BACK) {
                     running = false;
-                    chosen = -1;
+                    launched = false;
                 }
-            } else if (ev.type == SDL_CONTROLLERAXISMOTION && ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
-                int nd = (ev.caxis.value < -16000) ? -1 : ((ev.caxis.value > 16000) ? 1 : 0);
-                if (nd != 0 && nd != stick_dir) {
-                    selected = (selected + n + nd) % n;
+            } else if (ev.type == SDL_CONTROLLERAXISMOTION) {
+                if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+                    int nd = (ev.caxis.value < -16000) ? -1 : ((ev.caxis.value > 16000) ? 1 : 0);
+                    if (nd != 0 && nd != stick_y_dir) {
+                        selected_title = (selected_title + n + nd) % n;
+                    }
+                    stick_y_dir = nd;
+                } else if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
+                    int nd = (ev.caxis.value < -16000) ? -1 : ((ev.caxis.value > 16000) ? 1 : 0);
+                    if (nd != 0 && nd != stick_x_dir) {
+                        step_lang(nd);
+                    }
+                    stick_x_dir = nd;
                 }
-                stick_dir = nd;
             } else if (ev.type == SDL_KEYDOWN) {
                 SDL_Keycode k = ev.key.keysym.sym;
                 if (k == SDLK_ESCAPE || k == SDLK_AC_BACK) {
                     running = false;
-                    chosen = -1;
+                    launched = false;
                 } else if (k == SDLK_UP || k == SDLK_w) {
-                    selected = (selected + n - 1) % n;
+                    selected_title = (selected_title + n - 1) % n;
                 } else if (k == SDLK_DOWN || k == SDLK_s) {
-                    selected = (selected + 1) % n;
+                    selected_title = (selected_title + 1) % n;
+                } else if (k == SDLK_LEFT || k == SDLK_a) {
+                    step_lang(-1);
+                } else if (k == SDLK_RIGHT || k == SDLK_d) {
+                    step_lang(1);
                 } else if (k == SDLK_RETURN || k == SDLK_SPACE || k == SDLK_z) {
-                    if (games[selected].assets_ready) {
-                        chosen = selected;
+                    if (is_lang_ready(titles[selected_title], selected_lang)) {
+                        launched = true;
                         running = false;
                     }
                 }
             } else if (ev.type == SDL_FINGERUP || (ev.type == SDL_MOUSEBUTTONUP && ev.button.button == SDL_BUTTON_LEFT)) {
                 int px = (ev.type == SDL_FINGERUP) ? static_cast<int>(ev.tfinger.x * out_w) : ev.button.x;
                 int py = (ev.type == SDL_FINGERUP) ? static_cast<int>(ev.tfinger.y * out_h) : ev.button.y;
-                for (int i = 0; i < n; ++i) {
-                    const SDL_Rect& r = card_rects[i];
-                    if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
-                        selected = i;
-                        if (games[i].assets_ready) {
-                            chosen = i;
-                            running = false;
-                        }
+                bool handled = false;
+                for (int k = 0; k < 3; ++k) {
+                    const SDL_Rect& lr = lang_rects[k];
+                    if (px >= lr.x && px <= lr.x + lr.w && py >= lr.y && py <= lr.y + lr.h) {
+                        selected_lang = static_cast<LauncherLang>(k);
+                        handled = true;
                         break;
+                    }
+                }
+                if (!handled) {
+                    for (int i = 0; i < n; ++i) {
+                        const SDL_Rect& r = card_rects[i];
+                        if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
+                            selected_title = i;
+                            if (is_lang_ready(titles[i], selected_lang)) {
+                                launched = true;
+                                running = false;
+                            }
+                            break;
+                        }
                     }
                 }
             }
@@ -308,15 +426,44 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games,
         SDL_SetRenderDrawColor(ren, 10, 16, 32, 255);
         SDL_RenderClear(ren);
 
-        int title_s = std::clamp(out_w / 140, 3, 7);
-        draw_launcher_text(ren, "RMEXE COLLECTION", pad, std::max(24, header_h / 3), title_s, 96, 200, 255);
-        draw_launcher_text(ren, "TAP OR PRESS ENTER TO LAUNCH", pad, std::max(24, header_h / 3) + title_s * 7,
-                           std::max(2, title_s - 1), 160, 185, 220);
+        draw_launcher_text(ren, "RMEXE COLLECTION", card_x, title_y, title_s, 96, 200, 255);
+        draw_launcher_text(ren, "L/R: LANG  U/D: GAME  ENTER: PLAY", card_x, sub_y, sub_s, 160, 185, 220);
 
+        static const char* kLangShort[3] = {"ZH", "JP", "EN"};
+        static const char* kLangLong[3] = {"CHINESE", "JAPANESE", "ENGLISH"};
+        const int ls_top = std::clamp(lang_h / 22, 2, 4);
+        const int ls_bot = std::clamp(std::min(btn_w / 44, lang_h / 28), 2, 3);
+        const int total_lang_txt_h = ls_top * 5 + 6 + ls_bot * 5;
+        const int lang_txt_y = lang_y + std::max(4, (lang_h - total_lang_txt_h) / 2);
+        for (int k = 0; k < 3; ++k) {
+            const SDL_Rect& lr = lang_rects[k];
+            const LauncherLang lval = static_cast<LauncherLang>(k);
+            const bool active = (selected_lang == lval);
+            const bool ready = is_lang_ready(titles[selected_title], lval);
+            SDL_SetRenderDrawColor(ren, active ? 32 : 16, active ? 68 : 26, active ? 116 : 48, 255);
+            SDL_RenderFillRect(ren, &lr);
+            SDL_SetRenderDrawColor(ren, active ? 110 : 48, active ? 215 : 96, active ? 255 : 150, 255);
+            SDL_RenderDrawRect(ren, &lr);
+            if (active) {
+                SDL_Rect inner{lr.x + 2, lr.y + 2, lr.w - 4, lr.h - 4};
+                SDL_RenderDrawRect(ren, &inner);
+            }
+            uint8_t cr = ready ? (active ? 255 : 210) : 135;
+            uint8_t cg = ready ? (active ? 255 : 225) : 140;
+            uint8_t cb = ready ? 255 : 155;
+            draw_launcher_text_centered(ren, kLangShort[k], lr, lang_txt_y, ls_top, cr, cg, cb);
+            draw_launcher_text_centered(ren, kLangLong[k], lr, lang_txt_y + ls_top * 5 + 6, ls_bot,
+                                        ready ? (active ? 140 : 150) : 210,
+                                        ready ? (active ? 240 : 185) : 105,
+                                        ready ? (active ? 190 : 210) : 105);
+        }
+
+        const int cs = std::clamp(std::min(card_w / 100, card_h / 26), 2, 4);
+        const int sub_cs = std::max(2, cs - 1);
         for (int i = 0; i < n; ++i) {
             const SDL_Rect& r = card_rects[i];
-            const bool sel = (i == selected);
-            const bool ok = games[i].assets_ready;
+            const bool sel = (i == selected_title);
+            const bool ok = is_lang_ready(titles[i], selected_lang);
             SDL_SetRenderDrawColor(ren, sel ? 26 : 16, sel ? 48 : 26, sel ? 88 : 50, 255);
             SDL_RenderFillRect(ren, &r);
             SDL_SetRenderDrawColor(ren, sel ? 88 : 48, sel ? 188 : 100, sel ? 255 : 160, 255);
@@ -325,13 +472,19 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games,
                 SDL_Rect inner{r.x + 2, r.y + 2, r.w - 4, r.h - 4};
                 SDL_RenderDrawRect(ren, &inner);
             }
-            int cs = std::clamp(card_h / 24, 2, 5);
-            draw_launcher_text(ren, games[i].title, r.x + 18, r.y + card_h / 4, cs,
+            const int text_y = r.y + std::max(10, (card_h - (cs * 5 + 8 + sub_cs * 5 + 6 + sub_cs * 5)) / 2);
+            draw_launcher_text(ren, title_for_lang(titles[i], selected_lang), r.x + 18, text_y, cs,
                                ok ? 245 : 140, ok ? 250 : 145, ok ? 255 : 160);
-            draw_launcher_text(ren, ok ? games[i].subtitle : "MISSING JAR/SP IN ASSETS",
-                               r.x + 18, r.y + card_h / 4 + cs * 7 + 4, std::max(2, cs - 1),
+            draw_launcher_text(ren, titles[i].subtitle, r.x + 18, text_y + cs * 5 + 6, sub_cs,
+                               160, 190, 230);
+            draw_launcher_text(ren, status_for_lang(titles[i], selected_lang),
+                               r.x + 18, text_y + cs * 5 + 6 + sub_cs * 5 + 6, sub_cs,
                                ok ? 110 : 230, ok ? 220 : 100, ok ? 160 : 100);
         }
+
+        const int footer_y = out_h - footer_h + 4;
+        draw_launcher_text(ren, "NOTE: ZH + JP SHARE ONE SAVE FILE.", card_x, footer_y, fs, 155, 185, 220);
+        draw_launcher_text(ren, "EN USES A SEPARATE SAVE (FAN EN ROM).", card_x, footer_y + fs * 5 + 5, fs, 155, 185, 220);
 
         SDL_RenderPresent(ren);
         SDL_Delay(16);
@@ -342,7 +495,7 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games,
     }
     pads.clear();
 
-    if (chosen >= 0) {
+    if (launched) {
         // Keep the existing SDL_Window and SDL_Renderer alive for DojaRuntime
         // (avoids tearing down Android Surface/GLES context between launcher and game).
         out_win = win;
@@ -352,7 +505,7 @@ int run_collection_launcher(std::vector<CollectionGameEntry>& games,
         SDL_DestroyWindow(win);
         SDL_Quit();
     }
-    return chosen;
+    return launched;
 }
 
 } // namespace
@@ -373,9 +526,14 @@ int main(int argc, char** argv) {
     touch_mode = true;
 #endif
 
+    std::string req_lang_raw;
+    bool has_req_lang = false;
+    rmexe::LauncherLang req_lang = rmexe::LauncherLang::Zh;
+    bool cli_touch_flag = false;
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--game" && i + 1 < argc) req_game = argv[++i];
+        if (arg == "--game" && i + 1 < argc) req_game = rmexe::to_lower_ascii(argv[++i]);
         else if (arg == "--data-dir" && i + 1 < argc) data_dir = argv[++i];
         else if (arg == "--asset-dir" && i + 1 < argc) asset_dir = argv[++i];
         else if (arg == "--scale" && i + 1 < argc) scale = std::max(1, std::atoi(argv[++i]));
@@ -383,9 +541,23 @@ int main(int argc, char** argv) {
         else if (arg == "--max-frames" && i + 1 < argc) max_frames = std::atoi(argv[++i]);
         else if (arg == "--headless") headless = true;
         else if (arg == "--fast-forward") fast_forward = true;
-        else if (arg == "--touch") touch_mode = true;
-        else if (arg == "--lang" && i + 1 < argc) rmexe::set_cli_lang_mode(argv[++i]);
+        else if (arg == "--touch") { touch_mode = true; cli_touch_flag = true; }
+        else if (arg == "--lang" && i + 1 < argc) {
+            req_lang_raw = rmexe::to_lower_ascii(argv[++i]);
+            if (req_lang_raw == "zh" || req_lang_raw == "cn" || req_lang_raw == "chinese") {
+                req_lang = rmexe::LauncherLang::Zh;
+                has_req_lang = true;
+            } else if (req_lang_raw == "jp" || req_lang_raw == "ja" || req_lang_raw == "japanese" ||
+                       req_lang_raw == "orig" || req_lang_raw == "original") {
+                req_lang = rmexe::LauncherLang::Jp;
+                has_req_lang = true;
+            } else if (req_lang_raw == "en" || req_lang_raw == "eng" || req_lang_raw == "english") {
+                req_lang = rmexe::LauncherLang::En;
+                has_req_lang = true;
+            }
+        }
     }
+    (void)cli_touch_flag;
 
     std::vector<std::string> search_dirs;
 #ifdef __ANDROID__
@@ -426,56 +598,165 @@ int main(int argc, char** argv) {
     if (!asset_dir.empty()) search_dirs.push_back(asset_dir);
     if (!base_dir.empty()) search_dirs.push_back(base_dir);
 
-    std::vector<rmexe::CollectionGameEntry> games;
+    std::vector<rmexe::CollectionTitle> titles;
+    {
+        rmexe::CollectionTitle pon;
+        pon.id = "pon";
+        pon.jp_zh_title = "ROCKMAN EXE PON";
+        pon.en_title = "MEGAMAN BN PON";
+        pon.subtitle = "PHANTOM OF NETWORK";
+        pon.zh_pack_name = "pon_zh.json";
 #ifdef RMEXE_HAVE_PON_JP
-    games.push_back({"pon_jp", "ROCKMAN EXE PON (JP/ZH)", "READY - PHANTOM OF NETWORK",
-                     "assets/PoN_jp/bin/PoN.jar", "assets/PoN_jp/sp/PoN.sp", &rmexe::game_pon_jp::get_game_module(), false});
+        pon.jp = {true, false, "assets/PoN_jp/bin/PoN.jar", "assets/PoN_jp/sp/PoN.sp", &rmexe::game_pon_jp::get_game_module()};
 #endif
 #ifdef RMEXE_HAVE_PON_EN
-    games.push_back({"pon_en", "MEGAMAN BN PON (EN/ZH)", "READY - PHANTOM OF NETWORK",
-                     "assets/PoN/bin/PoN.jar", "assets/PoN/sp/PoN.sp", &rmexe::game_pon_en::get_game_module(), false});
+        pon.en = {true, false, "assets/PoN/bin/PoN.jar", "assets/PoN/sp/PoN.sp", &rmexe::game_pon_en::get_game_module()};
 #endif
+        if (pon.jp.compiled || pon.en.compiled) titles.push_back(pon);
+    }
+    {
+        rmexe::CollectionTitle lon;
+        lon.id = "lon";
+        lon.jp_zh_title = "ROCKMAN EXE LON";
+        lon.en_title = "MEGAMAN BN LON";
+        lon.subtitle = "LEGEND OF NETWORK";
+        lon.zh_pack_name = "lon_zh.json";
 #ifdef RMEXE_HAVE_LON_JP
-    games.push_back({"lon_jp", "ROCKMAN EXE LON (JP/ZH)", "READY - LEGEND OF NETWORK",
-                     "assets/LoN_jp/bin/LoN.jar", "assets/LoN_jp/sp/LoN.sp", &rmexe::game_lon_jp::get_game_module(), false});
+        lon.jp = {true, false, "assets/LoN_jp/bin/LoN.jar", "assets/LoN_jp/sp/LoN.sp", &rmexe::game_lon_jp::get_game_module()};
 #endif
 #ifdef RMEXE_HAVE_LON_EN
-    games.push_back({"lon_en", "MEGAMAN BN LON (EN/ZH)", "READY - LEGEND OF NETWORK",
-                     "assets/LoN/bin/LoN.jar", "assets/LoN/sp/LoN.sp", &rmexe::game_lon_en::get_game_module(), false});
+        lon.en = {true, false, "assets/LoN/bin/LoN.jar", "assets/LoN/sp/LoN.sp", &rmexe::game_lon_en::get_game_module()};
 #endif
-
-    std::error_code ec;
-    for (auto& g : games) {
-        std::string jp = rmexe::resolve_entry_path(g.jar_rel, search_dirs);
-        std::string sp = rmexe::resolve_entry_path(g.sp_rel, search_dirs);
-        g.assets_ready = std::filesystem::is_regular_file(jp, ec) && std::filesystem::is_regular_file(sp, ec);
-        SDL_Log("RMEXE game=%s ready=%d jar=%s sp=%s", g.id, g.assets_ready ? 1 : 0, jp.c_str(), sp.c_str());
+        if (lon.jp.compiled || lon.en.compiled) titles.push_back(lon);
     }
 
-    int pick = -1;
+    std::error_code ec;
+    auto check_variant_assets = [&](rmexe::RomVariant& v, const char* tag) {
+        if (!v.compiled) return;
+        std::string jp = rmexe::resolve_entry_path(v.jar_rel, search_dirs);
+        std::string sp = rmexe::resolve_entry_path(v.sp_rel, search_dirs);
+        v.assets_ready = std::filesystem::is_regular_file(jp, ec) && std::filesystem::is_regular_file(sp, ec);
+        SDL_Log("RMEXE variant=%s ready=%d jar=%s sp=%s", tag, v.assets_ready ? 1 : 0, jp.c_str(), sp.c_str());
+    };
+    for (auto& t : titles) {
+        std::string id_s = t.id;
+        check_variant_assets(t.jp, (id_s + "_jp").c_str());
+        check_variant_assets(t.en, (id_s + "_en").c_str());
+        t.zh_pack_ready = rmexe::is_translation_ready(t.zh_pack_name, search_dirs);
+        SDL_Log("RMEXE title=%s zh_pack_ready=%d", t.id, t.zh_pack_ready ? 1 : 0);
+    }
+
+    int pick_title = 0;
+    rmexe::LauncherLang pick_lang = has_req_lang ? req_lang : rmexe::LauncherLang::Zh;
+    bool legacy_explicit_rom = false;
+
+    auto find_first_ready_lang = [&](const rmexe::CollectionTitle& t, rmexe::LauncherLang preferred, rmexe::LauncherLang& out_l) {
+        rmexe::LauncherLang order[3] = {
+            preferred,
+            rmexe::LauncherLang::Zh,
+            rmexe::LauncherLang::Jp,
+        };
+        for (rmexe::LauncherLang l : order) {
+            if (rmexe::is_lang_ready(t, l)) { out_l = l; return true; }
+        }
+        for (rmexe::LauncherLang l : {rmexe::LauncherLang::Zh, rmexe::LauncherLang::Jp, rmexe::LauncherLang::En}) {
+            if (rmexe::is_lang_ready(t, l)) { out_l = l; return true; }
+        }
+        return false;
+    };
+
+    bool found_default = false;
+    if (!has_req_lang) {
+        for (rmexe::LauncherLang l : {rmexe::LauncherLang::Zh, rmexe::LauncherLang::Jp, rmexe::LauncherLang::En}) {
+            for (int i = 0; i < static_cast<int>(titles.size()); ++i) {
+                if (rmexe::is_lang_ready(titles[i], l)) {
+                    pick_title = i;
+                    pick_lang = l;
+                    found_default = true;
+                    break;
+                }
+            }
+            if (found_default) break;
+        }
+    } else {
+        for (int i = 0; i < static_cast<int>(titles.size()); ++i) {
+            if (rmexe::is_lang_ready(titles[i], req_lang)) {
+                pick_title = i;
+                pick_lang = req_lang;
+                found_default = true;
+                break;
+            }
+        }
+    }
+
+    bool proceed = false;
     SDL_Window* shared_win = nullptr;
     SDL_Renderer* shared_ren = nullptr;
     if (!req_game.empty()) {
-        for (int i = 0; i < static_cast<int>(games.size()); ++i) {
-            if (req_game == games[i].id) { pick = i; break; }
+        auto find_title_idx = [&](const std::string& tid) -> int {
+            for (int i = 0; i < static_cast<int>(titles.size()); ++i) {
+                if (tid == titles[i].id) return i;
+            }
+            return -1;
+        };
+        if (req_game == "pon_jp" || req_game == "lon_jp") {
+            int idx = find_title_idx(req_game.substr(0, 3));
+            if (idx >= 0) {
+                pick_title = idx;
+                pick_lang = (has_req_lang && req_lang == rmexe::LauncherLang::Jp) ? rmexe::LauncherLang::Jp : rmexe::LauncherLang::Zh;
+                legacy_explicit_rom = true;
+                proceed = titles[idx].jp.compiled;
+            }
+        } else if (req_game == "pon_en" || req_game == "lon_en") {
+            int idx = find_title_idx(req_game.substr(0, 3));
+            if (idx >= 0) {
+                pick_title = idx;
+                pick_lang = rmexe::LauncherLang::En;
+                legacy_explicit_rom = true;
+                proceed = titles[idx].en.compiled;
+            }
+        } else {
+            int idx = find_title_idx(req_game);
+            if (idx >= 0) {
+                pick_title = idx;
+                if (has_req_lang) {
+                    pick_lang = req_lang;
+                } else {
+                    find_first_ready_lang(titles[idx], rmexe::LauncherLang::Zh, pick_lang);
+                }
+                proceed = rmexe::variant_for_lang(titles[idx], pick_lang).compiled;
+            }
         }
     } else if (headless) {
-        for (int i = 0; i < static_cast<int>(games.size()); ++i) {
-            if (games[i].assets_ready) { pick = i; break; }
-        }
+        proceed = found_default;
     } else {
-        pick = rmexe::run_collection_launcher(games, shared_win, shared_ren);
+        proceed = rmexe::run_collection_launcher(titles, pick_title, pick_lang, shared_win, shared_ren);
     }
 
-    if (pick < 0 || pick >= static_cast<int>(games.size())) {
-        SDL_Log("RMEXE launcher exited without selecting a game (pick=%d)", pick);
+    if (!proceed || pick_title < 0 || pick_title >= static_cast<int>(titles.size())) {
+        SDL_Log("RMEXE launcher exited without selecting a game (proceed=%d, pick_title=%d)", proceed ? 1 : 0, pick_title);
         return 0;
     }
 
-    const auto& chosen = games[pick];
-    std::string jar_path = rmexe::resolve_entry_path(chosen.jar_rel, search_dirs);
-    std::string sp_path = rmexe::resolve_entry_path(chosen.sp_rel, search_dirs);
-    SDL_Log("RMEXE launching %s (jar=%s, sp=%s)", chosen.id, jar_path.c_str(), sp_path.c_str());
+    const auto& chosen_title = titles[pick_title];
+    const auto& chosen_var = rmexe::variant_for_lang(chosen_title, pick_lang);
+    if (!chosen_var.compiled || !chosen_var.mod) {
+        SDL_Log("RMEXE selected variant not compiled (title=%s, lang=%d)", chosen_title.id, static_cast<int>(pick_lang));
+        return 1;
+    }
+
+    if (legacy_explicit_rom) {
+        if (!req_lang_raw.empty()) rmexe::set_cli_lang_mode(req_lang_raw);
+    } else if (pick_lang == rmexe::LauncherLang::Zh) {
+        rmexe::set_cli_lang_mode("zh");
+    } else if (pick_lang == rmexe::LauncherLang::Jp) {
+        rmexe::set_cli_lang_mode("orig");
+    }
+
+    std::string jar_path = rmexe::resolve_entry_path(chosen_var.jar_rel, search_dirs);
+    std::string sp_path = rmexe::resolve_entry_path(chosen_var.sp_rel, search_dirs);
+    std::string win_title = rmexe::title_for_lang(chosen_title, pick_lang);
+    SDL_Log("RMEXE launching %s lang=%d (jar=%s, sp=%s)", chosen_title.id, static_cast<int>(pick_lang), jar_path.c_str(), sp_path.c_str());
 
     rmexe::DojaRuntime rt;
     if (shared_win && shared_ren) {
@@ -488,17 +769,17 @@ int main(int argc, char** argv) {
     rt.set_render_fps(fps);
     rt.set_fast_forward(fast_forward);
     if (max_frames > 0) rt.set_max_frames(max_frames);
-    rt.set_game_module(chosen.mod);
+    rt.set_game_module(chosen_var.mod);
 
-    if (!rt.init(jar_path, sp_path, "", scale, chosen.title)) {
-        SDL_Log("RMEXE DojaRuntime::init FAILED for %s", chosen.id);
+    if (!rt.init(jar_path, sp_path, "", scale, win_title)) {
+        SDL_Log("RMEXE DojaRuntime::init FAILED for %s", chosen_title.id);
         return 1;
     }
 
     try {
-        chosen.mod->static_init(rt);
-        rmexe::Ref app = chosen.mod->create_app_main(rt);
-        chosen.mod->start_app(rt, app);
+        chosen_var.mod->static_init(rt);
+        rmexe::Ref app = chosen_var.mod->create_app_main(rt);
+        chosen_var.mod->start_app(rt, app);
     } catch (const rmexe::JavaException& ex) {
         SDL_Log("RMEXE Uncaught JavaException ref=%d", ex.exc_ref);
         std::cerr << "[Uncaught JavaException] ref=" << ex.exc_ref << "\n";

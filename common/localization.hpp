@@ -350,6 +350,15 @@ public:
         return load_json_file(configured_path_);
     }
 
+    void unload() {
+        pack_loaded_ = false;
+        translated_count_ = 0;
+        class_map_.clear();
+        stream_overlays_.clear();
+        loaded_path_.clear();
+        lang_mode_ = LangMode::Orig;
+    }
+
     bool load_json_file(const std::string& path) {
         configured_path_ = path;
         std::ifstream f(path, std::ios::binary);
@@ -383,14 +392,10 @@ public:
             for (const auto& item : cls_arr->arr_val) {
                 if (item.type != JsonValue::Type::Object) continue;
                 std::string jp = item.get_str("jp");
-                std::string en = item.get_str("en");
                 std::string zh = item.get_str("zh");
                 if (zh.empty()) continue;
                 if (!jp.empty()) {
                     class_map_[jp] = zh;
-                }
-                if (is_safe_en_fallback(en) && class_map_.find(en) == class_map_.end()) {
-                    class_map_[en] = zh;
                 }
                 ++translated_count_;
             }
@@ -519,23 +524,6 @@ private:
         return (b >= 0x81u && b <= 0x9Fu) || (b >= 0xE0u && b <= 0xEFu);
     }
 
-    static bool is_safe_en_fallback(const std::string& en) {
-        if (en.empty()) return false;
-        bool non_ascii = false;
-        for (unsigned char c : en) {
-            if (c > 0x7Fu) { non_ascii = true; break; }
-        }
-        if (!non_ascii && en.size() < 3) return false;
-        if (en.rfind("resource:", 0) == 0 ||
-            en.rfind("scratchpad:", 0) == 0 ||
-            en.rfind("http:", 0) == 0 ||
-            en.rfind("https:", 0) == 0 ||
-            en[0] == '/' || en[0] == '.' || en[0] == '%') {
-            return false;
-        }
-        return true;
-    }
-
     static uint64_t parse_hex_u64(const std::string& s) {
         if (s.empty()) return 0;
         return static_cast<uint64_t>(std::strtoull(s.c_str(), nullptr, 16));
@@ -570,9 +558,7 @@ private:
 
         std::string fmt = st.get_str("format", "fixed");
         uint64_t jp_hash = parse_hex_u64(st.get_str("jp_fnv1a"));
-        uint64_t en_hash = parse_hex_u64(st.get_str("en_fnv1a"));
         size_t orig_len = static_cast<size_t>(std::max<int64_t>(0, st.get_int("orig_len", 0)));
-        size_t en_orig_len = static_cast<size_t>(std::max<int64_t>(0, st.get_int("en_orig_len", 0)));
 
         std::vector<uint8_t> compiled;
         if (fmt == "fixed") {
@@ -656,16 +642,7 @@ private:
 
         translated_count_ += st_zh_count;
         if (jp_hash != 0) {
-            stream_overlays_[jp_hash] = compiled;
-        }
-        if (en_hash != 0 && en_hash != jp_hash) {
-            if (fmt == "fixed" && en_orig_len > compiled.size()) {
-                std::vector<uint8_t> en_buf = compiled;
-                en_buf.resize(en_orig_len, 0);
-                stream_overlays_[en_hash] = std::move(en_buf);
-            } else {
-                stream_overlays_[en_hash] = std::move(compiled);
-            }
+            stream_overlays_[jp_hash] = std::move(compiled);
         }
     }
 
@@ -695,10 +672,13 @@ private:
 
         uint8_t tb0 = 0, tb1 = 0;
         int conv_len = 0;
+        // Forbid trail byte 0x81 so adjacent 2-byte characters can never form a
+        // cross-character 0x81 0x8F ('￥') sentinel in byte-wise CpCanvas.MesRead(),
+        // while keeping genuine '￥' (0x81 0x8F) and '＄' (0x81 0x90) intact.
         if (rmexe::cp932::encode_codepoint(cp, tb0, tb1, conv_len) &&
             conv_len == 2 &&
             is_sjis_lead(tb0) &&
-            tb1 >= 0x40u && tb1 != 0x7Fu && tb1 <= 0xFCu) {
+            tb1 >= 0x40u && tb1 != 0x7Fu && tb1 != 0x81u && tb1 <= 0xFCu) {
             b0 = tb0;
             b1 = tb1;
             out_len = 2;
@@ -721,15 +701,18 @@ private:
             return true;
         }
 
-        // Allocate deterministic slot from 18 extended lead bytes x 190 trail bytes (0x40..0x7E, 0x80..0xFE) = 3,420 slots
-        static constexpr uint32_t kNumTrails = 190;
+        // Allocate deterministic slot from 18 extended lead bytes x 189 trail bytes
+        // (0x40..0x7E, 0x80, 0x82..0xFE = 3,402 slots, excluding 0x7F and 0x81).
+        static constexpr uint32_t kNumTrails = 189;
         static constexpr uint32_t kMaxSlots = 18u * kNumTrails;
         if (next_ext_slot_ >= kMaxSlots) return false;
 
         uint32_t slot = next_ext_slot_++;
         uint8_t lb = kExtLeadBytes[slot / kNumTrails];
         uint32_t t_idx = slot % kNumTrails;
-        uint8_t tb = static_cast<uint8_t>((t_idx < 63u) ? (0x40u + t_idx) : (0x80u + (t_idx - 63u)));
+        uint8_t tb = (t_idx < 63u) ? static_cast<uint8_t>(0x40u + t_idx)
+                   : (t_idx == 63u) ? static_cast<uint8_t>(0x80u)
+                   : static_cast<uint8_t>(0x82u + (t_idx - 64u));
         uint16_t pair = (static_cast<uint16_t>(lb) << 8) | static_cast<uint16_t>(tb);
         ext_cp_to_pair_[cp] = pair;
         ext_pair_to_cp_[pair] = cp;

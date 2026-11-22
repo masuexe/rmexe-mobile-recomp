@@ -2701,6 +2701,89 @@ static std::string generate_pvp_session_nonce() {
     return std::string(buf);
 }
 
+#pragma pack(push, 1)
+struct AutosaveFileHeader {
+    char magic[8];
+    uint32_t version;
+    uint32_t game_kind; // 0 = PoN, 1 = LoN
+    int64_t timestamp;
+    uint32_t manual_crc_at_save;
+    int64_t manual_ts_hint;
+    int32_t sina_no;
+    int32_t back_menu;
+    int32_t map_no;
+    int32_t machi_no;
+    int32_t now_hp;
+    int32_t max_hp;
+    int32_t zenny;
+    uint32_t payload_size;
+    uint32_t payload_crc;
+};
+#pragma pack(pop)
+
+static uint32_t fnv1a_32(const uint8_t* data, size_t len) {
+    uint32_t h = 0x811C9DC5u;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= static_cast<uint32_t>(data[i]);
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+static int32_t read_be32(const uint8_t* p) {
+    uint32_t u = (static_cast<uint32_t>(p[0]) << 24) |
+                 (static_cast<uint32_t>(p[1]) << 16) |
+                 (static_cast<uint32_t>(p[2]) << 8) |
+                 static_cast<uint32_t>(p[3]);
+    return static_cast<int32_t>(u);
+}
+
+static int64_t file_mtime_unix_sec(const std::string& path) {
+    if (path.empty()) return 0;
+    std::error_code ec;
+    auto ftime = std::filesystem::last_write_time(path, ec);
+    if (ec) return 0;
+    auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        ftime - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now()
+    );
+    return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::seconds>(sctp.time_since_epoch()).count());
+}
+
+static std::string format_save_timestamp(int64_t ts) {
+    if (ts <= 0) return "--:--";
+    std::time_t tt = static_cast<std::time_t>(ts);
+    std::tm tm_buf{};
+#ifdef _WIN32
+    std::tm* lt = std::localtime(&tt);
+    if (!lt) return "--:--";
+    tm_buf = *lt;
+#else
+    if (!localtime_r(&tt, &tm_buf)) return "--:--";
+#endif
+    char out[32];
+    std::snprintf(out, sizeof(out), "%02d-%02d %02d:%02d",
+                  tm_buf.tm_mon + 1, tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min);
+    return std::string(out);
+}
+
+static bool parse_raw_save_payload(const uint8_t* payload, size_t len, bool is_lon, SaveSlotSummary& out) {
+    const size_t need = is_lon ? (548u * 4u) : (437u * 4u);
+    if (!payload || len < need) return false;
+    int32_t max_hp = read_be32(payload + 3 * 4);
+    if (max_hp <= 0) return false;
+    out.exists = true;
+    out.map_no = read_be32(payload + 0 * 4);
+    out.max_hp = max_hp;
+    out.now_hp = read_be32(payload + 4 * 4);
+    out.zenny = read_be32(payload + 5 * 4);
+    out.back_menu = read_be32(payload + 16 * 4);
+    const size_t machi_idx = is_lon ? 443u : 354u;
+    const size_t sina_idx = is_lon ? 444u : 355u;
+    out.machi_no = read_be32(payload + machi_idx * 4);
+    out.sina_no = read_be32(payload + sina_idx * 4);
+    return true;
+}
+
 struct UiInputManager {
     std::string config_path = "controls.cfg";
     std::string asset_dir;
@@ -2726,6 +2809,7 @@ struct UiInputManager {
     }
     bool pvp_bo3_mode = false;
     bool is_lon_game = false;
+    bool is_en_rom = false;
     int pvp_menu_choice = 0; // 0 = Create Room, 1 = Join Room
 
     bool has_cli_net_override = false;
@@ -2768,6 +2852,8 @@ struct UiInputManager {
 
     std::string toast_text;
     int toast_frames = 0;
+    bool auto_save_enabled = true;
+    uint64_t autosave_badge_until_ms = 0;
 
     int64_t paused_duration_ms = 0;
     int64_t turbo_bonus_ms = 0;
@@ -2939,6 +3025,10 @@ struct UiInputManager {
     }
 
     void discover_and_load_translation() {
+        if (is_en_rom) {
+            g_loc.unload();
+            return;
+        }
         std::error_code ec;
         std::vector<std::string> candidates;
         if (!cli_translation_path.empty()) {
@@ -2989,10 +3079,10 @@ struct UiInputManager {
         if (has_cli_pvp_bo3) {
             pvp_bo3_mode = cli_pvp_bo3;
         }
-        if (has_cli_lang_override) {
+        if (!is_en_rom && has_cli_lang_override) {
             lang_mode = cli_lang_mode;
         }
-        g_loc.set_lang_mode(lang_mode);
+        g_loc.set_lang_mode(is_en_rom ? loc::LangMode::Orig : lang_mode);
         if (!cli_player_uid.empty()) player_uid = cli_player_uid;
         if (!cli_player_name.empty()) player_name = cli_player_name;
         g_pvp.set_preferred_format(pvp_bo3_mode ? pvp::PVP_FORMAT_TRIPLE : pvp::PVP_FORMAT_SINGLE);
@@ -3089,6 +3179,8 @@ struct UiInputManager {
                 assist_cfg.drop_rank_mode = std::atoi(val.c_str());
             } else if (key == "assist_show_hud") {
                 assist_cfg.show_assist_hud = (std::atoi(val.c_str()) != 0);
+            } else if (key == "auto_save_enabled") {
+                auto_save_enabled = (std::atoi(val.c_str()) != 0);
             } else if (touch.parse_config_line(key, val)) {
                 // Touch layout / opacity parsed
             } else {
@@ -3164,6 +3256,7 @@ struct UiInputManager {
         out << "assist_custom_gauge_pct=" << assist_cfg.custom_gauge_pct << "\n";
         out << "assist_drop_rank_mode=" << assist_cfg.drop_rank_mode << "\n";
         out << "assist_show_hud=" << (assist_cfg.show_assist_hud ? 1 : 0) << "\n";
+        out << "auto_save_enabled=" << (auto_save_enabled ? 1 : 0) << "\n";
         touch.serialize_config(out);
         out << "\n";
         for (int i = 0; i < ACT_COUNT; ++i) {
@@ -3539,6 +3632,7 @@ struct UiInputManager {
                 ui_draw_border(3, ey, ew, 14, assist_hud.ex_boss_color);
                 ui_draw_text(etxt, 7, ey + 11, assist_hud.ex_boss_color);
             }
+            int assist_hud_right_x = 0;
             if (assist_cfg.show_assist_hud) {
                 std::string summary = assist_cfg.build_hud_summary(assist_hold_down, assist_hud.en_native_bas_max);
                 if (!summary.empty()) {
@@ -3549,9 +3643,24 @@ struct UiInputManager {
                         summary += "..";
                     }
                     int sw = std::min(234, measure_ui_text(summary) + 8);
+                    assist_hud_right_x = 3 + sw;
                     ui_fill_rect(3, 224, sw, 14, 0xB00C162Au);
                     ui_draw_border(3, 224, sw, 14, 0xFF4F88D8u);
                     ui_draw_text(summary, 7, 235, 0xFF88FFAAu);
+                }
+            }
+            uint64_t now_ms = pvp::steady_millis();
+            if (now_ms < autosave_badge_until_ms) {
+                uint64_t rem = autosave_badge_until_ms - now_ms;
+                uint32_t alpha = (rem < 350ULL) ? static_cast<uint32_t>((rem * 235ULL) / 350ULL) : 235u;
+                if (alpha > 0u) {
+                    std::string lbl = "● 自动存档";
+                    int bw = measure_ui_text(lbl) + 10;
+                    int bx = 237 - bw;
+                    int by = (assist_hud_right_x + 4 > bx) ? 208 : 224;
+                    ui_fill_rect(bx, by, bw, 14, ((alpha * 210u / 255u) << 24) | 0x0A1C2Cu);
+                    ui_draw_border(bx, by, bw, 14, (alpha << 24) | 0x56D8FFu);
+                    ui_draw_text(lbl, bx + 5, by + 11, (alpha << 24) | 0xC8F8FFu);
                 }
             }
         }
@@ -3713,22 +3822,24 @@ struct UiInputManager {
     // 5: 主音量
     // 6: 帧率模式 (60 FPS / 15 FPS)
     // 7: 字体模式 (高清平滑 HD / 原版像素 12px)
-    // 8: 底部软键栏
-    // 9: 语言/汉化 (简体中文 / 原版 JP/EN)
+    // 9: 底部软键栏
+    // 10: 语言/汉化 (简体中文 / 日文原版 JP；粉丝英化版 ROM 仅支持英文)
     // 10: 减负与作弊设置 (Submenu)
     // 11..22: Keybindings (ACT_COUNT = 12)
     // 23: 恢复默认按键配置
     // 24: 返回游戏 (Resume)
     // 25: 保存进度并退出
     static constexpr int ASSIST_ROW_IDX = 11;
-    static constexpr int BIND_START_ROW = 12;
-    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 24
-    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 27
+    static constexpr int SAVE_ROW_IDX = 12;
+    static constexpr int BIND_START_ROW = 13;
+    static constexpr int BIND_END_ROW = BIND_START_ROW + ACT_COUNT; // 25
+    static constexpr int TOTAL_ROWS = BIND_END_ROW + 3;             // 28
     static constexpr int ASSIST_TOTAL_ROWS = 17;
+    static constexpr int SAVE_TOTAL_ROWS = 4;
     static constexpr int VISIBLE_ROWS = 9;
 
     bool overlay_open = false;
-    int overlay_page = 0; // 0 = Main/Keybindings, 1 = Assist/QoL Cheats
+    int overlay_page = 0; // 0 = Main/Keybindings, 1 = Assist/QoL Cheats, 2 = Save Management
     int overlay_sel_row = 0;
     int overlay_sel_col = 0; // 0 = Key1, 1 = Key2, 2 = Pad
     int overlay_scroll_top = 0;
@@ -3741,7 +3852,9 @@ struct UiInputManager {
     std::vector<pvp::PvpRoomInfo> overlay_open_rooms;
 
     int current_total_rows() const {
-        return (overlay_page == 1) ? ASSIST_TOTAL_ROWS : TOTAL_ROWS;
+        if (overlay_page == 1) return ASSIST_TOTAL_ROWS;
+        if (overlay_page == 2) return SAVE_TOTAL_ROWS;
+        return TOTAL_ROWS;
     }
 
     struct ProbeRequest {
@@ -4005,13 +4118,17 @@ struct UiInputManager {
     }
 
     void toggle_language_mode() {
+        if (is_en_rom) {
+            show_toast("当前为粉丝英化版 ROM (仅支持英文，中/日请使用日版 ROM)", 130);
+            return;
+        }
         bool currently_zh = (lang_mode == loc::LangMode::Zh) ||
                             (lang_mode == loc::LangMode::Auto && g_loc.is_enabled());
         if (currently_zh) {
             lang_mode = loc::LangMode::Orig;
             g_loc.set_lang_mode(lang_mode);
             save_config();
-            show_toast("语言模式: 原版 (JP/EN) (静态菜单重启生效)", 120);
+            show_toast("语言模式: 日文原版 (JP) (静态菜单重启生效)", 120);
         } else {
             lang_mode = loc::LangMode::Zh;
             discover_and_load_translation();
@@ -4412,14 +4529,14 @@ struct UiInputManager {
                 overlay_waiting_bind = false;
             }
         } else {
-            auto enter_assist_page = [&]() {
+            auto enter_subpage = [&](int page) {
                 overlay_main_sel_row = overlay_sel_row;
                 overlay_main_scroll_top = overlay_scroll_top;
-                overlay_page = 1;
+                overlay_page = page;
                 overlay_sel_row = 0;
                 overlay_scroll_top = 0;
             };
-            auto exit_assist_page = [&]() {
+            auto exit_subpage = [&]() {
                 overlay_page = 0;
                 overlay_sel_row = overlay_main_sel_row;
                 overlay_scroll_top = overlay_main_scroll_top;
@@ -4510,7 +4627,45 @@ struct UiInputManager {
                         show_toast("已将全部减负辅助恢复原版默认", 90);
                         break;
                     case 16:
-                        exit_assist_page();
+                        exit_subpage();
+                        break;
+                    default: break;
+                }
+            };
+
+            auto toggle_auto_save = [&]() {
+                auto_save_enabled = !auto_save_enabled;
+                save_config();
+                show_toast(auto_save_enabled ? "自动存档: 开启 (切图自动存)" : "自动存档: 关闭", 90);
+            };
+
+            auto activate_save_row = [&]() {
+                switch (overlay_sel_row) {
+                    case 0:
+                        toggle_auto_save();
+                        break;
+                    case 1:
+                        if (g_pvp.active()) {
+                            show_toast("联机对战期间无法读取存档", 90);
+                        } else if (g_runtime && g_runtime->has_auto_save()) {
+                            g_runtime->request_save_load(2);
+                            close_overlay();
+                        } else {
+                            show_toast("暂无可读取的自动存档", 90);
+                        }
+                        break;
+                    case 2:
+                        if (g_pvp.active()) {
+                            show_toast("联机对战期间无法读取存档", 90);
+                        } else if (g_runtime && g_runtime->has_manual_save()) {
+                            g_runtime->request_save_load(1);
+                            close_overlay();
+                        } else {
+                            show_toast("暂无可读取的手动存档", 90);
+                        }
+                        break;
+                    case 3:
+                        exit_subpage();
                         break;
                     default: break;
                 }
@@ -4519,6 +4674,10 @@ struct UiInputManager {
             auto adjust_row_lr = [&](int dir) {
                 if (overlay_page == 1) {
                     adjust_assist_lr(dir);
+                    return;
+                }
+                if (overlay_page == 2) {
+                    if (overlay_sel_row == 0) toggle_auto_save();
                     return;
                 }
                 if (overlay_sel_row == 0 && !g_pvp.active()) {
@@ -4556,7 +4715,9 @@ struct UiInputManager {
                 } else if (overlay_sel_row == 10) {
                     toggle_language_mode();
                 } else if (overlay_sel_row == ASSIST_ROW_IDX) {
-                    enter_assist_page();
+                    enter_subpage(1);
+                } else if (overlay_sel_row == SAVE_ROW_IDX) {
+                    toggle_auto_save();
                 } else if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
                     overlay_sel_col = (overlay_sel_col + dir + 3) % 3;
                 }
@@ -4564,6 +4725,10 @@ struct UiInputManager {
             auto activate_row = [&]() {
                 if (overlay_page == 1) {
                     activate_assist_row();
+                    return;
+                }
+                if (overlay_page == 2) {
+                    activate_save_row();
                     return;
                 }
                 if (overlay_sel_row == 0) {
@@ -4605,7 +4770,9 @@ struct UiInputManager {
                 } else if (overlay_sel_row == 10) {
                     toggle_language_mode();
                 } else if (overlay_sel_row == ASSIST_ROW_IDX) {
-                    enter_assist_page();
+                    enter_subpage(1);
+                } else if (overlay_sel_row == SAVE_ROW_IDX) {
+                    enter_subpage(2);
                 } else if (overlay_sel_row >= BIND_START_ROW && overlay_sel_row < BIND_END_ROW) {
                     overlay_waiting_bind = true;
                 } else if (overlay_sel_row == BIND_END_ROW) {
@@ -4632,10 +4799,10 @@ struct UiInputManager {
                 if (k == SDLK_F1) {
                     close_overlay();
                 } else if (k == SDLK_ESCAPE || (!in_bind_rows && matches_act(ACT_CANCEL, k))) {
-                    if (overlay_page == 1) exit_assist_page();
+                    if (overlay_page != 0) exit_subpage();
                     else close_overlay();
-                } else if (k == SDLK_BACKSPACE && overlay_page == 1) {
-                    exit_assist_page();
+                } else if (k == SDLK_BACKSPACE && overlay_page != 0) {
+                    exit_subpage();
                 } else if (k == SDLK_F3) {
                     toggle_fps_mode();
                 } else if (k == SDLK_F4) {
@@ -4680,7 +4847,7 @@ struct UiInputManager {
                     case SDL_CONTROLLER_BUTTON_A:
                         activate_row(); break;
                     case SDL_CONTROLLER_BUTTON_B:
-                        if (overlay_page == 1) exit_assist_page();
+                        if (overlay_page != 0) exit_subpage();
                         else close_overlay();
                         break;
                     case SDL_CONTROLLER_BUTTON_START:
@@ -4704,6 +4871,8 @@ struct UiInputManager {
         std::string title;
         if (overlay_page == 1) {
             title = live_pvp ? "减负设置 (联机PvP期间自动禁用)" : "减负与作弊设置 (Enter手输 / ←→切)";
+        } else if (overlay_page == 2) {
+            title = "存档管理 — 自动存档与手动存档";
         } else {
             title = live_pvp
                 ? (g_pvp.match_started() ? "联机菜单 — 对战后台运行中 (F1关闭)" : "联机菜单 — 房间等待中 (F1关闭)")
@@ -4720,11 +4889,24 @@ struct UiInputManager {
         } else if (overlay_page == 1) {
             ui_draw_text("减负项目", 8, 34, 0xFF8EB0E8u);
             ui_draw_text("当前倍率/状态 (Enter手输)", 84, 34, 0xFF8EB0E8u);
+        } else if (overlay_page == 2) {
+            ui_draw_text("存档项目", 8, 34, 0xFF8EB0E8u);
+            ui_draw_text("状态 / 位置", 84, 34, 0xFF8EB0E8u);
         } else {
             ui_draw_text("功能选项", 8, 34, 0xFF8EB0E8u);
             ui_draw_text("当前设置 (Enter / ←→)", 84, 34, 0xFF8EB0E8u);
         }
         ui_fill_rect(6, 37, 228, 1, 0xFF324672u);
+
+        auto truncate_fit = [&](std::string txt, int max_px) {
+            if (measure_ui_text(txt) <= max_px) return txt;
+            while (measure_ui_text(txt + "..") > max_px && txt.size() > 3) {
+                pop_utf8_char(txt);
+            }
+            return txt + "..";
+        };
+        const SaveSlotSummary page2_auto = (overlay_page == 2 && g_runtime) ? g_runtime->get_auto_save_summary() : SaveSlotSummary{};
+        const SaveSlotSummary page2_manual = (overlay_page == 2 && g_runtime) ? g_runtime->get_manual_save_summary() : SaveSlotSummary{};
 
         const int cur_total = current_total_rows();
         // Rows viewport (y = 40 .. 193, 9 rows * 17px)
@@ -4736,6 +4918,53 @@ struct UiInputManager {
             if (is_sel) {
                 ui_fill_rect(5, ry, 226, 16, 0xFF223A6Au);
                 ui_draw_border(5, ry, 226, 16, 0xFF5A8AE0u);
+            }
+
+            if (overlay_page == 2) {
+                std::string label;
+                std::string val_str;
+                uint32_t vcol = 0xFFD0DCF0u;
+                bool centered = false;
+                switch (r) {
+                    case 0:
+                        label = "自动存档";
+                        val_str = auto_save_enabled ? "< 开启 (切图自动存) >" : "< 关闭 >";
+                        vcol = auto_save_enabled ? 0xFF88FFAAu : 0xFFFF8888u;
+                        break;
+                    case 1:
+                        label = "读取自动存档";
+                        if (page2_auto.exists) {
+                            val_str = truncate_fit("第" + std::to_string(page2_auto.sina_no) + "章 " + page2_auto.location_name, 138);
+                            vcol = 0xFF74D8FFu;
+                        } else {
+                            val_str = "(暂无自动存档)";
+                            vcol = 0xFF7888A8u;
+                        }
+                        break;
+                    case 2:
+                        label = "读取手动存档";
+                        if (page2_manual.exists) {
+                            val_str = truncate_fit("第" + std::to_string(page2_manual.sina_no) + "章 " + page2_manual.location_name, 138);
+                            vcol = 0xFFFFD874u;
+                        } else {
+                            val_str = "(暂无手动存档)";
+                            vcol = 0xFF7888A8u;
+                        }
+                        break;
+                    case 3:
+                        val_str = "[ 返回主设置菜单 ]";
+                        vcol = is_sel ? 0xFF88FFAAu : 0xFFC8D8F8u;
+                        centered = true;
+                        break;
+                }
+                if (centered) {
+                    ui_draw_text(val_str, 120 - measure_ui_text(val_str) / 2, ry + 12, vcol);
+                } else {
+                    ui_draw_text(label, 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                    int vx = std::max(84, std::min(92, 228 - measure_ui_text(val_str)));
+                    ui_draw_text(val_str, vx, ry + 12, vcol);
+                }
+                continue;
             }
 
             if (overlay_page == 1) {
@@ -4942,20 +5171,25 @@ struct UiInputManager {
                 std::string sstr = show_softkey_bar ? "< 开启 >" : "< 关闭 >";
                 ui_draw_text(sstr, 110, ry + 12, show_softkey_bar ? 0xFF88FFAAu : 0xFF98A8C0u);
             } else if (r == 10) {
-                ui_draw_text("语言/汉化", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
-                std::string lstr;
-                uint32_t lcol = 0xFF98A8C0u;
-                if (lang_mode == loc::LangMode::Orig) {
-                    lstr = "< 原版语言 (JP/EN) >";
-                    lcol = 0xFF98A8C0u;
-                } else if (g_loc.has_loaded_pack() && g_loc.translated_count() > 0) {
-                    lstr = "< 简体中文 (" + std::to_string(g_loc.translated_count()) + "条) >";
-                    lcol = 0xFF88FFAAu;
+                if (is_en_rom) {
+                    ui_draw_text("当前语言", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                    ui_draw_text("English (粉丝英化版 ROM)", 84, ry + 12, 0xFF74D8FFu);
                 } else {
-                    lstr = "< 简体中文 (未放字表) >";
-                    lcol = 0xFFFFD874u;
+                    ui_draw_text("语言/汉化", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
+                    std::string lstr;
+                    uint32_t lcol = 0xFF98A8C0u;
+                    if (lang_mode == loc::LangMode::Orig) {
+                        lstr = "< 日文原版 (JP) >";
+                        lcol = 0xFF98A8C0u;
+                    } else if (g_loc.has_loaded_pack() && g_loc.translated_count() > 0) {
+                        lstr = "< 简体中文 (" + std::to_string(g_loc.translated_count()) + "条) >";
+                        lcol = 0xFF88FFAAu;
+                    } else {
+                        lstr = "< 简体中文 (未放字表) >";
+                        lcol = 0xFFFFD874u;
+                    }
+                    ui_draw_text(lstr, 84, ry + 12, lcol);
                 }
-                ui_draw_text(lstr, 84, ry + 12, lcol);
             } else if (r == ASSIST_ROW_IDX) {
                 ui_draw_text("减负辅助", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFFFE484u);
                 int cnt = assist_cfg.active_cheat_count();
@@ -4964,6 +5198,11 @@ struct UiInputManager {
                     : "[ 进入减负与作弊设置 > ]";
                 uint32_t acol = (cnt > 0) ? 0xFFFFD874u : 0xFF74D8FFu;
                 ui_draw_text(astr, 84, ry + 12, acol);
+            } else if (r == SAVE_ROW_IDX) {
+                ui_draw_text("存档管理", 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFFFE484u);
+                std::string sstr = auto_save_enabled ? "[ 自动存档:开 / 读档 > ]" : "[ 自动存档:关 / 读档 > ]";
+                uint32_t scol = auto_save_enabled ? 0xFF74D8FFu : 0xFF98A8C0u;
+                ui_draw_text(sstr, 84, ry + 12, scol);
             } else if (r >= BIND_START_ROW && r < BIND_END_ROW) {
                 int bi = r - BIND_START_ROW;
                 ui_draw_text(binds[bi].label_zh, 8, ry + 12, is_sel ? 0xFFFFFFFFu : 0xFFD0DCF0u);
@@ -4996,15 +5235,65 @@ struct UiInputManager {
             }
         }
 
+        // Detail Info Box on Save Management page
+        if (overlay_page == 2) {
+            ui_fill_rect(6, 114, 224, 76, 0xCC0D1628u);
+            ui_draw_border(6, 114, 224, 76, 0xFF3E5E98u);
+            if (overlay_sel_row == 1 || overlay_sel_row == 2) {
+                const bool sel_auto = (overlay_sel_row == 1);
+                const SaveSlotSummary& sel_sum = sel_auto ? page2_auto : page2_manual;
+                const SaveSlotSummary& other_sum = sel_auto ? page2_manual : page2_auto;
+                std::string hdr = sel_auto ? "自动存档 (切图自动记录)" : "手动存档 (菜单手动保存)";
+                ui_draw_text(hdr, 12, 129, sel_auto ? 0xFF74D8FFu : 0xFFFFD874u);
+                bool show_latest = sel_sum.exists && other_sum.exists && sel_sum.timestamp > 0 &&
+                                   (sel_sum.timestamp > other_sum.timestamp ||
+                                    (sel_sum.timestamp == other_sum.timestamp && sel_auto));
+                if (show_latest) {
+                    std::string tag = "[最新]";
+                    ui_draw_text(tag, 224 - measure_ui_text(tag), 129, 0xFF88FFAAu);
+                }
+                if (sel_sum.exists) {
+                    std::string loc_line = truncate_fit("进度: 第" + std::to_string(sel_sum.sina_no) + "章  " + sel_sum.location_name, 212);
+                    std::string stat_line = "HP: " + std::to_string(sel_sum.now_hp) + "/" + std::to_string(sel_sum.max_hp) +
+                                            "   Zenny: " + std::to_string(sel_sum.zenny) + "Z";
+                    std::string time_line = "保存时间: " + format_save_timestamp(sel_sum.timestamp);
+                    ui_draw_text(loc_line, 12, 147, 0xFFE8F0FFu);
+                    ui_draw_text(stat_line, 12, 165, 0xFFB8D4F8u);
+                    ui_draw_text(time_line, 12, 183, 0xFF90A8C8u);
+                } else {
+                    ui_draw_text("状态: 尚未创建存档", 12, 152, 0xFF98A8C0u);
+                    ui_draw_text(sel_auto ? "开启自动存档并在场景切换时自动记录" : "请在游戏中打开PET菜单手动存档",
+                                 12, 170, 0xFF788CA8u);
+                }
+            } else {
+                ui_draw_text("双槽独立存档说明:", 12, 134, 0xFF74D8FFu);
+                ui_draw_text("场景/地图切换时自动存入独立自动槽位", 12, 152, 0xFFD0DCF0u);
+                ui_draw_text("不会覆盖手动存档，普通战后不自动保存", 12, 170, 0xFFA4BCE4u);
+            }
+        }
+
         // Scrollbar track on right edge
-        ui_fill_rect(233, 40, 3, VISIBLE_ROWS * 17, 0xFF182238u);
-        int sb_h = std::max(14, (VISIBLE_ROWS * 17 * VISIBLE_ROWS) / cur_total);
-        int sb_y = 40 + ((VISIBLE_ROWS * 17 - sb_h) * overlay_scroll_top) / std::max(1, cur_total - VISIBLE_ROWS);
-        ui_fill_rect(233, sb_y, 3, sb_h, 0xFF6894E0u);
+        if (cur_total > VISIBLE_ROWS) {
+            ui_fill_rect(233, 40, 3, VISIBLE_ROWS * 17, 0xFF182238u);
+            int sb_h = std::max(14, (VISIBLE_ROWS * 17 * VISIBLE_ROWS) / cur_total);
+            int sb_y = 40 + ((VISIBLE_ROWS * 17 - sb_h) * overlay_scroll_top) / std::max(1, cur_total - VISIBLE_ROWS);
+            ui_fill_rect(233, sb_y, 3, sb_h, 0xFF6894E0u);
+        }
 
         // Footer instructions
         ui_fill_rect(6, 196, 228, 1, 0xFF324672u);
-        if (overlay_page == 1) {
+        if (overlay_page == 2) {
+            if (live_pvp) {
+                ui_draw_text("联机PvP期间禁用读档 | Esc/取消:返回", 10, 211, 0xFFFFB060u);
+            } else if (overlay_sel_row == 0) {
+                ui_draw_text("Enter/←→:开关自动存档  Esc:返回主菜单", 8, 211, 0xFF88FFAAu);
+            } else if (overlay_sel_row == 1 || overlay_sel_row == 2) {
+                ui_draw_text("Enter:立即读取所选存档  Esc:返回主菜单", 8, 211, 0xFF74D8FFu);
+            } else {
+                ui_draw_text("Enter:返回主设置菜单  Esc/取消:返回", 12, 211, 0xFFA4BCE4u);
+            }
+            ui_draw_text("自动档与手动档独立存储，互不覆盖", 16, 227, 0xFF849AC0u);
+        } else if (overlay_page == 1) {
             if (overlay_sel_row == 2 || overlay_sel_row == 3) {
                 ui_draw_text("Enter:手输数值  ←→:预设  (影响排行记录)", 6, 211, 0xFFFFB060u);
             } else if (overlay_sel_row == 4 || overlay_sel_row == 7 || overlay_sel_row == 8 ||
@@ -5029,6 +5318,8 @@ struct UiInputManager {
                 ui_draw_text("←→/Enter:切换当前模式字体 (即时生效)", 8, 211, 0xFF74D8FFu);
             } else if (overlay_sel_row == ASSIST_ROW_IDX) {
                 ui_draw_text("Enter:进入百倍炮/减伤/Boss潜行等设置", 8, 211, 0xFFFFD874u);
+            } else if (overlay_sel_row == SAVE_ROW_IDX) {
+                ui_draw_text("←→:开关自动存档  Enter:进入读档管理", 10, 211, 0xFF74D8FFu);
             } else if (overlay_sel_row == 0) {
                 if (live_pvp) {
                     ui_draw_text("Enter:立即退出房间   F1/Esc:继续对战", 10, 211, 0xFF88FFAAu);
@@ -6179,6 +6470,27 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
         if (ver == "10001") is_lon = true;
     }
     g_ui.is_lon_game = is_lon;
+    bool is_en_rom = false;
+    {
+        auto sys_mes2 = read_jar_Bytes("data/new/sys_mes2.dat");
+        if (!sys_mes2.empty()) {
+            size_t check_n = std::min<size_t>(sys_mes2.size(), 90);
+            bool has_non_ascii = false;
+            bool has_ascii_alpha = false;
+            for (size_t i = 0; i < check_n; ++i) {
+                uint8_t b = sys_mes2[i];
+                if (b >= 0x80u) {
+                    has_non_ascii = true;
+                    break;
+                }
+                if ((b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')) {
+                    has_ascii_alpha = true;
+                }
+            }
+            is_en_rom = (!has_non_ascii && has_ascii_alpha);
+        }
+    }
+    g_ui.is_en_rom = is_en_rom;
     std::string db_path = "capcom_local.db";
     if (!data_dir_.empty()) {
         db_path = (std::filesystem::path(data_dir_) / "capcom_local.db").string();
@@ -6195,6 +6507,13 @@ bool DojaRuntime::init(const std::string& jar_path, const std::string& sp_path, 
     }
 
     load_sav_overlay();
+    is_lon_ = is_lon;
+    sp_save_offset_ = is_lon ? 400u : 300u;
+    sp_save_payload_size_ = is_lon ? (548u * 4u) : (437u * 4u);
+    autosave_path_ = sav_path_ + ".autosave";
+    sp_dirty_ = false;
+    manual_save_timestamp_ = file_mtime_unix_sec(sav_path_);
+    reload_autosave_from_disk();
     g_ui.load_config();
     g_ui.discover_and_load_translation();
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -6335,7 +6654,7 @@ void DojaRuntime::shutdown() {
     static bool s_shut_down = false;
     if (!s_shut_down) {
         s_shut_down = true;
-        save_sav_overlay();
+        if (sp_dirty_) save_sav_overlay();
     }
     g_pvp.close_udp();
     g_ui.stop_probe_worker();
@@ -6392,7 +6711,416 @@ void DojaRuntime::save_sav_overlay() {
     std::ofstream sav(sav_path_, std::ios::binary | std::ios::trunc);
     if (sav) {
         sav.write(reinterpret_cast<const char*>(sp_data_.data() + sp_header_offset_), save_len);
+        if (sav.good()) {
+            sp_dirty_ = false;
+        }
     }
+}
+
+bool DojaRuntime::auto_save_enabled() const {
+    return g_ui.auto_save_enabled;
+}
+
+void DojaRuntime::set_auto_save_enabled(bool en) {
+    g_ui.auto_save_enabled = en;
+}
+
+bool DojaRuntime::has_manual_save() const {
+    const size_t base = sp_header_offset_ + sp_save_offset_;
+    if (base + sp_save_payload_size_ > sp_data_.size()) return false;
+    SaveSlotSummary tmp{};
+    return parse_raw_save_payload(sp_data_.data() + base, sp_save_payload_size_, is_lon_, tmp);
+}
+
+bool DojaRuntime::has_auto_save() const {
+    if (!has_autosave_ || autosave_payload_.size() != sp_save_payload_size_) return false;
+    SaveSlotSummary tmp{};
+    return parse_raw_save_payload(autosave_payload_.data(), autosave_payload_.size(), is_lon_, tmp);
+}
+
+void DojaRuntime::set_location_name_tables(std::vector<std::string> map_names, std::vector<std::string> machi_names) {
+    map_name_table_ = std::move(map_names);
+    machi_name_table_ = std::move(machi_names);
+}
+
+std::string DojaRuntime::resolve_location_name(int32_t back_menu, int32_t map_no, int32_t machi_no) const {
+    if (back_menu == 3) {
+        if (map_no >= 0 && static_cast<size_t>(map_no) < map_name_table_.size() && !map_name_table_[static_cast<size_t>(map_no)].empty()) {
+            return map_name_table_[static_cast<size_t>(map_no)];
+        }
+        return "电脑世界 #" + std::to_string(map_no);
+    }
+    if (machi_no >= 0 && static_cast<size_t>(machi_no) < machi_name_table_.size() && !machi_name_table_[static_cast<size_t>(machi_no)].empty()) {
+        return machi_name_table_[static_cast<size_t>(machi_no)];
+    }
+    return "现实区域 #" + std::to_string(machi_no);
+}
+
+SaveSlotSummary DojaRuntime::get_manual_save_summary() const {
+    SaveSlotSummary out{};
+    out.is_autosave = false;
+    const size_t base = sp_header_offset_ + sp_save_offset_;
+    if (base + sp_save_payload_size_ > sp_data_.size()) return out;
+    const uint8_t* ptr = sp_data_.data() + base;
+    if (!parse_raw_save_payload(ptr, sp_save_payload_size_, is_lon_, out)) return out;
+    uint32_t cur_crc = fnv1a_32(ptr, sp_save_payload_size_);
+    if (has_autosave_ && cur_crc == autosave_manual_crc_hint_ && autosave_manual_ts_hint_ > 0) {
+        out.timestamp = autosave_manual_ts_hint_;
+    } else {
+        out.timestamp = (manual_save_timestamp_ > 0) ? manual_save_timestamp_ : file_mtime_unix_sec(sav_path_);
+    }
+    out.location_name = resolve_location_name(out.back_menu, out.map_no, out.machi_no);
+    return out;
+}
+
+SaveSlotSummary DojaRuntime::get_auto_save_summary() const {
+    SaveSlotSummary out{};
+    out.is_autosave = true;
+    if (!has_autosave_ || autosave_payload_.size() != sp_save_payload_size_) return out;
+    if (!parse_raw_save_payload(autosave_payload_.data(), autosave_payload_.size(), is_lon_, out)) {
+        out = SaveSlotSummary{};
+        out.is_autosave = true;
+        return out;
+    }
+    out.timestamp = autosave_timestamp_;
+    out.location_name = resolve_location_name(out.back_menu, out.map_no, out.machi_no);
+    return out;
+}
+
+void DojaRuntime::begin_autosave_capture() {
+    autosave_capture_buf_.clear();
+    autosave_capture_active_ = true;
+}
+
+void DojaRuntime::abort_autosave_capture() {
+    autosave_capture_active_ = false;
+    autosave_capture_buf_.clear();
+}
+
+bool DojaRuntime::commit_autosave_capture(const SaveSlotSummary& meta) {
+    autosave_capture_active_ = false;
+    if (autosave_capture_buf_.size() != sp_save_payload_size_) {
+        autosave_capture_buf_.clear();
+        return false;
+    }
+    if (read_be32(autosave_capture_buf_.data() + 3 * 4) <= 0 || autosave_path_.empty()) {
+        autosave_capture_buf_.clear();
+        return false;
+    }
+    const SaveSlotSummary cur_manual = get_manual_save_summary();
+    uint32_t manual_crc = 0;
+    const size_t base = sp_header_offset_ + sp_save_offset_;
+    if (base + sp_save_payload_size_ <= sp_data_.size()) {
+        manual_crc = fnv1a_32(sp_data_.data() + base, sp_save_payload_size_);
+    }
+    const int64_t now_ts = static_cast<int64_t>(std::time(nullptr));
+
+    AutosaveFileHeader hdr{};
+    std::memcpy(hdr.magic, "RMEXAS01", 8);
+    hdr.version = 1u;
+    hdr.game_kind = is_lon_ ? 1u : 0u;
+    hdr.timestamp = now_ts;
+    hdr.manual_crc_at_save = manual_crc;
+    hdr.manual_ts_hint = cur_manual.exists ? cur_manual.timestamp : 0;
+    hdr.sina_no = meta.sina_no;
+    hdr.back_menu = meta.back_menu;
+    hdr.map_no = meta.map_no;
+    hdr.machi_no = meta.machi_no;
+    hdr.now_hp = meta.now_hp;
+    hdr.max_hp = meta.max_hp;
+    hdr.zenny = meta.zenny;
+    hdr.payload_size = static_cast<uint32_t>(sp_save_payload_size_);
+    hdr.payload_crc = fnv1a_32(autosave_capture_buf_.data(), sp_save_payload_size_);
+
+    const std::string tmp_path = autosave_path_ + ".tmp";
+    {
+        std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            autosave_capture_buf_.clear();
+            return false;
+        }
+        out.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+        out.write(reinterpret_cast<const char*>(autosave_capture_buf_.data()),
+                  static_cast<std::streamsize>(sp_save_payload_size_));
+        if (!out.good()) {
+            std::remove(tmp_path.c_str());
+            autosave_capture_buf_.clear();
+            return false;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp_path, autosave_path_, ec);
+    if (ec) {
+        std::ofstream out(autosave_path_, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            std::remove(tmp_path.c_str());
+            autosave_capture_buf_.clear();
+            return false;
+        }
+        out.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+        out.write(reinterpret_cast<const char*>(autosave_capture_buf_.data()),
+                  static_cast<std::streamsize>(sp_save_payload_size_));
+        bool ok = out.good();
+        std::remove(tmp_path.c_str());
+        if (!ok) {
+            autosave_capture_buf_.clear();
+            return false;
+        }
+    }
+    has_autosave_ = true;
+    autosave_timestamp_ = now_ts;
+    autosave_manual_crc_hint_ = manual_crc;
+    autosave_manual_ts_hint_ = hdr.manual_ts_hint;
+    autosave_payload_ = std::move(autosave_capture_buf_);
+    autosave_capture_buf_.clear();
+    trigger_autosave_badge();
+    return true;
+}
+
+bool DojaRuntime::arm_oneshot_autosave_read() {
+    if (!has_auto_save()) {
+        oneshot_autosave_read_ = false;
+        return false;
+    }
+    oneshot_autosave_read_ = true;
+    return true;
+}
+
+void DojaRuntime::disarm_oneshot_autosave_read() {
+    oneshot_autosave_read_ = false;
+}
+
+bool DojaRuntime::reload_autosave_from_disk() {
+    has_autosave_ = false;
+    autosave_timestamp_ = 0;
+    autosave_manual_crc_hint_ = 0;
+    autosave_manual_ts_hint_ = 0;
+    autosave_payload_.clear();
+    if (autosave_path_.empty()) return false;
+    std::ifstream in(autosave_path_, std::ios::binary);
+    if (!in) return false;
+    std::vector<uint8_t> raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const size_t expected_total = sizeof(AutosaveFileHeader) + sp_save_payload_size_;
+    if (raw.size() != expected_total) return false;
+    AutosaveFileHeader hdr{};
+    std::memcpy(&hdr, raw.data(), sizeof(AutosaveFileHeader));
+    if (std::memcmp(hdr.magic, "RMEXAS01", 8) != 0) return false;
+    if (hdr.version != 1u) return false;
+    if (hdr.game_kind != (is_lon_ ? 1u : 0u)) return false;
+    if (hdr.payload_size != sp_save_payload_size_) return false;
+    const uint8_t* payload_ptr = raw.data() + sizeof(AutosaveFileHeader);
+    if (fnv1a_32(payload_ptr, sp_save_payload_size_) != hdr.payload_crc) return false;
+    if (read_be32(payload_ptr + 3 * 4) <= 0) return false;
+    has_autosave_ = true;
+    autosave_timestamp_ = hdr.timestamp;
+    autosave_manual_crc_hint_ = hdr.manual_crc_at_save;
+    autosave_manual_ts_hint_ = hdr.manual_ts_hint;
+    autosave_payload_.assign(payload_ptr, payload_ptr + sp_save_payload_size_);
+    return true;
+}
+
+int DojaRuntime::consume_pending_save_load_request() {
+    int req = pending_save_load_request_;
+    pending_save_load_request_ = 0;
+    return req;
+}
+
+void DojaRuntime::request_save_load(int slot) {
+    if (slot == 1 || slot == 2) {
+        pending_save_load_request_ = slot;
+    }
+}
+
+void DojaRuntime::trigger_autosave_badge() {
+    if (headless_ || pvp_match_active_ || pvp_self_test_) return;
+    g_ui.autosave_badge_until_ms = pvp::steady_millis() + 1800ULL;
+}
+
+int DojaRuntime::run_save_slot_chooser_modal(const SaveSlotSummary& auto_sum, const SaveSlotSummary& manual_sum) {
+    if (!sdl_window_ || !sdl_renderer_ || headless_) return 1;
+    SDL_Renderer* ren = static_cast<SDL_Renderer*>(sdl_renderer_);
+    SDL_Texture* tex_pix = static_cast<SDL_Texture*>(sdl_texture_);
+    SDL_Texture* tex_hd = static_cast<SDL_Texture*>(sdl_texture_hd_);
+    if (!tex_pix && !tex_hd) return 1;
+
+    auto modal_t0 = std::chrono::steady_clock::now();
+    keypad_state_ = 0;
+    g_ui.clear_held_states();
+
+    int sel = (auto_sum.timestamp >= manual_sum.timestamp) ? 0 : 1; // 0 = Auto, 1 = Manual
+    int choice = 0;
+    bool done = false;
+    int stick_dir = 0;
+    uint32_t prev_touch_mask = 0u;
+
+    auto matches_act = [&](int act_idx, SDL_Keycode k) {
+        return (g_ui.binds[act_idx].keys[0] != SDLK_UNKNOWN && g_ui.binds[act_idx].keys[0] == k) ||
+               (g_ui.binds[act_idx].keys[1] != SDLK_UNKNOWN && g_ui.binds[act_idx].keys[1] == k);
+    };
+    auto truncate_fit = [&](std::string txt, int max_px) {
+        if (g_ui.measure_ui_text(txt) <= max_px) return txt;
+        while (g_ui.measure_ui_text(txt + "..") > max_px && txt.size() > 3) {
+            UiInputManager::pop_utf8_char(txt);
+        }
+        return txt + "..";
+    };
+
+    while (!done) {
+        if (g_quit_signal.load(std::memory_order_relaxed)) {
+            clean_exit_runtime(*this, true, 0);
+        }
+
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT ||
+                ev.type == SDL_APP_TERMINATING ||
+                (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_CLOSE)) {
+                clean_exit_runtime(*this, true, 0);
+            } else if (ev.type == SDL_APP_WILLENTERBACKGROUND) {
+                g_ui.save_config();
+                if (sp_dirty_) save_sav_overlay();
+                continue;
+            } else if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+                g_ui.open_controllers();
+                continue;
+            }
+
+            if (g_ui.touch.enabled()) {
+                int out_w = 0, out_h = 0;
+                SDL_GetRendererOutputSize(ren, &out_w, &out_h);
+                g_ui.touch.update_layout(out_w, out_h, g_ui.show_softkey_bar ? 260 : 240);
+                TouchActionDelta td;
+                if (g_ui.touch.handle_event(ev, out_w, out_h, false, td)) {
+                    uint32_t newly = td.doja_mask & ~prev_touch_mask;
+                    prev_touch_mask = td.doja_mask;
+                    if ((newly & ((1u << 0x11) | (1u << 0x13))) != 0u) {
+                        sel = 1 - sel;
+                    } else if ((newly & (1u << 0x14)) != 0u) {
+                        choice = (sel == 0) ? 2 : 1;
+                        done = true;
+                        break;
+                    } else if ((newly & (1u << 0x0A)) != 0u) {
+                        choice = 0;
+                        done = true;
+                        break;
+                    }
+                    if (td.has_game_tap && td.game_tap_x >= 12 && td.game_tap_x < 228) {
+                        if (td.game_tap_y >= 48 && td.game_tap_y < 112) {
+                            choice = 2;
+                            done = true;
+                            break;
+                        } else if (td.game_tap_y >= 118 && td.game_tap_y < 182) {
+                            choice = 1;
+                            done = true;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
+                SDL_Keycode k = ev.key.keysym.sym;
+                if (k == SDLK_UP || k == SDLK_DOWN || matches_act(ACT_UP, k) || matches_act(ACT_DOWN, k)) {
+                    sel = 1 - sel;
+                } else if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE || matches_act(ACT_SELECT, k)) {
+                    choice = (sel == 0) ? 2 : 1;
+                    done = true;
+                } else if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE || k == SDLK_AC_BACK || matches_act(ACT_CANCEL, k)) {
+                    choice = 0;
+                    done = true;
+                }
+            } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
+                int b = ev.cbutton.button;
+                if (b == SDL_CONTROLLER_BUTTON_DPAD_UP || b == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
+                    sel = 1 - sel;
+                } else if (b == SDL_CONTROLLER_BUTTON_A || b == SDL_CONTROLLER_BUTTON_START) {
+                    choice = (sel == 0) ? 2 : 1;
+                    done = true;
+                } else if (b == SDL_CONTROLLER_BUTTON_B || b == SDL_CONTROLLER_BUTTON_BACK) {
+                    choice = 0;
+                    done = true;
+                }
+            } else if (ev.type == SDL_CONTROLLERAXISMOTION && ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+                int nd = (ev.caxis.value < -16000) ? -1 : ((ev.caxis.value > 16000) ? 1 : 0);
+                if (nd != 0 && nd != stick_dir) {
+                    sel = 1 - sel;
+                }
+                stick_dir = nd;
+            } else if (!g_ui.touch.enabled() && ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                float lx = 0.0f, ly = 0.0f;
+                SDL_RenderWindowToLogical(ren, ev.button.x, ev.button.y, &lx, &ly);
+                int s = std::max(1, g_ui.active_ui_scale());
+                int gx = static_cast<int>(lx) / s;
+                int gy = static_cast<int>(ly) / s;
+                if (gx >= 12 && gx < 228) {
+                    if (gy >= 48 && gy < 112) {
+                        choice = 2;
+                        done = true;
+                    } else if (gy >= 118 && gy < 182) {
+                        choice = 1;
+                        done = true;
+                    }
+                }
+            }
+        }
+        if (done) break;
+
+        g_ui.compose_display_buffer(framebuffer_, fb_pix_text_, fb_hd_text_.data(), hd_scale_, 0, false, true);
+        g_ui.ui_fill_rect(0, 0, 240, 240, 0xCC060A16u);
+        g_ui.ui_fill_rect(6, 18, 228, 204, 0xF4101A32u);
+        g_ui.ui_draw_border(6, 18, 228, 204, 0xFF5A8AE0u);
+
+        g_ui.ui_fill_rect(8, 20, 224, 20, 0xFF1A2D54u);
+        g_ui.ui_draw_border(8, 20, 224, 20, 0xFF4F78C8u);
+        std::string hdr = "选择要读取的存档";
+        g_ui.ui_draw_text(hdr, 120 - g_ui.measure_ui_text(hdr) / 2, 34, 0xFFFFFFFFu);
+
+        auto draw_slot_card = [&](int idx, int y, const SaveSlotSummary& sum, bool is_auto) {
+            const bool is_sel = (sel == idx);
+            uint32_t bg = is_sel ? (is_auto ? 0xFF163256u : 0xFF282B4Eu) : 0xFF0D162Au;
+            uint32_t bd = is_sel ? (is_auto ? 0xFF68D8FFu : 0xFFFFD866u) : 0xFF344A74u;
+            g_ui.ui_fill_rect(12, y, 216, 64, bg);
+            g_ui.ui_draw_border(12, y, 216, 64, bd);
+            if (is_sel) {
+                g_ui.ui_draw_border(13, y + 1, 214, 62, bd);
+            }
+
+            std::string title = is_auto ? "自动存档 (AUTO)" : "手动存档 (MANUAL)";
+            uint32_t tcol = is_auto ? 0xFF74D8FFu : 0xFFFFD874u;
+            g_ui.ui_draw_text((is_sel ? "▶ " : "  ") + title, 18, y + 17, tcol);
+
+            bool is_newer = is_auto ? (auto_sum.timestamp >= manual_sum.timestamp)
+                                    : (manual_sum.timestamp > auto_sum.timestamp);
+            if (is_newer) {
+                std::string badge = "[最新]";
+                g_ui.ui_draw_text(badge, 220 - g_ui.measure_ui_text(badge), y + 17, 0xFF88FFAAu);
+            }
+
+            std::string loc = truncate_fit("第" + std::to_string(sum.sina_no) + "章  " + sum.location_name, 202);
+            std::string info = "HP " + std::to_string(sum.now_hp) + "/" + std::to_string(sum.max_hp) +
+                               "   " + format_save_timestamp(sum.timestamp);
+            g_ui.ui_draw_text(loc, 20, y + 37, 0xFFEBF2FFu);
+            g_ui.ui_draw_text(info, 20, y + 55, 0xFFAEC4E4u);
+        };
+
+        draw_slot_card(0, 48, auto_sum, true);
+        draw_slot_card(1, 118, manual_sum, false);
+
+        std::string f1 = "↑↓:选择  确认:读档  取消:返回标题";
+        std::string f2 = "自动档与手动档独立存储，互不覆盖";
+        g_ui.ui_draw_text(f1, 120 - g_ui.measure_ui_text(f1) / 2, 198, 0xFF88EEFFu);
+        g_ui.ui_draw_text(f2, 120 - g_ui.measure_ui_text(f2) / 2, 214, 0xFF889CC0u);
+
+        g_ui.present_sdl_frame(ren, tex_pix, tex_hd);
+        SDL_Delay(16);
+    }
+
+    keypad_state_ = 0;
+    g_ui.clear_held_states();
+    auto modal_t1 = std::chrono::steady_clock::now();
+    g_ui.paused_duration_ms += std::chrono::duration_cast<std::chrono::milliseconds>(modal_t1 - modal_t0).count();
+    return choice;
 }
 
 Ref DojaRuntime::alloc_object(uint16_t class_id, size_t num_i32_fields, size_t num_i64_fields) {
@@ -7091,6 +7819,39 @@ void DojaRuntime::sleep_ms(int64_t ms) {
     }
 }
 
+void DojaRuntime::yield_spin_wait() {
+    auto start_tp = std::chrono::steady_clock::now();
+    if (!sdl_window_) {
+        // Headless / automated test mode: advance synthetic frame counter so
+        // --inject-key and --max-frames work inside blocking key-wait loops.
+        present_screen();
+        return;
+    }
+    poll_events();
+    // Keep the SDL window responsive and repaint overlays/exposes while spinning,
+    // without disturbing Graphics.lock()/unlock() interpolation state.
+    if (sdl_renderer_ && (sdl_texture_ || sdl_texture_hd_)) {
+        SDL_Window* win = static_cast<SDL_Window*>(sdl_window_);
+        bool win_minimized = win && ((SDL_GetWindowFlags(win) & SDL_WINDOW_MINIMIZED) != 0);
+        if (!(win_minimized && g_pvp.active())) {
+            g_ui.compose_display_buffer(
+                framebuffer_, fb_pix_text_, fb_hd_text_.data(), hd_scale_, keypad_state_, false,
+                pvp_match_active_ || pvp_self_test_);
+            g_ui.present_sdl_frame(
+                static_cast<SDL_Renderer*>(sdl_renderer_),
+                static_cast<SDL_Texture*>(sdl_texture_),
+                static_cast<SDL_Texture*>(sdl_texture_hd_));
+        }
+    }
+    if (!fast_forward_) {
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_tp).count();
+        if (elapsed_ms < 16) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(16 - elapsed_ms));
+        }
+    }
+}
+
 Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char* desc, Slot* args, int num_args) {
     std::string c(cls);
     std::string m(name);
@@ -7322,10 +8083,17 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
                 if (p_idx != std::string::npos) pos_val = std::stoul(url.substr(p_idx + 4));
                 auto l_idx = url.find("length=");
                 if (l_idx != std::string::npos) len_val = std::stoul(url.substr(l_idx + 7));
-                size_t real_off = sp_header_offset_ + pos_val;
-                if (real_off < sp_data_.size()) {
-                    size_t avail = std::min(len_val, sp_data_.size() - real_off);
-                    st_obj.stream->buffer.assign(sp_data_.begin() + real_off, sp_data_.begin() + real_off + avail);
+                if (oneshot_autosave_read_ && pos_val == sp_save_offset_ &&
+                    has_autosave_ && autosave_payload_.size() == sp_save_payload_size_) {
+                    oneshot_autosave_read_ = false;
+                    size_t avail = std::min(len_val, autosave_payload_.size());
+                    st_obj.stream->buffer.assign(autosave_payload_.begin(), autosave_payload_.begin() + avail);
+                } else {
+                    size_t real_off = sp_header_offset_ + pos_val;
+                    if (real_off < sp_data_.size()) {
+                        size_t avail = std::min(len_val, sp_data_.size() - real_off);
+                        st_obj.stream->buffer.assign(sp_data_.begin() + real_off, sp_data_.begin() + real_off + avail);
+                    }
                 }
             } else if (url.rfind("resource:///", 0) == 0) {
                 st_obj.stream->buffer = read_jar_Bytes(url.substr(12));
@@ -7487,9 +8255,18 @@ Slot DojaRuntime::invoke_external(const char* cls, const char* name, const char*
         }
         if (m == "flush" || m == "close") {
             if (sd.sp_write_offset >= 0 && !sd.buffer.empty()) {
+                if (autosave_capture_active_ &&
+                    static_cast<size_t>(sd.sp_write_offset) == sp_save_offset_) {
+                    autosave_capture_buf_ = sd.buffer;
+                    return Slot(0);
+                }
                 size_t dst_off = sp_header_offset_ + static_cast<size_t>(sd.sp_write_offset);
                 if (dst_off + sd.buffer.size() <= sp_data_.size()) {
                     std::memcpy(sp_data_.data() + dst_off, sd.buffer.data(), sd.buffer.size());
+                    sp_dirty_ = true;
+                    if (static_cast<size_t>(sd.sp_write_offset) == sp_save_offset_) {
+                        manual_save_timestamp_ = static_cast<int64_t>(std::time(nullptr));
+                    }
                     save_sav_overlay();
                 }
             }

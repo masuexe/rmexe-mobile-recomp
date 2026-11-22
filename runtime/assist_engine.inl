@@ -24,6 +24,22 @@ struct AssistLocalState {
 
 static AssistLocalState g_assist_state{};
 
+struct AutosaveWorldLoc {
+    int32_t world_scene = 0; // 3 = FieldMain, 5 = Machi
+    int32_t area_id = -1;    // map_no (if 3) or machi_no (if 5)
+    bool valid() const { return (world_scene == 3 || world_scene == 5) && area_id >= 0; }
+    bool operator==(const AutosaveWorldLoc& o) const { return world_scene == o.world_scene && area_id == o.area_id; }
+    bool operator!=(const AutosaveWorldLoc& o) const { return !(*this == o); }
+};
+
+struct AutosaveLocalState {
+    bool loc_tables_synced = false;
+    bool suppress_next_settle = true;
+    AutosaveWorldLoc last_settled{};
+};
+
+static AutosaveLocalState g_autosave_state{};
+
 static inline bool assist_pvp_blocked(const DojaRuntime& rt) {
     return rt.pvp_match_active() || rt.pvp_self_test();
 }
@@ -170,10 +186,257 @@ static inline bool assist_is_ranking_tainted_now(const DojaRuntime& rt) {
 #endif
 }
 
+static void autosave_sync_name_tables_if_ready(DojaRuntime& rt) {
+    if (g_autosave_state.loc_tables_synced) return;
+    if (sf_app_CpCanvas_map_str <= 0 || sf_app_CpCanvas_m_name <= 0) return;
+    if (rt.get(sf_app_CpCanvas_map_str).kind != ObjKind::RefArray ||
+        rt.get(sf_app_CpCanvas_m_name).kind != ObjKind::RefArray) {
+        return;
+    }
+    auto extract_table = [&](Ref arr_ref, std::vector<std::string>& out, bool& any_nonempty) {
+        int32_t n = rt.array_length(arr_ref);
+        out.clear();
+        out.reserve(static_cast<size_t>(std::max<int32_t>(0, n)));
+        for (int32_t i = 0; i < n; ++i) {
+            Ref sref = rt.iaload(arr_ref, i);
+            if (sref > 0 && static_cast<size_t>(sref) < rt.heap_size() && rt.get(sref).kind == ObjKind::String) {
+                const std::string& s = rt.get(sref).str;
+                if (!s.empty()) any_nonempty = true;
+                out.push_back(s);
+            } else {
+                out.emplace_back();
+            }
+        }
+    };
+    bool any_nonempty = false;
+    std::vector<std::string> map_names;
+    std::vector<std::string> machi_names;
+    extract_table(sf_app_CpCanvas_map_str, map_names, any_nonempty);
+    extract_table(sf_app_CpCanvas_m_name, machi_names, any_nonempty);
+    if (!any_nonempty) return;
+    g_autosave_state.loc_tables_synced = true;
+    rt.set_location_name_tables(std::move(map_names), std::move(machi_names));
+}
+
+static bool autosave_is_safe_playable_world(const DojaRuntime& rt) {
+    if (assist_pvp_blocked(rt)) return false;
+    const int32_t sc = sf_app_CpCanvas_scene;
+    if (sc != 3 && sc != 5) return false;
+    if (sf_app_CpCanvas_over_flg != 0 || sf_app_CpCanvas_max_hp <= 0 || sf_app_CpCanvas_now_hp <= 0) return false;
+    if (sf_app_CpCanvas_sina_flg < 0) return false;
+    if (sf_app_CpCanvas_ivent_flg >= 0 || sf_app_CpCanvas_mes_no > 0 ||
+        sf_app_CpCanvas_mes_flg != 0 || sf_app_CpCanvas_eff_cnt > 0) {
+        return false;
+    }
+    if (sc == 3) {
+        // Note: FieldMain intentionally leaves machi_flg == 1 after Jack-In, so never gate FieldMain on machi_flg.
+        if (sf_app_CpCanvas_warp_cnt != 0 || sf_app_CpCanvas_machi_cnt != 0 || sf_app_CpCanvas_ivent_end != 0) {
+            return false;
+        }
+    } else {
+        if (sf_app_CpCanvas_machi_move != 0 || sf_app_CpCanvas_machi_cnt != 0 || sf_app_CpCanvas_machi_flg != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool autosave_perform_now(DojaRuntime& rt, Ref cp) {
+    if (cp <= 0 || !autosave_is_safe_playable_world(rt)) return false;
+    const int32_t cur_scene = sf_app_CpCanvas_scene; // 3 or 5
+    const int32_t saved_back_menu = sf_app_CpCanvas_back_menu;
+    const int32_t saved_now_bgm = sf_app_CpCanvas_now_bgm;
+
+    struct SaveFieldGuard {
+        DojaRuntime& rt;
+        int32_t back_menu;
+        int32_t now_bgm;
+        ~SaveFieldGuard() {
+            sf_app_CpCanvas_back_menu = back_menu;
+            sf_app_CpCanvas_now_bgm = now_bgm;
+            rt.abort_autosave_capture();
+        }
+    } guard{rt, saved_back_menu, saved_now_bgm};
+
+    sf_app_CpCanvas_back_menu = cur_scene;
+    sf_app_CpCanvas_now_bgm = (cur_scene == 3) ? sf_app_CpCanvas_map_bgm : 3;
+
+    rt.begin_autosave_capture();
+#ifdef RMEXE_IS_PON_GAME
+    fn_app_CpCanvas_Save___I__V(rt, cp, 0);
+#else
+    (void)fn_app_CpCanvas_Save___I__I(rt, cp, 0);
+#endif
+
+    SaveSlotSummary meta{};
+    meta.exists = true;
+    meta.is_autosave = true;
+    meta.sina_no = sf_app_CpCanvas_sina_no;
+    meta.back_menu = cur_scene;
+    meta.map_no = sf_app_CpCanvas_map_no;
+    meta.machi_no = sf_app_CpCanvas_machi_no;
+    meta.now_hp = sf_app_CpCanvas_now_hp;
+    meta.max_hp = sf_app_CpCanvas_max_hp;
+    meta.zenny = sf_app_CpCanvas_zenny;
+    return rt.commit_autosave_capture(meta);
+}
+
+static bool autosave_execute_load_slot(DojaRuntime& rt, Ref cp, int slot) {
+    if (assist_pvp_blocked(rt) || cp <= 0) return false;
+    if (slot != 1 && slot != 2) return false;
+    if (slot == 2) {
+        if (!rt.arm_oneshot_autosave_read()) {
+            rt.show_ui_toast("暂无有效的自动存档", 90);
+            return false;
+        }
+    } else {
+        if (!rt.has_manual_save()) {
+            rt.show_ui_toast("暂无有效的手动存档", 90);
+            return false;
+        }
+    }
+
+    struct ReadDisarmGuard {
+        DojaRuntime& rt;
+        ~ReadDisarmGuard() { rt.disarm_oneshot_autosave_read(); }
+    } disarm_guard{rt};
+
+    fn_app_CpCanvas_Audio___II__V(rt, 0, 0);
+    sf_app_CpCanvas_over_flg = 0;
+    sf_app_CpCanvas_over_cnt = 0;
+    sf_app_CpCanvas_mes_flg = 0;
+    sf_app_CpCanvas_mes_no = 0;
+    sf_app_CpCanvas_yes_no_flg = 0;
+    sf_app_CpCanvas_ivent_flg = -1;
+    sf_app_CpCanvas_ivent_end = 0;
+    sf_app_CpCanvas_warp_cnt = 0;
+    sf_app_CpCanvas_machi_cnt = 0;
+    sf_app_CpCanvas_machi_move = 0;
+    sf_app_CpCanvas_machi_flg = 0;
+    sf_app_CpCanvas_eff_cnt = 0;
+    sf_app_CpCanvas_cas_cnt = 0;
+    sf_app_CpCanvas_esc_flg = 0;
+    sf_app_CpCanvas_pa_start = 0;
+    sf_app_CpCanvas_menu_cnt = 0;
+    sf_app_CpCanvas_menu_sel = 0;
+    sf_app_CpCanvas_option_flg = 0;
+    sf_app_CpCanvas_boss_flg = 0;
+    sf_app_CpCanvas_win_flg = 0;
+    sf_app_CpCanvas_dell_cnt = 0;
+    sf_app_CpCanvas_mode = 0;
+    sf_app_CpCanvas_mode2 = 0;
+    sf_app_CpCanvas_key = 0;
+#ifdef HAS_SF_app_CpCanvas_rank_flg
+    sf_app_CpCanvas_rank_flg = 0;
+#endif
+
+#ifdef RMEXE_IS_PON_GAME
+    fn_app_CpCanvas_Load___I__V(rt, cp, 0);
+#else
+    (void)fn_app_CpCanvas_Load___I__I(rt, cp, 0);
+#endif
+    rt.disarm_oneshot_autosave_read();
+
+    fn_app_CpCanvas_MachiSet___II__V(rt, cp, sf_app_CpCanvas_machi_no, 0);
+    sf_app_CpCanvas_sort_flg = -1;
+    fn_app_CpCanvas_ListSort___I__V(rt, cp, 0);
+    fn_app_CpCanvas_SortSkill___I__V(rt, 0);
+    sf_app_CpCanvas_scene = (sf_app_CpCanvas_back_menu == 3 || sf_app_CpCanvas_back_menu == 5)
+        ? sf_app_CpCanvas_back_menu
+        : 5;
+    if (sf_app_CpCanvas_scene == 5) {
+        fn_app_CpCanvas_MachiSet___II__V(rt, cp, sf_app_CpCanvas_machi_no, 1);
+    }
+    const int32_t saved_x = sf_app_CpCanvas_map_x;
+    const int32_t saved_y = sf_app_CpCanvas_map_y;
+    sf_app_CpCanvas_mode = 0;
+    fn_app_CpCanvas_MapSet___II__V(rt, cp, sf_app_CpCanvas_map_no, 0);
+    sf_app_CpCanvas_map_x = saved_x;
+    sf_app_CpCanvas_map_y = saved_y;
+    sf_app_CpCanvas_now_bgm = (sf_app_CpCanvas_scene == 3) ? sf_app_CpCanvas_map_bgm : 3;
+    if (sf_app_CpCanvas_sina_flg >= 0) {
+        fn_app_CpCanvas_Audio___II__V(rt, 1, sf_app_CpCanvas_now_bgm);
+    } else {
+        fn_app_CpCanvas_IventRead___II__V(rt, cp, 1, 0);
+        sf_app_CpCanvas_now_bgm = -1;
+        sf_app_CpCanvas_sina_flg = 0;
+    }
+
+    rt.reset_interpolator();
+    g_autosave_state.suppress_next_settle = true;
+    g_autosave_state.last_settled = {};
+    rt.show_ui_toast(slot == 2 ? "已读取自动存档" : "已读取手动存档", 90);
+    return true;
+}
+
+static void autosave_tick(DojaRuntime& rt, Ref cp) {
+    if (sf_app_CpCanvas_scene <= 0) {
+        g_autosave_state.suppress_next_settle = true;
+        g_autosave_state.last_settled = {};
+        return;
+    }
+    if (!autosave_is_safe_playable_world(rt)) {
+        return;
+    }
+    const int32_t sc = sf_app_CpCanvas_scene;
+    AutosaveWorldLoc cur{sc, (sc == 3) ? sf_app_CpCanvas_map_no : sf_app_CpCanvas_machi_no};
+    if (g_autosave_state.suppress_next_settle || !g_autosave_state.last_settled.valid()) {
+        g_autosave_state.last_settled = cur;
+        g_autosave_state.suppress_next_settle = false;
+        return;
+    }
+    if (cur != g_autosave_state.last_settled) {
+        g_autosave_state.last_settled = cur;
+        if (rt.auto_save_enabled()) {
+            autosave_perform_now(rt, cp);
+        }
+    }
+}
+
 } // namespace
 
-static void assist_on_frame_tick(DojaRuntime& rt) {
+static int32_t assist_on_title_continue(DojaRuntime& rt, Ref /*cp*/) {
+    autosave_sync_name_tables_if_ready(rt);
+    if (assist_pvp_blocked(rt) || rt.assist_self_test() || rt.autosave_self_test() || rt.is_headless()) {
+        g_autosave_state.suppress_next_settle = true;
+        g_autosave_state.last_settled = {};
+        return 1;
+    }
+    rt.reload_autosave_from_disk();
+    SaveSlotSummary auto_sum = rt.get_auto_save_summary();
+    SaveSlotSummary manual_sum = rt.get_manual_save_summary();
+    if (!auto_sum.exists) {
+        g_autosave_state.suppress_next_settle = true;
+        g_autosave_state.last_settled = {};
+        return 1;
+    }
+    if (!manual_sum.exists && auto_sum.exists) {
+        rt.arm_oneshot_autosave_read();
+        g_autosave_state.suppress_next_settle = true;
+        g_autosave_state.last_settled = {};
+        return 2;
+    }
+    int choice = rt.run_save_slot_chooser_modal(auto_sum, manual_sum);
+    if (choice == 0) {
+        return 0;
+    }
+    if (choice == 2) {
+        rt.arm_oneshot_autosave_read();
+    }
+    g_autosave_state.suppress_next_settle = true;
+    g_autosave_state.last_settled = {};
+    return choice;
+}
+
+static void assist_on_frame_tick(DojaRuntime& rt, Ref cp) {
     if (assist_pvp_blocked(rt)) return;
+
+    autosave_sync_name_tables_if_ready(rt);
+    int pending_load = rt.consume_pending_save_load_request();
+    if (pending_load != 0) {
+        autosave_execute_load_slot(rt, cp, pending_load);
+    }
+    autosave_tick(rt, cp);
 
     const auto& cfg = rt.assist_config();
     const bool eff = assist_effective_active(rt);
@@ -653,7 +916,7 @@ static void assist_run_self_test(DojaRuntime& rt, Ref cp) {
 
     sf_app_CpCanvas_scene = 3;
     cfg.show_ex_boss = 1;
-    assist_on_frame_tick(rt);
+    assist_on_frame_tick(rt, cp);
     std::string boss_nm = assist_resolve_boss_name(rt, 303, 0);
     std::cout << "[AssistSelfTest] Resolved boss name (teki_pt=303): " << boss_nm << "\n";
     check(!boss_nm.empty() && boss_nm != "Boss#0", "assist_resolve_boss_name resolves localized boss name");
@@ -748,21 +1011,21 @@ static void assist_run_self_test(DojaRuntime& rt, Ref cp) {
     cfg.run_speed_pct = 200;
     sf_app_CpCanvas_scene = 9;
     sf_app_CpCanvas_rank_flg = 0;
-    assist_on_frame_tick(rt);
+    assist_on_frame_tick(rt, cp);
     check(!assist_should_block_ranking_record(rt) && !assist_should_block_ranking_upload(rt),
           "non-combat QoL cheats do not taint ranking");
 
     cfg.buster_mult = 100;
     sf_app_CpCanvas_rank_flg = 1;
-    assist_on_frame_tick(rt);
+    assist_on_frame_tick(rt, cp);
     check(assist_is_ranking_tainted_now(rt), "buster_mult=100 taints active ranking run");
     cfg.buster_mult = 1; // disabling mid-run must stay tainted!
-    assist_on_frame_tick(rt);
+    assist_on_frame_tick(rt, cp);
     check(assist_should_block_ranking_record(rt) && fn_app_CpCanvas_RankUp_____I(rt) == -999,
           "ranking taint stays latched and RankUp() returns -999");
     sf_app_CpCanvas_rank_flg = 0;
     sf_app_CpCanvas_scene = 3;
-    assist_on_frame_tick(rt);
+    assist_on_frame_tick(rt, cp);
     check(!g_assist_state.rank_run_tainted, "leaving ranking clears taint latch");
 #endif
 
@@ -793,6 +1056,235 @@ static void assist_run_self_test(DojaRuntime& rt, Ref cp) {
     rt.set_pvp_match_active(false);
     rt.mutable_assist_config() = saved_cfg;
     std::cout << "[AssistSelfTest] ALL CHECKS PASSED!\n";
+    rt.shutdown();
+    std::exit(0);
+}
+
+static void autosave_run_self_test(DojaRuntime& rt, Ref cp) {
+    std::cout << "[AutosaveSelfTest] Running dual-slot Auto-Save / Manual-Save verification suite...\n";
+    auto check = [](bool cond, const char* msg) {
+        if (!cond) {
+            std::cerr << "[AutosaveSelfTest FAIL] " << msg << "\n";
+            std::exit(1);
+        }
+    };
+
+    auto native_save = [&]() {
+#ifdef RMEXE_IS_PON_GAME
+        fn_app_CpCanvas_Save___I__V(rt, cp, 0);
+#else
+        (void)fn_app_CpCanvas_Save___I__I(rt, cp, 0);
+#endif
+    };
+
+    auto clear_transient_gates = [&]() {
+        sf_app_CpCanvas_over_flg = 0;
+        sf_app_CpCanvas_over_cnt = 0;
+        sf_app_CpCanvas_sina_flg = 1;
+        sf_app_CpCanvas_sina_no = 2;
+        sf_app_CpCanvas_ivent_flg = -1;
+        sf_app_CpCanvas_ivent_end = 0;
+        sf_app_CpCanvas_mes_no = 0;
+        sf_app_CpCanvas_mes_flg = 0;
+        sf_app_CpCanvas_eff_cnt = 0;
+        sf_app_CpCanvas_warp_cnt = 0;
+        sf_app_CpCanvas_machi_cnt = 0;
+        sf_app_CpCanvas_machi_move = 0;
+        sf_app_CpCanvas_machi_flg = 0;
+    };
+
+    fn_app_CpCanvas_ImgSet2___I__V(rt, cp, 0);
+    fn_app_CpCanvas_EnSet_____V(rt, cp);
+    fn_app_CpCanvas_MapSet___II__V(rt, cp, 0, 0);
+    autosave_sync_name_tables_if_ready(rt);
+
+    g_autosave_state.suppress_next_settle = true;
+    g_autosave_state.last_settled = {};
+    rt.set_auto_save_enabled(true);
+    rt.set_pvp_match_active(false);
+
+    // 1. Manual Save baseline in Machi 0
+    clear_transient_gates();
+    sf_app_CpCanvas_scene = 5;
+    sf_app_CpCanvas_back_menu = 5;
+    sf_app_CpCanvas_machi_no = 0;
+    sf_app_CpCanvas_zenny = 1234;
+    sf_app_CpCanvas_max_hp = 2000;
+    sf_app_CpCanvas_now_hp = 2000;
+    native_save();
+    check(rt.has_manual_save(), "manual save exists after native Save(0)");
+    check(!rt.has_auto_save(), "auto save absent initially");
+    check(rt.get_manual_save_summary().zenny == 1234 && rt.get_manual_save_summary().machi_no == 0,
+          "manual save captures machi_no=0 and zenny=1234");
+
+    // 2. Initial settle tick must NOT trigger auto-save
+    assist_on_frame_tick(rt, cp);
+    check(!rt.has_auto_save(), "initial world settle does not create auto save");
+
+    // 3. Real World location transition (Machi 0 -> Machi 1)
+    sf_app_CpCanvas_machi_no = 1;
+    sf_app_CpCanvas_zenny = 2500;
+    assist_on_frame_tick(rt, cp);
+    check(rt.has_auto_save(), "Machi 0 -> Machi 1 creates auto save");
+    {
+        auto as = rt.get_auto_save_summary();
+        auto ms = rt.get_manual_save_summary();
+        check(as.back_menu == 5 && as.machi_no == 1 && as.zenny == 2500,
+              "auto save records back_menu=5, machi_no=1, zenny=2500");
+        check(ms.machi_no == 0 && ms.zenny == 1234,
+              "manual save stays isolated after real-world auto save");
+    }
+
+    // 4. Jack-In (Machi 1 -> Cyberworld Map 0) with stale back_menu=5 and machi_flg=1
+    sf_app_CpCanvas_scene = 3;
+    sf_app_CpCanvas_map_no = 0;
+    sf_app_CpCanvas_machi_flg = 1;
+    sf_app_CpCanvas_back_menu = 5;
+    sf_app_CpCanvas_now_bgm = 3;
+    sf_app_CpCanvas_map_bgm = 7;
+    sf_app_CpCanvas_zenny = 3333;
+    sf_app_CpCanvas_now_hp = 1800;
+    assist_on_frame_tick(rt, cp);
+    {
+        auto as = rt.get_auto_save_summary();
+        auto ms = rt.get_manual_save_summary();
+        check(as.back_menu == 3 && as.map_no == 0 && as.zenny == 3333 && as.now_hp == 1800,
+              "Jack-In auto save syncs back_menu=3, map_no=0, zenny=3333, now_hp=1800");
+        check(sf_app_CpCanvas_back_menu == 5 && sf_app_CpCanvas_now_bgm == 3,
+              "Jack-In auto save restores live back_menu and now_bgm after Save(0)");
+        check(ms.machi_no == 0 && ms.zenny == 1234,
+              "manual save stays untouched after Jack-In auto save");
+    }
+
+    // 5. Normal battle victory returning to same Cyberworld map must NOT auto-save
+    sf_app_CpCanvas_scene = 1;
+    sf_app_CpCanvas_zenny = 4444;
+    assist_on_frame_tick(rt, cp);
+    sf_app_CpCanvas_scene = 3;
+    sf_app_CpCanvas_map_no = 0;
+    assist_on_frame_tick(rt, cp);
+    check(rt.get_auto_save_summary().zenny == 3333,
+          "normal battle victory returning to same map does NOT trigger auto save");
+
+    // 6. Cyberworld warp (Map 0 -> Map 1): blocked mid-fade, saved once settled
+    sf_app_CpCanvas_map_no = 1;
+    sf_app_CpCanvas_warp_cnt = 5;
+    assist_on_frame_tick(rt, cp);
+    check(rt.get_auto_save_summary().map_no == 0 && rt.get_auto_save_summary().zenny == 3333,
+          "warp transition mid-fade (warp_cnt>0) waits before auto saving");
+    sf_app_CpCanvas_warp_cnt = 0;
+    assist_on_frame_tick(rt, cp);
+    check(rt.get_auto_save_summary().map_no == 1 && rt.get_auto_save_summary().zenny == 4444,
+          "settled Cyberworld warp triggers auto save");
+
+    // 7. Unsafe gates (ivent_flg / mes_no / over_flg) must block auto-save
+    sf_app_CpCanvas_map_no = 2;
+    sf_app_CpCanvas_zenny = 5555;
+    sf_app_CpCanvas_ivent_flg = 1;
+    assist_on_frame_tick(rt, cp);
+    check(rt.get_auto_save_summary().map_no == 1, "ivent_flg>=0 blocks auto save");
+    sf_app_CpCanvas_ivent_flg = -1;
+    sf_app_CpCanvas_mes_no = 1;
+    assist_on_frame_tick(rt, cp);
+    check(rt.get_auto_save_summary().map_no == 1, "mes_no>0 blocks auto save");
+    sf_app_CpCanvas_mes_no = 0;
+    sf_app_CpCanvas_over_flg = 1;
+    assist_on_frame_tick(rt, cp);
+    check(rt.get_auto_save_summary().map_no == 1, "over_flg!=0 blocks auto save");
+    sf_app_CpCanvas_over_flg = 0;
+    assist_on_frame_tick(rt, cp);
+    check(rt.get_auto_save_summary().map_no == 2 && rt.get_auto_save_summary().zenny == 5555,
+          "clearing unsafe gates lets map_no=2 settle and auto save");
+
+    // 8. Disabled toggle suppresses transition save without retroactive save on re-enable
+    rt.set_auto_save_enabled(false);
+    sf_app_CpCanvas_map_no = 3;
+    sf_app_CpCanvas_zenny = 6666;
+    assist_on_frame_tick(rt, cp);
+    check(rt.get_auto_save_summary().map_no == 2 && rt.get_auto_save_summary().zenny == 5555,
+          "auto_save_enabled=false suppresses auto save");
+    rt.set_auto_save_enabled(true);
+    assist_on_frame_tick(rt, cp);
+    check(rt.get_auto_save_summary().map_no == 2,
+          "re-enabling auto_save_enabled does not retroactively auto save on same map");
+    sf_app_CpCanvas_map_no = 4;
+    sf_app_CpCanvas_zenny = 7777;
+    assist_on_frame_tick(rt, cp);
+    check(rt.get_auto_save_summary().map_no == 4 && rt.get_auto_save_summary().zenny == 7777,
+          "next map transition after re-enable saves normally");
+
+    // 9. PvP isolation blocks both auto save and slot load
+    rt.set_pvp_match_active(true);
+    sf_app_CpCanvas_map_no = 5;
+    sf_app_CpCanvas_zenny = 8888;
+    assist_on_frame_tick(rt, cp);
+    check(rt.get_auto_save_summary().map_no == 4 && rt.get_auto_save_summary().zenny == 7777,
+          "PvP blocks auto save");
+    check(!autosave_execute_load_slot(rt, cp, 2), "PvP blocks autosave load");
+    rt.set_pvp_match_active(false);
+
+    // 10. Load Auto Save from corrupted mid-battle state without touching Manual Save
+    sf_app_CpCanvas_scene = 1;
+    sf_app_CpCanvas_zenny = 99999;
+    sf_app_CpCanvas_over_flg = 1;
+    sf_app_CpCanvas_map_no = 0;
+    check(autosave_execute_load_slot(rt, cp, 2), "load auto save succeeds");
+    check(sf_app_CpCanvas_scene == 3 && sf_app_CpCanvas_map_no == 4 &&
+          sf_app_CpCanvas_zenny == 7777 && sf_app_CpCanvas_over_flg == 0,
+          "load auto save restores Cyberworld map_no=4, zenny=7777, over_flg=0");
+    check(rt.get_manual_save_summary().machi_no == 0 && rt.get_manual_save_summary().zenny == 1234,
+          "loading auto save leaves manual save untouched");
+
+    // 11. Load Manual Save without touching Auto Save
+    check(autosave_execute_load_slot(rt, cp, 1), "load manual save succeeds");
+    check(sf_app_CpCanvas_scene == 5 && sf_app_CpCanvas_machi_no == 0 && sf_app_CpCanvas_zenny == 1234,
+          "load manual save restores Real World machi_no=0, zenny=1234");
+    check(rt.get_auto_save_summary().back_menu == 3 && rt.get_auto_save_summary().map_no == 4 &&
+          rt.get_auto_save_summary().zenny == 7777,
+          "loading manual save leaves auto save untouched");
+
+    // 12. Jack-Out (Cyberworld -> Real World) with stale back_menu=3
+    clear_transient_gates();
+    sf_app_CpCanvas_scene = 3;
+    sf_app_CpCanvas_map_no = 4;
+    assist_on_frame_tick(rt, cp); // settle in Cyberworld map 4
+    sf_app_CpCanvas_scene = 5;
+    sf_app_CpCanvas_machi_no = 2;
+    sf_app_CpCanvas_back_menu = 3; // stale
+    sf_app_CpCanvas_zenny = 9100;
+    assist_on_frame_tick(rt, cp);
+    check(rt.get_auto_save_summary().back_menu == 5 && rt.get_auto_save_summary().machi_no == 2 &&
+          rt.get_auto_save_summary().zenny == 9100,
+          "Jack-Out auto save syncs back_menu=5, machi_no=2, zenny=9100");
+    sf_app_CpCanvas_scene = 1;
+    sf_app_CpCanvas_zenny = 1;
+    check(autosave_execute_load_slot(rt, cp, 2) &&
+          sf_app_CpCanvas_scene == 5 && sf_app_CpCanvas_machi_no == 2 && sf_app_CpCanvas_zenny == 9100,
+          "Jack-Out auto save loads cleanly back into Real World");
+
+    // 13. Location names, disk reload, and CRC corruption rejection
+    check(!rt.get_auto_save_summary().location_name.empty(), "auto save resolves non-empty location_name");
+    check(!rt.get_manual_save_summary().location_name.empty(), "manual save resolves non-empty location_name");
+    check(rt.reload_autosave_from_disk() && rt.has_auto_save(), "valid .autosave reloads from disk");
+    {
+        std::vector<uint8_t> raw;
+        {
+            std::ifstream in(rt.autosave_path(), std::ios::binary);
+            raw.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        check(!raw.empty(), ".autosave file exists on disk");
+        raw.back() ^= 0xFFu;
+        {
+            std::ofstream out(rt.autosave_path(), std::ios::binary | std::ios::trunc);
+            out.write(reinterpret_cast<const char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
+        }
+        check(!rt.reload_autosave_from_disk() && !rt.has_auto_save(),
+              "corrupted .autosave payload fails CRC and is rejected cleanly");
+        check(rt.has_manual_save(), "manual save remains intact after corrupted autosave reload");
+    }
+
+    std::remove(rt.autosave_path().c_str());
+    std::cout << "[AutosaveSelfTest] ALL CHECKS PASSED!\n";
     rt.shutdown();
     std::exit(0);
 }

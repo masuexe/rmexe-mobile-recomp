@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
 
@@ -46,6 +47,7 @@ int main(int argc, char** argv) {
     bool headless = false;
     bool fast_forward = false;
     bool explicit_server = false;
+    bool has_custom_sav = false;
     std::string cli_pixel_font;
     std::string cli_hd_font;
 
@@ -59,6 +61,7 @@ int main(int argc, char** argv) {
             sp_path = argv[++i];
         } else if (arg == "--sav" && i + 1 < argc) {
             rmexe::set_custom_sav_path(argv[++i]);
+            has_custom_sav = true;
         } else if (arg == "--config" && i + 1 < argc) {
             rt.set_config_path(argv[++i]);
         } else if (arg == "--server" && i + 1 < argc) {
@@ -85,6 +88,10 @@ int main(int argc, char** argv) {
             headless = true;
             fast_forward = true;
             rt.set_assist_self_test(true);
+        } else if (arg == "--autosave-self-test") {
+            headless = true;
+            fast_forward = true;
+            rt.set_autosave_self_test(true);
         } else if (arg == "--buster-mult" && i + 1 < argc) {
             rmexe::set_cli_assist_buster_mult(std::atoi(argv[++i]));
         } else if (arg == "--damage-pct" && i + 1 < argc) {
@@ -178,6 +185,7 @@ int main(int argc, char** argv) {
                       << "  --pvp-self-test       Run headless 213-chip PvP symmetry & GGPO rollback suite\n"
                       << "  --pvp-auto-bot        Drive automated PvP inputs in --pvp-create/--pvp-join\n"
                       << "  --assist-self-test    Run headless Assist/QoL cheat & PvP isolation suite\n"
+                      << "  --autosave-self-test  Run headless Auto-Save / Manual-Save dual-slot verification suite\n"
                       << "  --buster-mult <N>     Buster damage multiplier (1..9999)\n"
                       << "  --damage-pct <N>      Incoming damage percentage (0..500)\n"
                       << "  --encounter-pct <N>   Encounter rate percentage (0..10000)\n"
@@ -195,7 +203,7 @@ int main(int argc, char** argv) {
                       << "  --name <nick>         Override player nickname   (up to 12 ASCII chars)\n"
                       << "  --scale <int>         Window scale factor (default: 3 -> 720x780)\n"
                       << "  --fps <int>           Target render FPS (default: 60)\n"
-                      << "  --lang <mode>         Language overlay mode: auto, zh, orig\n"
+                      << "  --lang <mode>         Language overlay mode (JP ROM): auto, zh, orig (jp)\n"
                       << "  --translation <path>  Path to Chinese translation JSON file\n"
                       << "  --font-mode <mode>    Font rendering mode: hd (default), pixel\n"
                       << "  --font <path>         Override font file for both pixel and HD modes\n"
@@ -218,6 +226,14 @@ int main(int argc, char** argv) {
     rt.set_fast_forward(fast_forward);
     if (max_frames > 0) {
         rt.set_max_frames(max_frames, dump_ppm_path);
+    }
+    if (rt.autosave_self_test() && !has_custom_sav) {
+        std::error_code ec;
+        std::filesystem::path tmp_sav = std::filesystem::temp_directory_path(ec) / "rmexe_autosave_selftest.sav";
+        std::filesystem::remove(tmp_sav, ec);
+        std::filesystem::remove(tmp_sav.string() + ".autosave", ec);
+        std::filesystem::remove(tmp_sav.string() + ".autosave.tmp", ec);
+        rmexe::set_custom_sav_path(tmp_sav.string());
     }
 
     static const rmexe::GameModule kSingleGameModule{

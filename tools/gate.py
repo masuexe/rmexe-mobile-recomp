@@ -75,6 +75,24 @@ def check_contracts() -> None:
                 "runtime/pvp_lon_engine.inl: pvp_lon_intercept_ene_draw must guard single-player with is_arena_ready()"
             )
 
+    # Regression guard for MesRead 0x81 0x8F sentinel collision: forbid trail byte 0x81 in 2-byte localization encoding
+    loc_hpp = ROOT_DIR / "common" / "localization.hpp"
+    if loc_hpp.is_file():
+        loc_text = loc_hpp.read_text(encoding="utf-8")
+        if "tb1 != 0x81u" not in loc_text or "kNumTrails = 189" not in loc_text:
+            errors.append(
+                "common/localization.hpp: must forbid trail byte 0x81 (tb1 != 0x81u and kNumTrails = 189)"
+            )
+
+    # Regression guard for single-threaded busy-wait key loops (e.g., CpCanvas.Machi / Keiji / kidou)
+    rt_hpp = ROOT_DIR / "runtime" / "doja_runtime.hpp"
+    recomp_py = ROOT_DIR / "tools" / "recomp_jar.py"
+    if rt_hpp.is_file() and recomp_py.is_file():
+        if "void yield_spin_wait();" not in rt_hpp.read_text(encoding="utf-8"):
+            errors.append("runtime/doja_runtime.hpp: must declare void yield_spin_wait();")
+        if "rt.yield_spin_wait();" not in recomp_py.read_text(encoding="utf-8"):
+            errors.append("tools/recomp_jar.py: must emit rt.yield_spin_wait(); for pure spin-wait loops")
+
     # Syntax check all Python scripts in tools/
     for py_file in sorted((ROOT_DIR / "tools").glob("*.py")):
         try:

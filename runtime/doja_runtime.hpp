@@ -156,6 +156,20 @@ struct GameModule {
     void (*process_event)(DojaRuntime& rt, Ref canvas_ref, int32_t type, int32_t param) = nullptr;
 };
 
+struct SaveSlotSummary {
+    bool exists = false;
+    bool is_autosave = false;
+    int64_t timestamp = 0;
+    int32_t sina_no = 0;
+    int32_t back_menu = 5; // 3 = Cyberworld (FieldMain), 5 = Real World (Machi)
+    int32_t map_no = 0;
+    int32_t machi_no = 0;
+    int32_t now_hp = 0;
+    int32_t max_hp = 0;
+    int32_t zenny = 0;
+    std::string location_name;
+};
+
 // Runtime host interface implemented in doja_runtime.cpp
 class DojaRuntime {
 public:
@@ -213,6 +227,7 @@ public:
     void present_screen();
     int64_t current_time_millis();
     void sleep_ms(int64_t ms);
+    void yield_spin_wait();
 
     // FPS & Interpolation settings
     void set_render_fps(int fps) { target_render_fps_ = fps; }
@@ -282,6 +297,27 @@ public:
     bool pvp_auto_bot() const { return pvp_auto_bot_; }
     void set_assist_self_test(bool en) { assist_self_test_ = en; }
     bool assist_self_test() const { return assist_self_test_; }
+    void set_autosave_self_test(bool en) { autosave_self_test_ = en; }
+    bool autosave_self_test() const { return autosave_self_test_; }
+    bool auto_save_enabled() const;
+    void set_auto_save_enabled(bool en);
+    bool has_manual_save() const;
+    bool has_auto_save() const;
+    SaveSlotSummary get_manual_save_summary() const;
+    SaveSlotSummary get_auto_save_summary() const;
+    void set_location_name_tables(std::vector<std::string> map_names, std::vector<std::string> machi_names);
+    std::string resolve_location_name(int32_t back_menu, int32_t map_no, int32_t machi_no) const;
+    void begin_autosave_capture();
+    bool commit_autosave_capture(const SaveSlotSummary& meta);
+    void abort_autosave_capture();
+    bool arm_oneshot_autosave_read();
+    void disarm_oneshot_autosave_read();
+    bool reload_autosave_from_disk();
+    const std::string& autosave_path() const { return autosave_path_; }
+    int run_save_slot_chooser_modal(const SaveSlotSummary& auto_sum, const SaveSlotSummary& manual_sum);
+    int consume_pending_save_load_request();
+    void request_save_load(int slot);
+    void trigger_autosave_badge();
     const AssistConfig& assist_config() const;
     AssistConfig& mutable_assist_config();
     bool assist_hold_key_down() const;
@@ -336,11 +372,28 @@ private:
     std::string jar_path_;
     std::string sp_path_;
     std::string sav_path_;
+    std::string autosave_path_;
     std::string data_dir_;
     std::string asset_dir_;
     const GameModule* game_module_ = nullptr;
     std::vector<uint8_t> sp_data_;
     size_t sp_header_offset_ = 0;
+    bool is_lon_ = false;
+    size_t sp_save_offset_ = 300;
+    size_t sp_save_payload_size_ = 437 * 4;
+    bool sp_dirty_ = false;
+    int64_t manual_save_timestamp_ = 0;
+    bool has_autosave_ = false;
+    int64_t autosave_timestamp_ = 0;
+    uint32_t autosave_manual_crc_hint_ = 0;
+    int64_t autosave_manual_ts_hint_ = 0;
+    std::vector<uint8_t> autosave_payload_;
+    bool autosave_capture_active_ = false;
+    std::vector<uint8_t> autosave_capture_buf_;
+    bool oneshot_autosave_read_ = false;
+    int pending_save_load_request_ = 0;
+    std::vector<std::string> map_name_table_;
+    std::vector<std::string> machi_name_table_;
 
     // 240x240 screen framebuffer (ARGB8888) and dual premultiplied text overlays
     uint32_t framebuffer_[240 * 240] = {0};
@@ -363,6 +416,7 @@ private:
     bool pvp_self_test_ = false;
     bool pvp_auto_bot_ = false;
     bool assist_self_test_ = false;
+    bool autosave_self_test_ = false;
     bool suppress_av_ = false;
     bool keypad_override_enabled_ = false;
     int32_t keypad_override_mask_ = 0;
