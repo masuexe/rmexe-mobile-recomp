@@ -25,7 +25,9 @@ Supports both the **original Japanese releases** (`PoN_jp`, `LoN_jp`) and the **
   - **Dual-Mode Capcom i-mode Network & Unified PvP Server ([`common/capcom_protocol.hpp`](common/capcom_protocol.hpp), [`common/pvp_protocol.hpp`](common/pvp_protocol.hpp), [`server/rmexe_server.cpp`](server/rmexe_server.cpp))**:
     - **Built-in Offline Fallback (Zero-Config Single-Player)**: Simulates all original Capcom i-mode endpoints (`buyreg`, server date, `scck` episodic unlocks, `pts` portal points, `DataSave`/`Load` cloud backups, `exesr` Top-10 Virus Busting leaderboard & rival chip folders, and `dataget.php` seasonal 10-wave courses) locally in `capcom_local.db`.
     - **Standalone Unified Server (`rmexe_server`)**: Multiplexes **TCP HTTP/1.1** (multi-user Capcom cloud saves, live global Virus Busting leaderboard, and PvP room matchmaking) and **UDP** (low-latency real-time PvP NetBattle frame-input lockstep/rollback relay) on a single port (`8765`).
-  - **Cross-Platform Linux & Windows Support (`CP932` $\leftrightarrow$ `UTF-8` & Portable CJK Font Engine)**: Automatic Shift-JIS transcoding (`iconv` on Linux, Win32 NLS on Windows), cross-platform POSIX/Winsock2 networking ([`common/platform_socket.hpp`](common/platform_socket.hpp)), and crisp 12px Japanese/Chinese/English glyph rendering via embedded `stb_truetype`.
+  - **Cross-Platform 5-Platform Support (`CP932` $\leftrightarrow$ `UTF-8` & Portable CJK Font Engine)**: Built-in iconv-free Shift-JIS transcoding, cross-platform POSIX/Winsock2 networking ([`common/platform_socket.hpp`](common/platform_socket.hpp)), runtime font selector in the `F1` menu, and crisp 12px Japanese/Chinese/English glyph rendering via embedded `stb_truetype` across **Windows, macOS, Linux, Android (APK), and iOS (AltStore IPA)**.
+  - **100% Simplified Chinese Localization Overlay & 3-Language Collection Launcher (`rmexe_collection`)**: Non-destructive UTF-8 Chinese translation overlay (`assets/translations/pon_zh.json`, `lon_zh.json`) with unified `ZH / JP / EN` launcher (`ZH` and `JP` share one save; `EN` uses a separate save).
+  - **QoL, Dual-Slot Autosave & Customizable Assist System**: In-game `F1` menu options for dual-slot autosave, Buster multiplier, damage/encounter/zenny/run-speed scaling, EX boss toggles, and mobile drag-and-drop touch controller layout editor with touch chip selection.
 
 ---
 
@@ -90,12 +92,35 @@ cmake --build build -j$(nproc)
 
 ## Running & Controls
 
+### Desktop (Windows / macOS / Linux)
+
+Place your own `.jar` and `.sp` files under `assets/` next to the extracted binaries (matching the table above), then launch either the unified 3-language collection launcher or an individual target:
+
 ```bash
+# Unified PoN + LoN launcher (ZH / JP / EN)
+./build/rmexe_collection --scale 3 --fps 60
+
+# Or launch an individual target directly
 ./build/pon_jp_recomp --scale 3 --fps 60
 ./build/pon_en_recomp --scale 3 --fps 60
 ./build/lon_jp_recomp --scale 3 --fps 60
 ./build/lon_en_recomp --scale 3 --fps 60
 ```
+
+### Mobile (Android APK & iOS AltStore IPA)
+
+Public mobile releases contain **zero** copyrighted `.jar` / `.sp` files. Launch the app once so it creates the directory layout, then copy your own `.jar` and `.sp` files into:
+
+- **Android** (`rmexe-collection-android-arm64.apk`, currently debug-signed):
+  ```text
+  /sdcard/Android/data/com.rmexe.recomp/files/assets/
+  ├── PoN_jp/bin/PoN.jar   &   PoN_jp/sp/PoN.sp   (required for PoN JP & ZH)
+  ├── PoN/bin/PoN.jar      &   PoN/sp/PoN.sp      (required for PoN EN)
+  ├── LoN_jp/bin/LoN.jar   &   LoN_jp/sp/LoN.sp   (required for LoN JP & ZH)
+  └── LoN/bin/LoN.jar      &   LoN/sp/LoN.sp      (required for LoN EN)
+  ```
+- **iOS** (`rmexe-collection-ios-altstore.ipa`, sideload via AltStore / SideStore):
+  Open the iOS **Files** app $\rightarrow$ **On My iPhone** $\rightarrow$ **RMEXE Collection** $\rightarrow$ `assets/` and place the same `PoN_jp/`, `PoN/`, `LoN_jp/`, `LoN/` folders there.
 
 ### Unified Server (`rmexe_server`) & Online / Offline Modes
 
@@ -151,11 +176,11 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the complete engineering design.
 - [x] **Phase 2**: Ahead-of-Time JVM-to-C++20 Recompiler, SDL2 Native Runtime & Yamaha MA-3/MA-5 Stereo FM Audio
 - [x] **Phase 3**: 60 FPS Display-List Motion Interpolation & Instant `60 FPS / 15 FPS` Toggle
 - [x] **Phase 4**: Unified Capcom Server & Real-Time PvP NetBattle with GGPO Rollback Netcode (`PoN` & `LoN` JP/EN)
+- [x] **Phase 5**: 100% Simplified Chinese Localization Overlay (`PoN` & `LoN`), Runtime Font Selector, QoL/Assist System & Dual-Slot Autosave
+- [x] **Phase 6**: Cross-Platform 5-Platform Releases (Windows, macOS, Linux, Android APK, iOS AltStore IPA) with Touch Layout Editor
 
-### Upcoming Roadmap (Planned Order)
-1. [ ] **Chinese Localization (简体/繁体中文汉化支持)**: External script extraction toolchain & non-destructive runtime UTF-8 Chinese translation overlay for both *PoN* and *LoN*.
-2. [ ] **Mobile Port (移动端 / Android 移植版)**: Native Android (`SDL2` + NDK) build with customizable on-screen virtual GBA / flip-phone touch controls.
-3. [ ] **60 Hz GBA-Feel Mode (60 FPS 模拟 GBA 原生手感模式)**: 60 Hz sub-tick input response (16.7 ms latency) and GBA-paced combat/movement mechanics beyond visual motion interpolation.
+### Upcoming Roadmap
+1. [ ] **60 Hz GBA-Feel Mode (60 FPS 模拟 GBA 原生手感模式)**: 60 Hz sub-tick input response (16.7 ms latency) and GBA-paced combat/movement mechanics beyond visual motion interpolation.
 
 ---
 

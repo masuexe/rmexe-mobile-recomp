@@ -70,7 +70,7 @@ target_link_libraries(doja_runtime PUBLIC
     ${RMEXE_ZLIB_LIBS}
 )
 if(WIN32)
-    target_link_libraries(doja_runtime PUBLIC ws2_32)
+    target_link_libraries(doja_runtime PUBLIC ws2_32 advapi32)
 else()
     target_link_libraries(doja_runtime PUBLIC ${CMAKE_DL_LIBS})
 endif()
@@ -89,7 +89,23 @@ else()
     target_compile_options(rmexe_server PRIVATE -O2 -Wall -Wextra)
 endif()
 if(WIN32)
-    target_link_libraries(rmexe_server PRIVATE ws2_32)
+    target_link_libraries(rmexe_server PRIVATE ws2_32 advapi32)
+endif()
+
+# Unit test for startup guard (nettai_guard.hpp)
+add_executable(test_nettai_guard
+    tests/test_nettai_guard.cpp
+)
+target_include_directories(test_nettai_guard PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+)
+if(MSVC)
+    target_compile_options(test_nettai_guard PRIVATE /O2 /W3 /utf-8)
+else()
+    target_compile_options(test_nettai_guard PRIVATE -O2 -Wall -Wextra)
+endif()
+if(WIN32)
+    target_link_libraries(test_nettai_guard PRIVATE advapi32)
 endif()
 
 # Helper macro to register a static recompilation target if its user-supplied JAR is present

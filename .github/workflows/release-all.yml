@@ -55,8 +55,9 @@ jobs:
       - name: Run contract checks & build
         run: |
           python3 tools/gate.py --check-only
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DRMEXE_BUILD_COLLECTION=ON
           cmake --build build -j$(nproc)
+          ./build/test_nettai_guard
       - name: Run quick PvP self-tests (when ROMs present)
         run: |
           if [ -x build/pon_jp_recomp ] || [ -x build/lon_jp_recomp ]; then
@@ -66,7 +67,7 @@ jobs:
         run: |
           mkdir -p dist/rmexe-linux-x64/assets
           cp build/rmexe_server dist/rmexe-linux-x64/
-          for bin in pon_jp_recomp pon_en_recomp lon_jp_recomp lon_en_recomp; do
+          for bin in rmexe_collection pon_jp_recomp pon_en_recomp lon_jp_recomp lon_en_recomp; do
             [ -x "build/$bin" ] && cp "build/$bin" dist/rmexe-linux-x64/
           done
           cp -r assets/fonts assets/translations dist/rmexe-linux-x64/assets/ 2>/dev/null || true
@@ -115,15 +116,19 @@ jobs:
           $sdlDir = (Resolve-Path "third_party/SDL2-${{ env.SDL2_VERSION }}").Path
           $zlibDir = (Resolve-Path "third_party/zlib-1.3.1").Path
           cmake -B build -A x64 `
+            -DRMEXE_BUILD_COLLECTION=ON `
             -DSDL2_INCLUDE_DIR="$sdlDir/include" `
             -DSDL2_LIBRARY="$sdlDir/lib/x64/SDL2.lib" `
             -DZLIB_SOURCE_DIR="$zlibDir"
           cmake --build build --config Release --parallel
+          ./build/Release/test_nettai_guard.exe
       - name: Package Windows artifact (no copyrighted .jar/.sp)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/rmexe-win64/assets | Out-Null
-          Copy-Item build/Release/*.exe dist/rmexe-win64/
+          foreach ($bin in @("rmexe_server.exe", "rmexe_collection.exe", "pon_jp_recomp.exe", "pon_en_recomp.exe", "lon_jp_recomp.exe", "lon_en_recomp.exe")) {
+            if (Test-Path "build/Release/$bin") { Copy-Item "build/Release/$bin" dist/rmexe-win64/ }
+          }
           Copy-Item "third_party/SDL2-${{ env.SDL2_VERSION }}/lib/x64/SDL2.dll" dist/rmexe-win64/
           if (Test-Path assets/fonts) { Copy-Item -Recurse assets/fonts dist/rmexe-win64/assets/ }
           if (Test-Path assets/translations) { Copy-Item -Recurse assets/translations dist/rmexe-win64/assets/ }
@@ -161,13 +166,14 @@ jobs:
           fi
       - name: Build macOS arm64
         run: |
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DRMEXE_BUILD_COLLECTION=ON
           cmake --build build -j$(sysctl -n hw.ncpu)
+          ./build/test_nettai_guard
       - name: Package macOS artifact (no copyrighted .jar/.sp)
         run: |
           mkdir -p dist/rmexe-macos-arm64/assets
           cp build/rmexe_server dist/rmexe-macos-arm64/
-          for bin in pon_jp_recomp pon_en_recomp lon_jp_recomp lon_en_recomp; do
+          for bin in rmexe_collection pon_jp_recomp pon_en_recomp lon_jp_recomp lon_en_recomp; do
             [ -x "build/$bin" ] && cp "build/$bin" dist/rmexe-macos-arm64/
           done
           cp -r assets/fonts assets/translations dist/rmexe-macos-arm64/assets/ 2>/dev/null || true
@@ -274,3 +280,42 @@ jobs:
         with:
           name: rmexe-ios-arm64-ipa
           path: dist/rmexe-collection-ios-altstore.ipa
+
+  # =========================================================================
+  # 6. Publish GitHub Release automatically on `v*` tag pushes
+  # =========================================================================
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux, build-windows, build-macos, build-android, build-ios]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Generate SHA256SUMS
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          ls -lh
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          PRERELEASE_FLAG=""
+          if [[ "$TAG" == *-* ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* \
+              --title "rmexe-mobile-recomp $TAG" \
+              --generate-notes \
+              $PRERELEASE_FLAG
+          fi

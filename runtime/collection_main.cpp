@@ -13,6 +13,7 @@
 
 #include "doja_runtime.hpp"
 #include "net_config.hpp"
+#include "nettai_guard.hpp"
 
 #if __has_include(<SDL2/SDL.h>)
 #include <SDL2/SDL.h>
@@ -512,6 +513,11 @@ bool run_collection_launcher(const std::vector<CollectionTitle>& titles,
 } // namespace rmexe
 
 int main(int argc, char** argv) {
+#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
+    rmexe::guard::enforce_or_exit([](const std::string& title, const std::string& msg) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title.c_str(), msg.c_str(), nullptr);
+    });
+#endif
     SDL_Log("RMEXE SDL_main starting...");
     std::string req_game;
     std::string data_dir;

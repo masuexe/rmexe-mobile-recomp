@@ -1,5 +1,13 @@
+#define SDL_MAIN_HANDLED
 #include "doja_runtime.hpp"
 #include "net_config.hpp"
+#include "nettai_guard.hpp"
+
+#if __has_include(<SDL2/SDL.h>)
+#include <SDL2/SDL.h>
+#else
+#include <SDL.h>
+#endif
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -38,6 +46,9 @@ int main(int argc, char** argv) {
         freopen_s(&fp, "CONOUT$", "w", stderr);
     }
 #endif
+    rmexe::guard::enforce_or_exit([](const std::string& title, const std::string& msg) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title.c_str(), msg.c_str(), nullptr);
+    });
     std::string jar_path = DEFAULT_JAR_PATH;
     std::string sp_path = DEFAULT_SP_PATH;
     std::string dump_ppm_path;

@@ -1,4 +1,5 @@
 #include "../common/capcom_protocol.hpp"
+#include "../common/nettai_guard.hpp"
 #include "../common/pvp_protocol.hpp"
 
 #include <csignal>
@@ -97,6 +98,7 @@ bool try_parse_http_request(
 } // namespace
 
 int main(int argc, char** argv) {
+    rmexe::guard::enforce_or_exit();
     std::string bind_ip = "0.0.0.0";
     uint16_t port = 8765;
     std::string data_dir = "server_data";
