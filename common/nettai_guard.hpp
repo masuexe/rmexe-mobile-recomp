@@ -10,10 +10,12 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <set>
 #include <sstream>
 #include <string>
